@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+# Tests scripts/hooks/forbidden-commands.check through scripts/hooks/before-tool.
+set -euo pipefail
+# shellcheck source=scripts/hooks/testing.bash
+source "${BASH_SOURCE[0]%/*}/testing.bash"
+
+# The agent works in the repository project, next to the repository other, in a temporary folder.
+# git looks for no repository above that folder, and reads none of the person's settings.
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+export GIT_CEILING_DIRECTORIES=$base GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+test_cwd=$base/project
+other=$base/other
+git init --quiet "$test_cwd"
+git init --quiet "$other"
+# Cursor sends no folder, so its hook runs in the test's own folder.
+cd "$test_cwd"
+
+# A stand-in for gh, first on the PATH, so that the cases ask nothing of GitHub. It records each call in TEST_GH_CALLS.
+# - gh --version reports the version in TEST_GH_VERSION, or fails if that says fail.
+# - gh pr view about pull request 7, or the current branch's, reports the author in TEST_AUTHOR: dependabot, person
+#   or fail.
+# - gh issue view about issue 12 reports the labels in TEST_LABELS, separated by spaces, or fails if that says fail.
+# It fails for anything else, as gh does for a pull request or an issue that doesn't exist.
+stand_in=$base/bin
+mkdir -p "$stand_in"
+cat >"$stand_in/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TEST_GH_CALLS"
+if [[ $1 == --version && $TEST_GH_VERSION != fail ]]; then
+  echo "gh version $TEST_GH_VERSION (2026-08-20)"
+  echo "https://github.com/cli/cli/releases/tag/v$TEST_GH_VERSION"
+elif [[ $1 == pr && $2 == view && ($3 == -* || $3 == 7) ]]; then
+  case $TEST_AUTHOR in
+    dependabot) echo '{"author": {"is_bot": true, "login": "app/dependabot"}}' ;;
+    person) echo '{"author": {"is_bot": false, "login": "jtmpl", "name": "Jacob Templeton"}}' ;;
+    *) exit 1 ;;
+  esac
+elif [[ $1 == issue && $2 == view && $3 == 12 && $TEST_LABELS != fail ]]; then
+  jq -n --arg names "$TEST_LABELS" '{labels: [$names | splits(" ") | select(. != "") | {name: .}]}'
+else
+  exit 1
+fi
+STAND_IN
+chmod +x "$stand_in/gh"
+PATH=$stand_in:$PATH
+export TEST_GH_CALLS=$base/gh-calls TEST_GH_VERSION TEST_AUTHOR TEST_LABELS
+
+# Checks that the hook asks gh about the pull request or the issue of a command: expect_gh_call <command> <arguments of the call>
+expect_gh_call() {
+  : >"$TEST_GH_CALLS"
+  run_hook "$(sample_input claude-code Bash "$1")"
+  case_count=$((case_count + 1))
+  if ! grep -qxF -e "$2" "$TEST_GH_CALLS"; then
+    echo "error: for $1, the hook must call gh $2, but it called: $(tr '\n' ';' <"$TEST_GH_CALLS")" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Every gh command while gh is older than the rules need
+TEST_GH_VERSION=2.97.0 TEST_AUTHOR=person TEST_LABELS=feature
+old_gh="Blocked: the rules in AGENTS.md need gh 2.98 or later, and this machine has gh 2.97.0. Tell the maintainer, and that https://github.com/cli/cli#installation says how to update it."
+expect_block Bash 'gh pr list' "$old_gh"
+expect_block Bash 'gh --version' "$old_gh"
+expect_block Bash 'git status && /usr/local/bin/gh issue view 12' "$old_gh"
+expect_allow Bash 'git status'
+TEST_GH_VERSION=1.99.0
+expect_block Bash 'gh pr list' "${old_gh/2.97.0/1.99.0}"
+for TEST_GH_VERSION in 2.98.0 2.102.0 3.0.0 "that can't be read" fail; do
+  expect_allow Bash 'gh pr list'
+done
+TEST_GH_VERSION=2.98.0
+
+# Approving a workflow run
+approval="Blocked: a maintainer decides whether to approve a workflow run, because the run executes the code of a pull request from outside the project. Go on with the other work, and list the run in your report for the maintainer."
+expect_block Bash 'gh api -X POST repos/{owner}/{repo}/actions/runs/123/approve' "$approval"
+expect_block Bash 'gh api --method=POST /repos/jtmpl/project/actions/runs/123/approve' "$approval"
+expect_block Bash 'gh api repos/jtmpl/project/actions/runs/123/approve --method POST --silent' "$approval"
+expect_block Bash 'gh api -H "Accept: application/vnd.github+json" -X POST repos/jtmpl/project/actions/runs/123/approve' "$approval"
+expect_allow Bash 'gh api repos/{owner}/{repo}/actions/runs/123'
+expect_allow Bash 'gh api -X POST repos/{owner}/{repo}/actions/runs/123/rerun'
+
+# Closing one of Dependabot's pull requests
+TEST_AUTHOR=dependabot
+from_dependabot="is one of Dependabot's, and a maintainer decides what happens to it. Leave it open, and list it in your report for the maintainer."
+expect_block Bash 'gh pr close 7' "Blocked: pull request 7 $from_dependabot"
+expect_block Bash 'gh pr close --comment "Superseded by #8" 7' "Blocked: pull request 7 $from_dependabot"
+expect_block Bash 'gh pr close 7 --delete-branch' "Blocked: pull request 7 $from_dependabot"
+expect_block Bash 'gh pr close' "Blocked: this branch's pull request $from_dependabot"
+expect_block Bash 'gh pr close -R jtmpl/other 7' "Blocked: pull request 7 $from_dependabot"
+expect_gh_call 'gh pr close -R jtmpl/other 7' "pr view 7 --repo jtmpl/other --json author"
+expect_repository_flags 2 "Blocked: pull request 7 $from_dependabot" pr close '7'
+for repository in '-R jtmpl/other' '--repo jtmpl/other' '--repo=jtmpl/other'; do
+  expect_gh_call "gh pr $repository close 7" "pr view 7 --repo jtmpl/other --json author"
+  expect_gh_call "gh pr close $repository 7" "pr view 7 --repo jtmpl/other --json author"
+done
+expect_allow Bash 'gh pr view 7'
+expect_allow Bash 'gh pr comment 7 --body "@dependabot rebase"'
+for TEST_AUTHOR in person fail; do
+  expect_allow Bash 'gh pr close 7'
+  expect_allow Bash 'gh pr close'
+done
+
+# Pushing to a dependabot/ branch
+dependabot_branch=dependabot/npm_and_yarn/lodash-4.17.21
+to_dependabot="Blocked: $dependabot_branch is the branch of one of Dependabot's pull requests, and a maintainer decides what happens to those. Leave the branch as it is, and list the pull request in your report for the maintainer."
+git symbolic-ref HEAD refs/heads/383-block-commands
+git -C "$other" symbolic-ref HEAD refs/heads/main
+pushes_to_dependabot=(
+  "git push origin $dependabot_branch"
+  "git push origin HEAD:$dependabot_branch"
+  "git push --force origin +HEAD:refs/heads/$dependabot_branch"
+  "git push origin --delete $dependabot_branch"
+  "git push origin :$dependabot_branch"
+  "git push origin main $dependabot_branch"
+  "git -C ../other push origin $dependabot_branch"
+)
+for command in "${pushes_to_dependabot[@]}"; do
+  expect_block Bash "$command" "$to_dependabot"
+done
+for command in 'git push' 'git push origin' 'git push -u origin HEAD' 'git push origin 383-block-commands' \
+  'git push origin dependabot-notes' 'git -C ../other push'; do
+  expect_allow Bash "$command"
+done
+# Without a refspec, or with HEAD, git pushes the current branch.
+git symbolic-ref HEAD "refs/heads/$dependabot_branch"
+for command in 'git push' 'git push origin' 'git push -u origin HEAD' 'git push -o ci.skip origin' 'git push --force-with-lease origin'; do
+  expect_block Bash "$command" "$to_dependabot"
+done
+expect_allow Bash 'git push origin main'
+expect_allow Bash 'git -C ../other push'
+expect_allow Bash 'git status'
+git symbolic-ref HEAD refs/heads/383-block-commands
+git -C "$other" symbolic-ref HEAD "refs/heads/$dependabot_branch"
+expect_block Bash 'git -C ../other push' "$to_dependabot"
+expect_allow Bash 'git push'
+
+# Deleting a pull request's branch with gh pr close
+TEST_AUTHOR=person
+delete_branch="Blocked: gh pr close with --delete-branch or -d deletes the pull request's branch, and the next agent that works on its issue starts from that branch. Close the pull request without that flag."
+for command in 'gh pr close 7 --delete-branch' 'gh pr close -d 7' 'gh pr close 7 --delete-branch=true' 'gh pr close --comment "Giving it back" -d'; do
+  expect_block Bash "$command" "$delete_branch"
+done
+for command in 'gh pr close 7' 'gh pr close 7 --comment "Giving it back"' 'gh pr close 7 --delete-branch=false'; do
+  expect_allow Bash "$command"
+done
+
+expect_repository_flags 2 "$delete_branch" pr close '7 --delete-branch'
+expect_repository_flags 0 "" pr close '7 --delete-branch=false'
+
+# gh issue develop on an issue with needs-triage
+TEST_LABELS="feature needs-triage"
+needs_triage="Blocked: issue 12 has needs-triage, so no maintainer has accepted it yet. If a maintainer asked you to work on it, remove the label with gh issue edit 12 --remove-label needs-triage, and run the command again. Otherwise, leave the issue for the maintainer to triage."
+expect_block Bash 'gh issue develop 12 --checkout' "$needs_triage"
+expect_block Bash 'gh issue develop --list 12' "$needs_triage"
+expect_block Bash 'gh issue develop --name fix-12 --base main 12' "$needs_triage"
+expect_block Bash 'gh issue develop 12 -R jtmpl/other' "${needs_triage/edit 12/edit 12 --repo jtmpl/other}"
+expect_gh_call 'gh issue develop 12 -R jtmpl/other' "issue view 12 --repo jtmpl/other --json labels"
+expect_repository_flags 2 "${needs_triage/edit 12/edit 12 --repo jtmpl/other}" issue develop '12 --checkout'
+for repository in '-R jtmpl/other' '--repo jtmpl/other' '--repo=jtmpl/other'; do
+  expect_gh_call "gh issue $repository develop 12" "issue view 12 --repo jtmpl/other --json labels"
+  expect_gh_call "gh issue develop $repository 12" "issue view 12 --repo jtmpl/other --json labels"
+done
+expect_allow Bash 'gh issue view 12'
+expect_allow Bash 'gh issue edit 12 --remove-label needs-triage'
+expect_allow Bash 'gh issue develop'
+for TEST_LABELS in "feature ready" "" fail; do
+  expect_allow Bash 'gh issue develop 12 --checkout'
+  expect_allow Bash 'gh issue develop --list 12'
+done
+
+# The commands that print the token that gh uses
+prints_token="Blocked: this command prints the token that gh uses, and AGENTS.md says never to read or print secrets. gh commands use the token without it."
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so $( ) stays as written.
+prints_token_commands=(
+  'gh auth token'
+  'gh auth token -h github.com'
+  'gh auth token --user other'
+  'gh auth status -t'
+  'gh auth status --show-token'
+  'gh auth status --show-token=true'
+  'gh auth status -at'
+  'gh auth git-credential get'
+  'git credential fill'
+  'git -C ../other credential fill'
+  'export GH_TOKEN=$(gh auth token)'
+)
+for command in "${prints_token_commands[@]}"; do
+  expect_block Bash "$command" "$prints_token"
+done
+for command in 'gh auth token --help' 'gh auth status' 'gh auth status --active' 'gh auth status --show-token=false' \
+  'git credential approve' 'git commit -m "Block gh auth token"'; do
+  expect_allow Bash "$command"
+done
+expect_allow Bash "git commit --file - <<'EOF'
+feat: block the commands that print the token
+
+gh auth token
+EOF"
+
+# Substitutions run inside quoted words and expandable here-documents, but quoted delimiters keep them literal.
+# shellcheck disable=SC2016 # Inspect shell text without expanding it in the test.
+substitution_commands=(
+  'export GH_TOKEN="$(gh auth token)"'
+  'echo `gh auth token`'
+  'echo "`gh auth token`"'
+  'echo "$(printf ok)$(gh auth token)"'
+  'echo "$(printf "%s" ")"; gh auth token)"'
+  'echo "$(printf "%s" "$(gh auth token)")"'
+  'echo "`printf "%s" \`gh auth token\``"'
+  $'cat <<EOF\n$(gh auth token)\nEOF'
+  $'cat <<EOF\n`gh auth token`\nEOF'
+  $'cat <<EOF\n\'$(gh auth token)\'\nEOF'
+  $'cat <<-EOF\n\t$(gh auth token)\n\tEOF'
+  $'cat <<\'FIRST\' <<SECOND\n$(printf ok)\nFIRST\n$(gh auth token)\nSECOND'
+  $'cat <<E"OF"\n$(printf ok)\nEOF\ngh auth token'
+)
+for command in "${substitution_commands[@]}"; do
+  expect_block Bash "$command" "$prints_token"
+done
+# shellcheck disable=SC2016
+literal_commands=(
+  "echo '\$(gh auth token)'"
+  'echo "\$(gh auth token)"'
+  'echo "\`gh auth token\`"'
+  'echo "$(printf ok)"'
+  'git commit -m "Stop running gh auth token"'
+  $'cat <<EOF\ngh auth token\nEOF'
+  $'cat <<\'EOF\'\n$(gh auth token)\nEOF'
+  $'cat <<"EOF"\n`gh auth token`\nEOF'
+  $'cat <<E"OF"\n$(gh auth token)\nEOF'
+  $'cat <<\\EOF\n$(gh auth token)\nEOF'
+  $'cat <<FIRST <<\'SECOND\'\n$(printf ok)\nFIRST\n$(gh auth token)\nSECOND'
+  '' 'echo ""' 'echo "$()"' $'cat <<EOF\nEOF'
+)
+for command in "${literal_commands[@]}"; do
+  expect_allow Bash "$command"
+done
+
+# Inspecting a substitution must not run it.
+expect_allow Bash "echo \"\$(touch '$base/substitution-ran')\""
+case_count=$((case_count + 1))
+if [[ -e $base/substitution-ran ]]; then
+  echo "error: inspecting a substitution ran the command inside it." >&2
+  failed_cases=$((failed_cases + 1))
+fi
+
+# A broken hook would be allowed by before-tool, so check incomplete input directly as well.
+# shellcheck disable=SC2016
+for command in 'echo "$(' 'echo "$(printf ok' 'echo "`printf ok' $'cat <<EOF\n$(printf ok'; do
+  input=$(sample_input claude-code Bash "$command")
+  for check in forbidden-commands secret-files; do
+    status=0
+    message=$(run_check "$check" "$input" 2>&1) || status=$?
+    case_count=$((case_count + 1))
+    if [[ $status != 0 && $status != 2 ]] || [[ $status == 0 && -n $message ]]; then
+      echo "error: $check crashed while inspecting an incomplete substitution or here-document: $message" >&2
+      failed_cases=$((failed_cases + 1))
+    fi
+  done
+done
+
+# Incomplete commands start no subcommand check, and each check itself exits cleanly.
+for command in '' 'gh' 'gh pr' 'gh pr --repo' 'gh pr --repo create' 'gh pr -R create' 'gh pr --repo=jtmpl/other'; do
+  expect_allow Bash "$command"
+  for check in forbidden-commands maintainer-commands issues-and-labels posted-text pull-request-rules unchecked-pull-requests; do
+    hook_status=0
+    hook_message=$(run_check "$check" "$(sample_input claude-code Bash "$command")" 2>&1 >/dev/null) || hook_status=$?
+    expect_result "$check for incomplete command $command" 0 ""
+  done
+done
+
+finish_tests

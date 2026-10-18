@@ -1,0 +1,85 @@
+# Test-only project workflow. It archives a tiny source tree instead of installing a build system.
+name: Draft assets fixture
+run-name: Draft assets ${{ inputs.draft_tag }} from ${{ inputs.build_sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      build_sha:
+        description: Full SHA checked for release
+        required: true
+        type: string
+      draft_tag:
+        description: Version tag of the intended draft
+        required: true
+        type: string
+permissions:
+  contents: read
+env:
+  BUILD_SHA: ${{ inputs.build_sha }}
+  DRAFT_TAG: ${{ inputs.draft_tag }}
+  SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}.git
+  GH_REPO: ${{ github.repository }}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Build
+        shell: bash
+        run: |
+          if [[ ! $BUILD_SHA =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'error: build_sha must be the full checked commit SHA.' >&2
+            exit 1
+          fi
+          if [[ -z $DRAFT_TAG || $DRAFT_TAG == -* ]] || ! git check-ref-format "refs/tags/$DRAFT_TAG"; then
+            echo 'error: draft_tag must be a version tag. Supply the intended draft tag.' >&2
+            exit 1
+          fi
+          git init --quiet source
+          git -C source fetch --quiet --depth=1 "$SOURCE_URL" "$BUILD_SHA"
+          git -C source checkout --quiet --detach FETCH_HEAD
+          git -C source archive --format=tar HEAD > release.tar
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: draft-assets
+          path: release.tar
+          if-no-files-found: error
+  upload:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ github.run_id }}
+    steps:
+      - name: Download this run's files
+        run: gh run download "$RUN_ID" --name draft-assets
+      - name: Upload
+        shell: bash
+        run: |
+          status=0
+          tags=$(git ls-remote --exit-code "$SOURCE_URL" "refs/tags/$DRAFT_TAG" "refs/tags/$DRAFT_TAG^{}") || status=$?
+          if [[ $status != 0 && $status != 2 ]]; then
+            echo 'error: could not check the release tag. Retry once Git is reachable.' >&2
+            exit 1
+          fi
+          # An annotated tag names a tag object first and its commit on the peeled line.
+          tag_sha=$(awk 'NR == 1 { sha = $1 } /\^\{\}$/ { sha = $1 } END { print sha }' <<< "$tags")
+          release=$(gh release view "$DRAFT_TAG" --json isDraft,tagName,targetCommitish)
+          if ! jq -e --arg tag "$DRAFT_TAG" '.isDraft == true and .tagName == $tag' <<< "$release" >/dev/null; then
+            echo 'error: the intended release is not a draft. Choose its draft before uploading.' >&2
+            exit 1
+          fi
+          if [[ -n $tag_sha ]]; then
+            release_sha=$tag_sha
+          else
+            release_sha=$(jq -r .targetCommitish <<< "$release")
+          fi
+          if [[ $release_sha != "$BUILD_SHA" ]]; then
+            echo 'error: the draft does not represent build_sha. Check its tag or target commit.' >&2
+            exit 1
+          fi
+          gh release upload "$DRAFT_TAG" release.tar

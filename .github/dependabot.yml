@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # Give every package manager you add the cooldown, groups, commit-message and labels settings below.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Waiting a week before taking a new version gives time for a bad or compromised release to be found and pulled.
+    cooldown:
+      default-days: 7
+    # Patch and minor updates share one pull request. Each major update gets its own,
+    # so that a major update that fails its checks doesn't hold back the patch and minor updates.
+    groups:
+      github-actions:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    commit-message:
+      prefix: build
+      include: scope
+    # Without this, Dependabot adds a label for each package manager once there's more than one.
+    labels: [dependencies]

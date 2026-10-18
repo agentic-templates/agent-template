@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Claude Code runs this hook after each Bash action, because .claude/settings.json lists it. After gh pr create,
+# gh pr new or gh pr ready, it turns on auto-merge for the current branch's pull request, which is the maintainer's
+# standing request, as "Make a change" in AGENTS.md says. A hook does it, and not the agent, because the Claude
+# desktop app lets an agent turn on auto-merge only when the person's own message asks for it.
+# It leaves a draft, a pull request from a fork and one with auto-merge on as they are, and turns nothing on while the
+# rules for main lack a check that scripts/configure-github requires. It tells the agent what it did. When it can't
+# tell what to do, such as when gh fails, it does nothing and says nothing.
+
+input=$(cat)
+command=$(jq -r 'select(.tool_name == "Bash") | .tool_input.command // empty' 2>/dev/null <<<"$input") || exit 0
+if [[ ! $command =~ gh[[:space:]]+pr[[:space:]]+(create|new|ready) ]]; then
+  exit 0
+fi
+cwd=$(jq -r '.cwd // empty' <<<"$input")
+cd -- "${cwd:-.}" 2>/dev/null || exit 0
+
+# Tells the agent something, in the form that Claude Code adds to its context: tell <message>
+tell() {
+  jq -n --arg message "$1" '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $message}}'
+}
+
+answer=$(gh pr view --json number,state,isDraft,isCrossRepository,autoMergeRequest 2>/dev/null) || exit 0
+number=$(jq -r 'select(.state == "OPEN" and (.isDraft | not) and (.isCrossRepository | not) and .autoMergeRequest == null)
+  | .number' <<<"$answer") || exit 0
+if [[ -z $number ]]; then
+  exit 0
+fi
+
+# scripts/check-main-rules exits with code 1 when main lacks a required check, and with 2 when it can't tell.
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+status=0
+problem=$("$root/scripts/check-main-rules" 2>&1) || status=$?
+if ((status == 1)); then
+  tell "Auto-merge stays off for pull request #$number. ${problem#error: } List this in your report for the maintainer."
+  exit 0
+fi
+
+if output=$(gh pr merge "$number" 2>&1 </dev/null); then
+  tell "Turned on auto-merge for pull request #$number, so GitHub merges it once its checks pass. Don't wait for them."
+else
+  tell "Couldn't turn on auto-merge for pull request #$number, because gh failed: $output Run gh pr merge $number."
+fi
+exit 0

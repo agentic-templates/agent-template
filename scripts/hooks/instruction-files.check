@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Blocks the agent's file-writing tool from creating or changing a file that makes a tool skip AGENTS.md.
+# scripts/instruction-file-names lists the names, and scripts/check fails on the same ones.
+# shellcheck source=scripts/hooks/helpers.bash
+source "${BASH_SOURCE[0]%/*}/helpers.bash"
+# shellcheck source=scripts/instruction-file-names
+source "${BASH_SOURCE[0]%/*}/../instruction-file-names"
+
+repository_root=$(CDPATH='' cd -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P)
+
+# Prints a path with symlinks and .. resolved in its folders, also when the file or its folders don't exist yet,
+# so that two ways to write one path, such as /tmp and /private/tmp on macOS, give the same result.
+# A relative path is taken from the folder the agent works in: physical_path <path>
+physical_path() {
+  local path=$1 folder rest="" part
+  local -a parts=()
+  if [[ $path != /* ]]; then
+    path=${cwd:-$PWD}/$path
+  fi
+  # The deepest folder that exists can hold symlinks. The parts after it can't, so they're resolved as text.
+  folder=$path
+  while [[ -n $folder && ! -d $folder ]]; do
+    rest=/${folder##*/}$rest
+    folder=${folder%/*}
+  done
+  folder=$(CDPATH='' cd -- "${folder:-/}" && pwd -P)
+  IFS=/ read -r -a parts <<<"$rest"
+  if ((${#parts[@]} > 0)); then
+    for part in "${parts[@]}"; do
+      case $part in
+        "" | .) ;;
+        ..)
+          folder=${folder%/*}
+          folder=${folder:-/}
+          ;;
+        *) folder=${folder%/}/$part ;;
+      esac
+    done
+  fi
+  echo "$folder"
+}
+
+block_if_instruction_file() {
+  local path relative
+  path=$(physical_path "$1")
+  if [[ $path != "$repository_root"/* ]]; then
+    return 0
+  fi
+  relative=${path#"$repository_root"/}
+  shopt -s nocasematch
+  if [[ $relative =~ $instruction_file ]]; then
+    block "Blocked: $relative makes a tool skip AGENTS.md. Put its rules into AGENTS.md or a guide in docs/ instead."
+  fi
+  shopt -u nocasematch
+}
+
+read_input
+case $tool_name in
+  Write | Edit)
+    block_if_instruction_file "$file_path"
+    ;;
+  apply_patch)
+    # A patch names each file on a line of its own. Deleting a file goes ahead, because that's the fix.
+    while IFS= read -r line; do
+      case $line in
+        "*** Add File: "*) block_if_instruction_file "${line#"*** Add File: "}" ;;
+        "*** Update File: "*) block_if_instruction_file "${line#"*** Update File: "}" ;;
+        "*** Move to: "*) block_if_instruction_file "${line#"*** Move to: "}" ;;
+      esac
+    done <<<"$patch"
+    ;;
+esac

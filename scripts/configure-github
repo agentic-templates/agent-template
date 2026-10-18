@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# Applies this repository's settings on GitHub. GitHub doesn't copy settings
+# from a template, so run this once after you create a repository from it.
+# Running it again is safe. It resets every setting below, and deletes any label it doesn't list.
+set -euo pipefail
+# shellcheck source=scripts/admin-access
+source "$(dirname "$0")/admin-access"
+
+repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+permission=$(gh repo view --json viewerPermission --jq .viewerPermission)
+require_admin "$permission" "$repo" "changing the settings"
+visibility=$(gh repo view --json visibility --jq '.visibility | ascii_downcase')
+if [[ "$visibility" != "public" ]]; then
+  echo "error: $repo is $visibility, and the template supports only public repositories. Make the repository public, and run this script again." >&2
+  exit 1
+fi
+if [[ "$(gh api "repos/$repo" --jq .owner.type)" != "Organization" ]]; then
+  echo "error: $repo belongs to the personal account ${repo%%/*}, and only an organization's repositories can use GitHub's merge queue, which the template merges through. Transfer the repository to an organization in its settings at https://github.com/$repo/settings, and run this script again." >&2
+  exit 1
+fi
+
+echo "Merging: squash only, with the pull request title as the commit subject, auto-merge allowed, and the branch deleted after the merge"
+gh api --method PATCH "repos/$repo" --silent \
+  -F allow_squash_merge=true \
+  -F allow_merge_commit=false \
+  -F allow_rebase_merge=false \
+  -f squash_merge_commit_title=PR_TITLE \
+  -f squash_merge_commit_message=BLANK \
+  -F delete_branch_on_merge=true \
+  -F allow_auto_merge=true
+
+echo "Wiki: off, because the docs live in the repository and change through pull requests"
+gh api --method PATCH "repos/$repo" --silent -F has_wiki=false
+
+echo "Security: Dependabot alerts and fixes"
+gh api --method PUT "repos/$repo/vulnerability-alerts" --silent
+gh api --method PUT "repos/$repo/automated-security-fixes" --silent
+
+echo "Security: private vulnerability reports, secret scanning and code scanning"
+gh api --method PUT "repos/$repo/private-vulnerability-reporting" --silent
+gh api --method PATCH "repos/$repo" --silent --input - <<'JSON'
+{
+  "security_and_analysis": {
+    "secret_scanning": {"status": "enabled"},
+    "secret_scanning_push_protection": {"status": "enabled"}
+  }
+}
+JSON
+if [[ "$(gh api "repos/$repo/code-scanning/default-setup" --jq .state)" != "configured" ]]; then
+  gh api --method PATCH "repos/$repo/code-scanning/default-setup" --silent -f state=configured
+fi
+
+echo "Labels: the set that AGENTS.md describes"
+labels=$(gh label list --repo "$repo" --limit 200 --json name --jq '.[].name')
+# Renaming keeps the label on every issue that already has it.
+# To rename a label in the list below, add a rename here too.
+if grep -qxF enhancement <<<"$labels" && ! grep -qxF feature <<<"$labels"; then
+  gh label edit enhancement --repo "$repo" --name feature >/dev/null
+fi
+# --force updates the color and description of a label that already exists.
+wanted=""
+while IFS='|' read -r name color description; do
+  gh label create "$name" --repo "$repo" --force --color "$color" --description "$description" >/dev/null
+  wanted+="$name"$'\n'
+done <<'LABELS'
+bug|d73a4a|Something is broken, such as a crash, a wrong result or docs that don't match the product
+feature|a2eeef|A change to what users can do or read, other than a fix
+maintenance|c5def5|Work that leaves what users can do and read unchanged, such as speed-ups, refactoring, tests or CI
+research|d4c5f9|Something to find out before building, such as whether a library works. Ends in a comment
+needs-triage|fbca04|No maintainer has accepted or rejected this yet
+needs-breakdown|f9d0c4|Accepted, but too big for one pull request. Split it before building
+needs-decision|d876e3|Waiting for a maintainer to answer a question or make a decision
+ready|0e8a16|A maintainer wants it built, and it meets the definition of ready. Build runs take only these
+dependencies|0366d6|Dependabot's version updates
+LABELS
+# Delete every other label, such as the defaults that GitHub gives every new repository.
+current=$(gh label list --repo "$repo" --limit 200 --json name --jq '.[].name')
+while IFS= read -r name; do
+  if ! grep -qxF "$name" <<<"$wanted"; then
+    gh label delete "$name" --repo "$repo" --yes >/dev/null
+  fi
+done <<<"$current"
+
+echo "Releases: a published release can't be changed"
+gh api --method PUT "repos/$repo/immutable-releases" --silent
+
+# A job that publishes a package or deploys the project runs in this environment, as docs/releasing.md describes.
+# Its secrets reach only jobs that a release tag starts. An agent publishes releases under the maintainer's
+# account, so "Prevent self-reviews" stays off, or the maintainer couldn't approve the run.
+echo "Release environment: only release tags can use it, and each run waits for approval"
+# Keep the reviewers that are already there, and add whoever runs this script. GitHub allows 6.
+me=$(gh api user --jq .id)
+reviewers=$(gh api "repos/$repo/environments?per_page=100" --jq "[.environments[] | select(.name == \"release\")
+  | .protection_rules[] | select(.type == \"required_reviewers\") | .reviewers[] | {type, id: .reviewer.id}]
+  | if any(.[]; .type == \"User\" and .id == $me) or length >= 6 then . else . + [{type: \"User\", id: $me}] end")
+gh api --method PUT "repos/$repo/environments/release" --silent --input - <<JSON
+{
+  "prevent_self_review": false,
+  "reviewers": $reviewers,
+  "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}
+}
+JSON
+if [[ -z "$(gh api "repos/$repo/environments/release/deployment-branch-policies" \
+  --jq '.branch_policies[] | select(.name == "v*" and .type == "tag") | .id')" ]]; then
+  gh api --method POST "repos/$repo/environments/release/deployment-branch-policies" --silent \
+    -f name='v*' -f type=tag
+fi
+
+echo "Actions: read-only token, every action pinned to a commit SHA"
+gh api --method PUT "repos/$repo/actions/permissions/workflow" --silent \
+  -f default_workflow_permissions=read \
+  -F can_approve_pull_request_reviews=false
+gh api --method PUT "repos/$repo/actions/permissions" --silent \
+  -F enabled=true \
+  -f allowed_actions=all \
+  -F sha_pinning_required=true
+
+echo "Main: every change arrives through a pull request that passes CI and code scanning, and merges through the merge queue"
+# A pull request records each change, and CI and code scanning decide whether it merges, so no approval is required.
+# GitHub requires an extra approval for pull requests that an app opens, such as Dependabot's,
+# unless require_extra_approval_for_unattributed_changes is false.
+# The required checks are job names in .github/workflows. 15368 is the ID of GitHub Actions,
+# so only a workflow can report them. Agents build several issues at once, and two changes that pass alone can
+# break main together. So the merge queue runs the checks again on each pull request together with the latest main
+# and the pull requests ahead of it, and a branch doesn't need the latest main before it joins the queue.
+# Nobody reviews the merge, so CodeQL is the only reviewer that looks for security problems. It stops a merge
+# on a security alert of high or critical severity, or an alert at error level, in the pull request's changes.
+ruleset=$(cat <<'JSON'
+{
+  "name": "main",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+  "rules": [
+    {"type": "deletion"},
+    {"type": "non_fast_forward"},
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 0,
+        "dismiss_stale_reviews_on_push": false,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": false,
+        "require_extra_approval_for_unattributed_changes": false,
+        "allowed_merge_methods": ["squash"]
+      }
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": false,
+        "required_status_checks": [
+          {"context": "check", "integration_id": 15368},
+          {"context": "title", "integration_id": 15368}
+        ]
+      }
+    },
+    {
+      "type": "code_scanning",
+      "parameters": {
+        "code_scanning_tools": [
+          {"tool": "CodeQL", "security_alerts_threshold": "high_or_higher", "alerts_threshold": "errors"}
+        ]
+      }
+    },
+    {
+      "type": "merge_queue",
+      "parameters": {
+        "merge_method": "SQUASH",
+        "grouping_strategy": "ALLGREEN",
+        "max_entries_to_build": 5,
+        "min_entries_to_merge": 1,
+        "max_entries_to_merge": 5,
+        "min_entries_to_merge_wait_minutes": 5,
+        "check_response_timeout_minutes": 60
+      }
+    }
+  ]
+}
+JSON
+)
+ruleset_id=$(gh api "repos/$repo/rulesets?includes_parents=false" --jq '.[] | select(.name == "main") | .id')
+if [[ -n "$ruleset_id" ]]; then
+  gh api --method PUT "repos/$repo/rulesets/$ruleset_id" --silent --input - <<<"$ruleset"
+else
+  gh api --method POST "repos/$repo/rulesets" --silent --input - <<<"$ruleset"
+fi
+
+echo "Turn on Dependabot malware alerts yourself at https://github.com/$repo/settings/security_analysis, because GitHub gives scripts no way to turn them on."
+echo "Done. Review the settings at https://github.com/$repo/settings"

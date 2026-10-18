@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Waits until a pull request that's merging needs an agent: scripts/wait-for-pull-requests
+# Step 6 of "Make a change" in AGENTS.md and step 6 of "Build the ready issues" in docs/building.md run it. It
+# watches the open pull requests into main that have auto-merge on or are in the merge queue, apart from Dependabot's
+# and those from forks. It checks them every 30 seconds, and prints one line as soon as one of these is true:
+# - Nothing to wait for: none of them is open.
+# - Pull request <number> merged or closed: so an issue that it blocked may be able to start now.
+# - Pull request <number> needs a fix: it conflicts with main, a check failed, or it left the merge queue.
+# - Still waiting for <numbers>: 9 minutes passed, which keeps the command within the time limit of an agent's tool.
+# WAIT_SECONDS and WAIT_LIMIT_SECONDS change those times, for its tests. It stops with an error when gh fails.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/open-pull-requests
+source scripts/open-pull-requests
+
+interval=${WAIT_SECONDS:-30}
+limit=${WAIT_LIMIT_SECONDS:-540}
+
+# Prints the number of each pull request to watch, one to a line, from what read_open_pull_requests read.
+watched_pull_requests() {
+  local kind number is_from_fork author is_in_queue merge_state auto_merge_since
+  while IFS=$'\t' read -r kind number is_from_fork author is_in_queue merge_state auto_merge_since; do
+    if [[ $kind == pull-request && $is_from_fork == false ]] && ! is_by_dependabot "$author" &&
+      [[ -n $auto_merge_since || $is_in_queue == true ]]; then
+      printf '%s\n' "$number"
+    fi
+  done <<<"$pull_requests"
+}
+
+# read_open_pull_requests prints its own error.
+read_open_pull_requests || exit 1
+watched=$(watched_pull_requests)
+if [[ -z $watched ]]; then
+  echo "Nothing to wait for."
+  exit 0
+fi
+
+started=$SECONDS
+while true; do
+  sleep "$interval"
+  read_open_pull_requests || exit 1
+  for number in $watched; do
+    pull_request=$(facts pull-request "$number")
+    if [[ -z $pull_request ]]; then
+      echo "Pull request $number merged or closed."
+      exit 0
+    fi
+    IFS=$'\t' read -r _ _ is_in_queue merge_state auto_merge_since <<<"$pull_request"
+    if [[ $merge_state == DIRTY || -n $(failed_checks "$number") || (-z $auto_merge_since && $is_in_queue != true) ]] ||
+      is_out_of_queue "$number" "$is_in_queue" "$auto_merge_since"; then
+      echo "Pull request $number needs a fix."
+      exit 0
+    fi
+  done
+  if ((SECONDS - started >= limit)); then
+    echo "Still waiting for $(paste -sd ' ' - <<<"$watched")."
+    exit 0
+  fi
+done

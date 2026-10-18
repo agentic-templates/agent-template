@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+# Tests scripts/check-ready-label, with a stand-in for gh that answers from files in a temporary folder.
+# scripts/check runs this script.
+set -euo pipefail
+
+script=$(cd "${BASH_SOURCE[0]%/*}" && pwd)/check-ready-label
+test_name=${0#./}
+case_count=0
+failed_cases=0
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+# The folder that holds issue 12: its author, its labels, the permission that GitHub reports for each person,
+# and the comments on it.
+issue=$base/issue
+labels_before=$base/labels-before
+stand_in=$base/bin
+mkdir -p "$stand_in"
+
+# A stand-in for gh, first on the PATH. For each call that scripts/check-ready-label makes, it prints what gh prints
+# after the script's --jq filter, and it fails on any other call. GitHub has no account without a permission file.
+cat >"$stand_in/gh" <<'GH'
+#!/usr/bin/env bash
+set -euo pipefail
+folder=$TEST_ISSUE_FOLDER
+case "$*" in
+  "issue view 12 --json labels --jq "*) cat "$folder/labels" ;;
+  "issue view 12 --json author --jq "*) cat "$folder/author" ;;
+  "api repos/{owner}/{repo}/collaborators/"*"/permission --jq "*)
+    login=${2#"repos/{owner}/{repo}/collaborators/"}
+    login=${login%/permission}
+    if [[ ! -f $folder/permissions/$login ]]; then
+      echo "gh: Not Found (HTTP 404)" >&2
+      exit 1
+    fi
+    cat "$folder/permissions/$login"
+    ;;
+  "repo view --json url --jq "*) echo "https://github.com/owner/project" ;;
+  "issue edit 12 --remove-label ready")
+    sed '/^ready$/d' "$folder/labels" >"$folder/labels.new"
+    mv "$folder/labels.new" "$folder/labels"
+    ;;
+  "issue comment 12 --body "*)
+    count=1
+    while [[ -e $folder/comment-$count ]]; do
+      count=$((count + 1))
+    done
+    printf '%s\n' "$5" >"$folder/comment-$count"
+    ;;
+  *)
+    echo "The stand-in for gh doesn't know this call: gh $*" >&2
+    exit 1
+    ;;
+esac
+GH
+chmod +x "$stand_in/gh"
+
+definition_of_ready=https://github.com/owner/project/blob/main/docs/planning.md#definition-of-ready
+one_type="it must have exactly one of \`bug\`, \`feature\`, \`maintenance\` and \`research\`"
+
+# Starts a case with issue 12, opened by the author, with labels in the order gh lists them: new_issue <author> [<label>...]
+new_issue() {
+  rm -rf "$issue"
+  mkdir -p "$issue/permissions"
+  echo "$1" >"$issue/author"
+  shift
+  : >"$issue/labels"
+  if (($# > 0)); then
+    printf '%s\n' "$@" >"$issue/labels"
+  fi
+  cp "$issue/labels" "$labels_before"
+}
+
+# Sets the permission that GitHub's permission API reports for a person: set_permission <login> <permission>
+set_permission() {
+  echo "$2" >"$issue/permissions/$1"
+}
+
+# Runs the script as the workflow does, after the person with the login added ready: run_script <login>
+run_script() {
+  labeled_by=$1
+  script_status=0
+  script_output=$(PATH="$stand_in:$PATH" TEST_ISSUE_FOLDER="$issue" ISSUE_NUMBER=12 LABELED_BY="$labeled_by" "$script" 2>&1) ||
+    script_status=$?
+}
+
+fail_case() {
+  echo "error: $1" >&2
+  failed_cases=$((failed_cases + 1))
+}
+
+# Prints how many comments the script left.
+comment_count() {
+  local count=0
+  while [[ -e $issue/comment-$((count + 1)) ]]; do
+    count=$((count + 1))
+  done
+  echo "$count"
+}
+
+# Checks that the script exited with code 0, and left the labels as they were without commenting:
+# expect_no_change <description>
+expect_no_change() {
+  local description=$1
+  case_count=$((case_count + 1))
+  if ((script_status != 0)); then
+    fail_case "$description, the script must exit with code 0, but it exited with code $script_status. Its output: $script_output"
+  elif [[ $(<"$issue/labels") != "$(<"$labels_before")" ]]; then
+    fail_case "$description, the script must leave the labels as they were, but they're now: $(<"$issue/labels")"
+  elif (($(comment_count) > 0)); then
+    fail_case "$description, the script must not comment, but it commented: $(<"$issue/comment-1")"
+  fi
+}
+
+# Checks that the script exited with code 0, removed ready, kept the other labels and commented once.
+# The comment must mention the person who added ready, link to the definition of ready, and list exactly
+# these reasons, in any order: expect_removed <description> <reason>...
+expect_removed() {
+  local description=$1 expected_labels expected_reasons comment listed_reasons
+  shift
+  case_count=$((case_count + 1))
+  expected_labels=$(sed '/^ready$/d' "$labels_before")
+  expected_reasons=$(printf '%s\n' "$@" | sort)
+  if ((script_status != 0)); then
+    fail_case "$description, the script must exit with code 0, but it exited with code $script_status. Its output: $script_output"
+    return
+  fi
+  if [[ $(<"$issue/labels") != "$expected_labels" ]]; then
+    fail_case "$description, the script must remove ready and keep the other labels, but the labels are now: $(<"$issue/labels")"
+    return
+  fi
+  if (($(comment_count) != 1)); then
+    fail_case "$description, the script must comment once, but it commented $(comment_count) times."
+    return
+  fi
+  comment=$(<"$issue/comment-1")
+  listed_reasons=$(sed -n 's/^- //p' "$issue/comment-1" | sort)
+  if [[ $comment != *"@$labeled_by"* ]]; then
+    fail_case "$description, the comment must mention @$labeled_by, but it's: $comment"
+  elif [[ $comment != *"$definition_of_ready"* ]]; then
+    fail_case "$description, the comment must link to $definition_of_ready, but it's: $comment"
+  elif [[ $listed_reasons != "$expected_reasons" ]]; then
+    fail_case "$description, the comment must list exactly these reasons: $expected_reasons. But it's: $comment"
+  fi
+}
+
+# Checks that the script failed, and left the labels as they were without commenting: expect_failure <description>
+expect_failure() {
+  local description=$1
+  case_count=$((case_count + 1))
+  if ((script_status == 0)); then
+    fail_case "$description, the script must fail, but it exited with code 0. Its output: $script_output"
+  elif [[ $(<"$issue/labels") != "$(<"$labels_before")" ]]; then
+    fail_case "$description, the script must leave the labels as they were, but they're now: $(<"$issue/labels")"
+  elif (($(comment_count) > 0)); then
+    fail_case "$description, the script must not comment, but it commented: $(<"$issue/comment-1")"
+  fi
+}
+
+# alice and carol have write access. dave opened an issue without it. tina has the Triage role, which the API reports as read.
+
+new_issue alice feature ready
+set_permission alice admin
+set_permission carol write
+run_script carol
+expect_no_change "When a maintainer adds ready to a maintainer's issue that has one type label and no status label"
+
+new_issue dave feature
+set_permission dave read
+set_permission carol admin
+run_script carol
+expect_no_change "When ready is gone by the time the script runs"
+
+new_issue dave bug ready
+set_permission dave read
+set_permission carol admin
+run_script carol
+expect_removed "When the issue's author doesn't have write access" \
+  "The issue's author, @dave, doesn't have write access to this repository."
+
+new_issue alice ready research
+set_permission alice admin
+set_permission tina read
+run_script tina
+expect_removed "When the person who added ready doesn't have write access" \
+  "You don't have write access to this repository."
+
+for status_label in needs-triage needs-breakdown needs-decision; do
+  new_issue alice maintenance "$status_label" ready
+  set_permission alice admin
+  set_permission carol admin
+  run_script carol
+  expect_removed "When the issue has $status_label" \
+    "The issue has the status label \`$status_label\`, and it must have none."
+done
+
+new_issue alice ready
+set_permission alice admin
+set_permission carol admin
+run_script carol
+expect_removed "When the issue has no type label" \
+  "The issue has no type label, and $one_type."
+
+new_issue alice bug feature ready research
+set_permission alice admin
+set_permission carol admin
+run_script carol
+expect_removed "When the issue has three type labels" \
+  "The issue has the type labels \`bug\`, \`feature\` and \`research\`, and $one_type."
+
+new_issue alice feature needs-breakdown needs-decision ready
+set_permission alice admin
+set_permission tina read
+run_script tina
+expect_removed "When the person who added ready doesn't have write access, and the issue has two status labels" \
+  "You don't have write access to this repository." \
+  "The issue has the status labels \`needs-breakdown\` and \`needs-decision\`, and it must have none."
+
+new_issue ghost feature ready
+set_permission carol admin
+run_script carol
+expect_failure "When gh can't get the permission of the issue's author"
+
+new_issue alice feature ready
+set_permission alice admin
+run_script ""
+expect_failure "Without the login of the person who added ready"
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in $test_name failed. The errors above say which." >&2
+  exit 1
+fi
+echo "$test_name passed. Cases: $case_count."

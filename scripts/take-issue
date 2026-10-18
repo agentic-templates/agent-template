@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Takes a ready issue for work outside a build run: scripts/take-issue <issue>
+# It removes ready from the issue, so that no build run takes it from then on. Then it checks whether the issue is
+# assigned, because a build run assigns each issue it takes. If it is, a build run has the issue, so the script adds
+# ready back and prints taken. Otherwise, it prints free.
+# It stops with an error when the issue doesn't have ready, and when gh fails. It asks gh about the repository of this
+# checkout, or the one in GH_REPO. "Work on a ready issue outside a build run" in docs/building.md runs it.
+set -euo pipefail
+
+# Prints an error and stops: stop <message>
+stop() {
+  echo "error: $1" >&2
+  exit 1
+}
+
+if (($# != 1)); then
+  stop "scripts/take-issue takes one argument, the number of an issue, and it got $#."
+fi
+if [[ ! $1 =~ ^[1-9][0-9]*$ ]]; then
+  stop "scripts/take-issue takes the number of an issue, such as 12, and it got \"$1\"."
+fi
+issue=$1
+
+if ! labels=$(gh issue view "$issue" --json labels --jq '.labels[].name' 2>&1); then
+  stop "can't read the labels of issue #$issue, because gh failed: $labels"
+fi
+if ! grep -qxF ready <<<"$labels"; then
+  stop "issue #$issue doesn't have the ready label, so someone may already work on it outside a build run, because scripts/take-issue removes the label. Ask the maintainer whether to work on it."
+fi
+if ! answer=$(gh issue edit "$issue" --remove-label ready 2>&1); then
+  stop "can't remove ready from issue #$issue, because gh failed: $answer"
+fi
+if ! assignees=$(gh issue view "$issue" --json assignees --jq '.assignees[].login' 2>&1); then
+  stop "removed ready from issue #$issue, but can't check whether a build run has it, because gh failed: $assignees. Add ready back with gh issue edit $issue --add-label ready, and run scripts/take-issue $issue again."
+fi
+if [[ -z $assignees ]]; then
+  echo free
+  exit 0
+fi
+if ! answer=$(gh issue edit "$issue" --add-label ready 2>&1); then
+  stop "issue #$issue is assigned, so a build run has it, but can't add ready back, because gh failed: $answer. Add it with gh issue edit $issue --add-label ready."
+fi
+echo taken

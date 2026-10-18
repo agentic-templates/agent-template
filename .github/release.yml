@@ -1,0 +1,13 @@
+# Release notes group merged pull requests by the type label that the PR title workflow adds.
+# Dependabot's version updates are left out, so the notes list only changes to the product.
+changelog:
+  exclude:
+    authors:
+      - dependabot[bot]
+  categories:
+    - title: New features
+      labels: [feature]
+    - title: Fixes
+      labels: [bug]
+    - title: Other changes
+      labels: ["*"]

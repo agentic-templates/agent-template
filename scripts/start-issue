@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Does step 2 of "Make a change" in AGENTS.md: scripts/start-issue <issue>
+# It checks out the issue's branch in the checkout that holds the script, and prints the branch.
+# - It stops on an issue with needs-triage, as the hook for gh issue develop does, because the hooks don't see the
+#   commands that a script runs. Like the hook, it goes on when gh can't tell.
+# - It runs git fetch --prune origin. Of the branches that gh issue develop --list lists and that origin still has,
+#   it checks out the one whose latest commit on origin is newest. A local copy of that branch that's behind origin
+#   moves forward to origin's commit.
+# - When the issue has no such branch, it creates one with gh issue develop --checkout. GitHub creates the branch
+#   from the latest main and links it to the issue.
+# It stops with an error, and exits with code 1, when the checkout has changes that aren't committed, when the local
+# copy of the branch has commits that origin doesn't have, when another worktree holds the branch, and when gh or git
+# fails. It asks gh about the repository of this checkout, or the one in GH_REPO.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/needs-triage
+source scripts/needs-triage
+
+# Prints an error and stops: stop <message>
+stop() {
+  echo "error: $1" >&2
+  exit 1
+}
+
+if (($# != 1)); then
+  stop "scripts/start-issue takes one argument, the number of an issue, and it got $#."
+fi
+if [[ ! $1 =~ ^[1-9][0-9]*$ ]]; then
+  stop "scripts/start-issue takes the number of an issue, such as 12, and it got \"$1\"."
+fi
+issue=$1
+
+if labels=$(gh issue view "$issue" --json labels --jq '.labels[].name' 2>/dev/null) &&
+  grep -F -x -q needs-triage <<<"$labels"; then
+  stop "$(needs_triage_message "$issue" "$issue")"
+fi
+
+if ! changes=$(git status --porcelain 2>&1); then
+  stop "can't list the changes in $(pwd), because git failed: $changes"
+fi
+if [[ -n $changes ]]; then
+  stop "$(pwd) has changes that aren't committed, and scripts/start-issue would take them to the branch of issue #$issue. Commit them to the branch they belong to, and run scripts/start-issue $issue again."
+fi
+
+if ! output=$(git fetch --prune --quiet origin 2>&1); then
+  stop "can't fetch origin, because git failed: $output"
+fi
+if ! linked_branches=$(gh issue develop --list "$issue" 2>&1); then
+  stop "can't list the branches of issue #$issue, because gh failed: $linked_branches"
+fi
+
+# The listed branch whose latest commit on origin is newest, and that commit's time in seconds
+branch=""
+newest=-1
+# gh prints each branch, a tab and the branch's URL.
+while IFS=$'\t' read -r listed url; do
+  if [[ -z $listed || -z $url ]] || ! git rev-parse --verify --quiet "refs/remotes/origin/$listed" >/dev/null; then
+    continue
+  fi
+  commit_time=$(git log -1 --format=%ct "refs/remotes/origin/$listed")
+  if ((commit_time > newest)); then
+    branch=$listed
+    newest=$commit_time
+  fi
+done <<<"$linked_branches"
+
+if [[ -z $branch ]]; then
+  if ! output=$(gh issue develop "$issue" --checkout 2>&1); then
+    stop "can't create a branch for issue #$issue, because gh failed: $output"
+  fi
+  if ! branch=$(git symbolic-ref --short HEAD 2>&1); then
+    stop "gh created a branch for issue #$issue, but git can't tell which branch is checked out: $branch"
+  fi
+  printf '%s\n' "$branch"
+  exit 0
+fi
+
+if git rev-parse --verify --quiet "refs/heads/$branch" >/dev/null; then
+  holder=$(git for-each-ref --format='%(worktreepath)' "refs/heads/$branch")
+  if [[ -n $holder && $(cd "$holder" 2>/dev/null && pwd -P) != "$(pwd -P)" ]]; then
+    stop "the worktree at $holder has the branch $branch of issue #$issue checked out, and git lets only one worktree check out a branch. Work on the issue in that worktree, or ask the maintainer whether another agent still works there."
+  fi
+  ahead=$(git rev-list --count "refs/remotes/origin/$branch..refs/heads/$branch")
+  if ((ahead > 0)); then
+    stop "the local copy of the branch $branch of issue #$issue has commits that origin doesn't have. If the issue needs them, push them to origin. Otherwise, ask the maintainer what to do with them. Then run scripts/start-issue $issue again."
+  fi
+  if ! output=$(git switch --quiet "$branch" 2>&1 && git merge --ff-only --quiet "refs/remotes/origin/$branch" 2>&1); then
+    stop "can't check out the branch $branch of issue #$issue, because git failed: $output"
+  fi
+elif ! output=$(git switch --quiet --create "$branch" --track "refs/remotes/origin/$branch" 2>&1); then
+  stop "can't check out the branch $branch of issue #$issue, because git failed: $output"
+fi
+printf '%s\n' "$branch"

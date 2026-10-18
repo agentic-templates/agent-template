@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "root=$(git rev-parse --show-toplevel 2>/dev/null) && [ -x \"$root/scripts/hooks/before-tool\" ] && exec \"$root/scripts/hooks/before-tool\"; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}

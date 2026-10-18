@@ -1,0 +1,28 @@
+name: Main rules
+
+on:
+  schedule:
+    # Each Monday at 06:00 UTC
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  # Fails when the rules for main no longer require a check that scripts/configure-github requires there, so that
+  # the failure shows in the Actions tab and in GitHub's notifications. A hook blocks merges then, too.
+  main-rules:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check that main still requires the checks that scripts/configure-github sets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: scripts/check-main-rules

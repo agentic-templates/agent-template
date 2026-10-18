@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+# Tests scripts/take-next-issue with a stand-in for gh. The script runs scripts/pull-request-state, which asks the
+# stand-in too.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+case_count=0
+failed_cases=0
+
+base=$(mktemp -d)
+trap 'rm -rf "$base"' EXIT
+mkdir -p "$base/bin"
+case_folder=$base/case
+
+# A stand-in for gh, first on the PATH. It answers from the files in TEST_CASE_FOLDER:
+# - the command that lists the ready issues, with the file issues, as the script's --jq filter prints it
+# - the command in scripts/pull-request-state, with the file pull-requests-<issue>, as that script's --jq filter
+#   prints it, or with nothing when the issue has no such file
+# - the command that reads an issue's labels, with feature and ready, or with only feature when the issue is in the
+#   file lost-ready
+# It accepts the commands that assign an issue to the current account and remove that assignment, and writes each one
+# to the file edits, one to a line. It fails the commands that start with TEST_FAILING_CALL, as gh does without the
+# network, and every command it doesn't know.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+folder=$TEST_CASE_FOLDER
+if [[ -n $TEST_FAILING_CALL && $* == "$TEST_FAILING_CALL"* ]]; then
+  echo "error connecting to api.github.com" >&2
+  exit 1
+fi
+if [[ $1 == issue && $2 == edit ]]; then
+  echo "$*" >>"$folder/edits"
+fi
+case "$*" in
+  "issue list --label ready --limit 200 --json number,labels,assignees,blockedBy,subIssuesSummary --jq "*)
+    cat "$folder/issues"
+    ;;
+  "api graphql "*)
+    for argument in "$@"; do
+      if [[ $argument == number=* ]]; then
+        number=${argument#number=}
+      fi
+    done
+    if [[ -f $folder/pull-requests-$number ]]; then
+      cat "$folder/pull-requests-$number"
+    fi
+    ;;
+  "issue view "*" --json labels --jq .labels[].name")
+    echo feature
+    if ! grep -qxF "$3" "$folder/lost-ready"; then
+      echo ready
+    fi
+    ;;
+  "issue edit "*" --add-assignee @me" | "issue edit "*" --remove-assignee @me") ;;
+  *)
+    echo "The stand-in for gh doesn't answer: gh $*" >&2
+    exit 1
+    ;;
+esac
+STAND_IN
+chmod +x "$base/bin/gh"
+
+tab=$'\t'
+
+# Starts a case with no ready issue.
+new_case() {
+  rm -rf "$case_folder"
+  mkdir -p "$case_folder"
+  : >"$case_folder/issues"
+  : >"$case_folder/edits"
+  : >"$case_folder/lost-ready"
+}
+
+# Adds a ready issue to the list, as the script's --jq filter prints it, with the labels it has besides ready:
+# add_issue <number> <assignees> <sub-issues> <closed sub-issues> [<label>...]
+add_issue() {
+  local number=$1 label
+  printf '%s\n' "issue$tab$number$tab$2$tab$3$tab$4" >>"$case_folder/issues"
+  shift 4
+  for label in ready "$@"; do
+    printf '%s\n' "label$tab$number$tab$label" >>"$case_folder/issues"
+  done
+}
+
+# Marks an issue as blocked by another issue in a state, OPEN or CLOSED: add_blocking_issue <issue> <state>
+add_blocking_issue() {
+  printf '%s\n' "blocked-by$tab$1$tab$2" >>"$case_folder/issues"
+}
+
+# Gives an issue pull requests for which scripts/pull-request-state prints a state, as that script's --jq filter prints
+# them: set_pull_request_state <issue> <merging, stopped, several or left behind>
+set_pull_request_state() {
+  local file=$case_folder/pull-requests-$1
+  case $2 in
+    merging) printf '%s\n' "20${tab}OPEN${tab}true${tab}false${tab}true${tab}false$tab" >"$file" ;;
+    stopped) printf '%s\n' "20${tab}OPEN${tab}true${tab}true${tab}false${tab}false$tab" >"$file" ;;
+    several)
+      printf '%s\n' "20${tab}OPEN${tab}true${tab}false${tab}false${tab}false$tab" \
+        "21${tab}OPEN${tab}true${tab}false${tab}false${tab}false$tab" >"$file"
+      ;;
+    "left behind") printf '%s\n' "20${tab}OPEN${tab}true${tab}false${tab}false${tab}false$tab" >"$file" ;;
+  esac
+}
+
+# Runs scripts/take-next-issue with the arguments, and sets status, output and edits, the gh issue edit commands that
+# gh carried out: run_take_next_issue [<argument>...]
+run_take_next_issue() {
+  status=0
+  output=$(TEST_CASE_FOLDER=$case_folder TEST_FAILING_CALL=${failing_call:-} PATH=$base/bin:$PATH \
+    scripts/take-next-issue "$@" 2>&1) || status=$?
+  edits=$(<"$case_folder/edits")
+}
+
+# Checks the script's exit code, output and gh issue edit commands, one to a line:
+# expect_result <description> <exit code> <output> <edits>
+expect_result() {
+  local description=$1 expected_status=$2 expected_output=$3 expected_edits=$4
+  case_count=$((case_count + 1))
+  if [[ $status != "$expected_status" || $output != "$expected_output" || $edits != "$expected_edits" ]]; then
+    echo "error: $description, scripts/take-next-issue must exit with code $expected_status, print \"$expected_output\" and run \"$expected_edits\", but it exited with code $status, printed \"$output\" and ran \"$edits\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+assign_12="issue edit 12 --add-assignee @me"
+assign_15="issue edit 15 --add-assignee @me"
+
+new_case
+run_take_next_issue
+expect_result "When no issue has ready" 0 "none" ""
+
+new_case
+add_issue 15 0 0 0 feature
+add_issue 12 0 0 0 bug
+run_take_next_issue
+expect_result "When two issues fit, listed with the higher number first" 0 "12 other" "$assign_12"
+
+new_case
+add_issue 12 0 0 0
+add_issue 15 0 0 0 feature
+run_take_next_issue
+expect_result "When the lower-numbered issue has no type label" 0 "15 other" "$assign_15"
+
+new_case
+add_issue 12 0 0 0 bug feature
+add_issue 15 0 0 0 feature
+run_take_next_issue
+expect_result "When the lower-numbered issue has two type labels" 0 "15 other" "$assign_15"
+
+for status_label in needs-triage needs-breakdown needs-decision; do
+  new_case
+  add_issue 12 0 0 0 feature "$status_label"
+  add_issue 15 0 0 0 feature
+  run_take_next_issue
+  expect_result "When the lower-numbered issue has the status label $status_label" 0 "15 other" "$assign_15"
+done
+
+new_case
+add_issue 12 1 0 0 feature
+add_issue 15 0 0 0 feature
+run_take_next_issue
+expect_result "When the lower-numbered issue is assigned" 0 "15 other" "$assign_15"
+
+new_case
+add_issue 12 0 2 1 feature
+add_issue 15 0 0 0 feature
+run_take_next_issue
+expect_result "When one of the lower-numbered issue's sub-issues is open" 0 "15 other" "$assign_15"
+
+new_case
+add_issue 12 0 2 2 feature
+add_issue 15 0 0 0 feature
+run_take_next_issue
+expect_result "When all of the lower-numbered issue's sub-issues are closed" 0 "12 parent" "$assign_12"
+
+new_case
+add_issue 12 0 0 0 feature
+add_blocking_issue 12 CLOSED
+add_blocking_issue 12 OPEN
+add_issue 15 0 0 0 feature
+run_take_next_issue
+expect_result "When one of the issues that block the lower-numbered issue is open" 0 "15 other" "$assign_15"
+
+new_case
+add_issue 12 0 0 0 feature
+add_blocking_issue 12 CLOSED
+add_blocking_issue 12 CLOSED
+add_issue 15 0 0 0 feature
+run_take_next_issue
+expect_result "When all the issues that block the lower-numbered issue are closed" 0 "12 other" "$assign_12"
+
+for pull_request_state in merging stopped several; do
+  new_case
+  add_issue 12 0 0 0 feature
+  set_pull_request_state 12 "$pull_request_state"
+  add_issue 15 0 0 0 feature
+  run_take_next_issue
+  expect_result "When scripts/pull-request-state prints $pull_request_state for the lower-numbered issue" 0 "15 other" \
+    "$assign_15"
+done
+
+new_case
+add_issue 12 0 0 0 feature
+set_pull_request_state 12 "left behind"
+add_issue 15 0 0 0 feature
+run_take_next_issue
+expect_result "When scripts/pull-request-state prints left behind for the lower-numbered issue" 0 "12 left behind 20" \
+  "$assign_12"
+
+new_case
+add_issue 12 0 0 0 feature
+add_issue 15 0 0 0 feature
+add_issue 17 0 0 0 feature
+run_take_next_issue 12 15
+expect_result "When it's given the two lowest-numbered issues to skip" 0 "17 other" "issue edit 17 --add-assignee @me"
+
+new_case
+add_issue 12 0 0 0 feature
+run_take_next_issue 12
+expect_result "When it's given the only issue that fits to skip" 0 "none" ""
+
+new_case
+add_issue 12 0 0 0 research
+run_take_next_issue
+expect_result "When the issue is a research issue" 0 "12 research" "$assign_12"
+
+new_case
+add_issue 12 0 2 2 research
+set_pull_request_state 12 "left behind"
+run_take_next_issue
+expect_result "When a research issue has closed sub-issues and a pull request left behind" 0 "12 research" "$assign_12"
+
+new_case
+add_issue 12 0 2 2 feature
+set_pull_request_state 12 "left behind"
+run_take_next_issue
+expect_result "When an issue has closed sub-issues and a pull request left behind" 0 "12 parent" "$assign_12"
+
+new_case
+add_issue 12 0 0 0 feature
+add_issue 15 0 0 0 feature
+echo 12 >"$case_folder/lost-ready"
+run_take_next_issue
+expect_result "When the lower-numbered issue lost ready before the script assigned it" 0 "15 other" \
+  "$assign_12"$'\n'"issue edit 12 --remove-assignee @me"$'\n'"$assign_15"
+
+new_case
+add_issue 12 0 0 0 feature
+echo 12 >"$case_folder/lost-ready"
+run_take_next_issue
+expect_result "When the only issue that fits lost ready before the script assigned it" 0 "none" \
+  "$assign_12"$'\n'"issue edit 12 --remove-assignee @me"
+
+new_case
+add_issue 12 0 0 0 feature
+failing_call="issue list"
+run_take_next_issue
+expect_result "When gh can't list the ready issues" 1 \
+  "error: can't list the ready issues, because gh failed: error connecting to api.github.com" ""
+
+new_case
+add_issue 12 0 0 0 feature
+failing_call="api graphql"
+run_take_next_issue
+expect_result "When scripts/pull-request-state fails" 1 \
+  "error: can't list the pull requests of issue #12, because gh failed: error connecting to api.github.com" ""
+
+new_case
+add_issue 12 0 0 0 feature
+failing_call=$assign_12
+run_take_next_issue
+expect_result "When gh can't assign the issue" 1 \
+  "error: can't assign issue #12 to you, because gh failed: error connecting to api.github.com" ""
+
+new_case
+add_issue 12 0 0 0 feature
+failing_call="issue view 12"
+run_take_next_issue
+expect_result "When gh can't read the labels of the issue it assigned" 1 \
+  "error: assigned issue #12 to you, but can't check that it still has ready, because gh failed: error connecting to api.github.com. Remove your assignment with gh issue edit 12 --remove-assignee @me, and run scripts/take-next-issue again." \
+  "$assign_12"
+
+new_case
+add_issue 12 0 0 0 feature
+echo 12 >"$case_folder/lost-ready"
+failing_call="issue edit 12 --remove-assignee"
+run_take_next_issue
+expect_result "When gh can't remove the assignment from an issue that lost ready" 1 \
+  "error: assigned issue #12 to you, and it no longer has ready, but can't remove your assignment, because gh failed: error connecting to api.github.com. Remove it with gh issue edit 12 --remove-assignee @me, and run scripts/take-next-issue again." \
+  "$assign_12"
+failing_call=""
+
+new_case
+run_take_next_issue 12 "#15"
+expect_result "When an issue to skip starts with #" 1 \
+  "error: scripts/take-next-issue takes the numbers of the issues to skip, such as 12, and it got \"#15\"." ""
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/take-next-issue.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/take-next-issue.test passed. Cases: $case_count."

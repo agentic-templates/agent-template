@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Tests that scripts/configure-github checks who owns the repository before it changes anything, with a stand-in for gh.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+case_count=0
+failed_cases=0
+
+base=$(mktemp -d)
+trap 'rm -rf "$base"' EXIT
+mkdir -p "$base/bin"
+
+# A stand-in for gh, first on the PATH, that answers the commands that read the repository: its name, the access
+# of whoever runs the script, its visibility and its owner's type. It answers that TEST_REPOSITORY is public, that
+# the person has admin access, and that TEST_OWNER_TYPE owns it. It writes every other command to TEST_GH_CALLS,
+# one to a line, and fails, so the script stops at its first change.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+case "$*" in
+  "repo view --json nameWithOwner --jq .nameWithOwner") echo "$TEST_REPOSITORY" ;;
+  "repo view --json viewerPermission --jq .viewerPermission") echo ADMIN ;;
+  "repo view --json visibility --jq .visibility | ascii_downcase") echo public ;;
+  "api repos/$TEST_REPOSITORY --jq .owner.type") echo "$TEST_OWNER_TYPE" ;;
+  *)
+    echo "$*" >>"$TEST_GH_CALLS"
+    echo "The stand-in for gh doesn't answer: gh $*" >&2
+    exit 1
+    ;;
+esac
+STAND_IN
+chmod +x "$base/bin/gh"
+
+# Runs scripts/configure-github, and sets status, output and changes, the commands that would change something:
+# run_configure_github <repository> <owner's type: User or Organization>
+run_configure_github() {
+  status=0
+  : >"$base/calls"
+  output=$(TEST_REPOSITORY=$1 TEST_OWNER_TYPE=$2 TEST_GH_CALLS=$base/calls PATH=$base/bin:$PATH \
+    scripts/configure-github 2>&1) || status=$?
+  changes=$(<"$base/calls")
+}
+
+# Counts a case, and prints an error if it failed: expect <description> <what it expects> <whether it held: yes or no>
+expect() {
+  case_count=$((case_count + 1))
+  if [[ $3 != yes ]]; then
+    echo "error: $1, scripts/configure-github must $2. It exited with code $status and printed \"$output\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+run_configure_github jtmpl/expense-tracker User
+personal_account_error="error: jtmpl/expense-tracker belongs to the personal account jtmpl, and only an organization's repositories can use GitHub's merge queue, which the template merges through. Transfer the repository to an organization in its settings at https://github.com/jtmpl/expense-tracker/settings, and run this script again."
+held=no
+if [[ $status == 1 && $output == "$personal_account_error" && -z $changes ]]; then
+  held=yes
+fi
+expect "On a repository that a personal account owns" \
+  "exit with code 1 before it changes anything, and report \"$personal_account_error\"" "$held"
+
+run_configure_github agentic-templates/expense-tracker Organization
+held=no
+if [[ $changes == "api --method PATCH repos/agentic-templates/expense-tracker "* ]]; then
+  held=yes
+fi
+expect "On a repository that an organization owns" "go on to change the repository's settings" "$held"
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/configure-github.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/configure-github.test passed. Cases: $case_count."

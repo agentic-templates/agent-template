@@ -1,0 +1,5 @@
+# shellcheck shell=bash
+# The type labels and the status labels that "Labels" in AGENTS.md describes. scripts/hooks/issues-and-labels.check,
+# scripts/check-ready-label and scripts/ready-issues read them from here.
+type_labels=(bug feature maintenance research)
+status_labels=(needs-triage needs-breakdown needs-decision)

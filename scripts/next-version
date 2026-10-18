@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Prints the version of the next release for a commit, and nothing else: scripts/next-version <sha>
+# Step 3 of "Publish a release" in docs/releasing.md runs it. It asks gh for the latest release, and reads the titles
+# and authors of the commits since that release with git. When no version fits, it prints why and exits with code 1.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/title-types
+source scripts/title-types
+
+# Prints an error and stops: stop <message>
+stop() {
+  echo "error: $1" >&2
+  exit 1
+}
+
+# Prints the version after <major>.<minor>.<patch> for the biggest change since then, which is breaking, feature
+# or fix: version_after <major> <minor> <patch> <change>
+version_after() {
+  local major=$1 minor=$2 patch=$3 change=$4
+  # Below 1.0, a breaking change raises the minor version.
+  if [[ $change == breaking && $major != 0 ]]; then
+    echo "v$((major + 1)).0.0"
+  elif [[ $change == breaking || $change == feature ]]; then
+    echo "v$major.$((minor + 1)).0"
+  else
+    echo "v$major.$minor.$((patch + 1))"
+  fi
+}
+
+if (($# != 1)); then
+  stop "scripts/next-version takes one argument, the SHA of the commit to release, and it got $#. For example: scripts/next-version \"\$(git rev-parse origin/main)\""
+fi
+sha=$1
+if ! git rev-parse --verify --quiet "$sha^{commit}" >/dev/null; then
+  stop "this clone has no commit $sha. Run git fetch, and pass the SHA of the commit to release."
+fi
+
+types=$(allowed_title_types | paste -sd '|' -)
+if [[ -z $types ]]; then
+  stop "can't find the types that the title check allows, on the line types=\"...\" in scripts/check-title, so scripts/next-version can't read the titles' types. Put that line back."
+fi
+# A title's type and the ! before its colon, read as the title check in scripts/check-title reads them.
+# Group 1 holds the type, and group 3 the !.
+title_pattern="^($types)(\([^)]+\))?(!)?: [^ ]"
+
+if ! latest=$(gh release list --exclude-drafts --limit 1 --json tagName --jq '.[].tagName'); then
+  stop "gh can't list the releases of this repository. Check the network and gh auth status, and run scripts/next-version again."
+fi
+if [[ -z $latest ]]; then
+  echo v0.1.0
+  exit 0
+fi
+version_pattern='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+if [[ ! $latest =~ $version_pattern ]]; then
+  stop "the latest release's tag is $latest, and scripts/next-version needs a tag in the form v<major>.<minor>.<patch>, such as v1.2.3. Tell the maintainer."
+fi
+major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} patch=${BASH_REMATCH[3]}
+if ! git rev-parse --verify --quiet "refs/tags/$latest^{commit}" >/dev/null; then
+  stop "this clone doesn't have the tag $latest of the latest release. Run git fetch --tags, and run scripts/next-version again."
+fi
+
+commits=0
+dependabot_commits=0
+change=fix
+# git prints each commit's author, a tab and its title.
+while IFS= read -r commit; do
+  author=${commit%%$'\t'*}
+  title=${commit#*$'\t'}
+  commits=$((commits + 1))
+  if [[ $author == "dependabot[bot]" ]]; then
+    dependabot_commits=$((dependabot_commits + 1))
+  fi
+  if [[ ! $title =~ $title_pattern ]]; then
+    continue
+  fi
+  if [[ -n ${BASH_REMATCH[3]} ]]; then
+    change=breaking
+  elif [[ ${BASH_REMATCH[1]} == feat && $change == fix ]]; then
+    change=feature
+  fi
+done < <(git log --format='%an%x09%s' "$latest..$sha")
+
+if ((commits == 0)); then
+  stop "no commits come after the latest release, $latest, up to $sha, so a new release would have nothing in it. Tell the maintainer."
+fi
+if ((dependabot_commits == commits)); then
+  stop "every commit after the latest release, $latest, up to $sha is one of Dependabot's updates. Tell the maintainer, who decides whether to publish a release with only those."
+fi
+version_after "$major" "$minor" "$patch" "$change"

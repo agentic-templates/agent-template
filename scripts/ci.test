@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# Runs the bash 3.2 job's test runner on small sets of tests, and checks that the script-tests job runs it too.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+base=$(mktemp -d)
+trap 'rm -rf "$base"' EXIT
+
+# Prints the command of a step in a job of .github/workflows/ci.yml: step_command <job> <step name>
+step_command() {
+  awk -v job="$1" -v step="$2" '
+    $0 == "  " job ":" { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:/ { exit }
+    in_job && $0 == "      - name: " step { in_step = 1; next }
+    in_step && /^        run: / { sub(/^        run: /, ""); print; exit }
+  ' .github/workflows/ci.yml
+}
+
+# Run the workflow's command so removing the runner from CI also fails these cases.
+step=$(step_command bash-3-2 "Run tests with bash 3.2")
+if [[ -z $step ]]; then
+  echo "error: the bash-3-2 job has no test step. Add the step to .github/workflows/ci.yml." >&2
+  exit 1
+fi
+script_tests_step=$(step_command script-tests "Run the tests of the scripts and hooks")
+if [[ $script_tests_step != "$step" ]]; then
+  echo "error: the step \"Run the tests of the scripts and hooks\" of the script-tests job in .github/workflows/ci.yml must run $step, as the test step of the bash-3-2 job does. Add the step, or change its command to $step." >&2
+  exit 1
+fi
+printf '%s\n' "$step" > "$base/step"
+
+# The step runs with only these commands and a case's stand-ins for tools on PATH, so that each case decides
+# whether jq and shellcheck are installed.
+commands=$base/commands
+mkdir "$commands"
+ln -s "$BASH" "$commands/bash"
+for command in cat dirname mktemp rm sleep touch; do
+  ln -s "$(command -v "$command")" "$commands/$command"
+done
+
+case_count=0
+failed_cases=0
+
+# Makes a folder for a case, with a copy of the runner and of the file it reads, stand-ins for scripts/test-hooks and
+# scripts/test-check that do nothing, and a stand-in for jq, and sets case_dir to it: new_case
+new_case() {
+  case_dir=$(mktemp -d "$base/case.XXXXXX")
+  mkdir "$case_dir/scripts" "$case_dir/tools"
+  cp scripts/test-scripts scripts/missing-tools "$case_dir/scripts/"
+  printf '%s\n' '#!/usr/bin/env bash' > "$case_dir/scripts/test-hooks"
+  printf '%s\n' '#!/usr/bin/env bash' > "$case_dir/scripts/test-check"
+  add_tool jq
+}
+
+# Makes a tool count as installed in the case, with a stand-in that does nothing: add_tool <tool>
+add_tool() {
+  printf '%s\n' '#!/usr/bin/env bash' > "$case_dir/tools/$1"
+  chmod +x "$case_dir/tools/$1"
+}
+
+# Runs the step in the case's folder, with CI set to the value given or empty, and sets status and output:
+# run_step [<CI>]
+# GitHub's bash shell exits on a failing command and sets pipefail.
+run_step() {
+  status=0
+  output=$(cd "$case_dir" && CI=${1:-} PATH=$case_dir/tools:$commands "$BASH" --noprofile --norc -eo pipefail "$base/step" 2>&1) ||
+    status=$?
+}
+
+expect_result() {
+  local description=$1 expected_status=$2 expected_output=$3
+  case_count=$((case_count + 1))
+  if [[ $status != "$expected_status" || $output != "$expected_output" ]]; then
+    echo "error: the script-test step $description. Expected status $expected_status and output \"$expected_output\", got status $status and output \"$output\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+new_case
+run_step
+expect_result "succeeds when no test matches" 0 ""
+
+new_case
+mkdir "$case_dir/scripts/directory.test"
+printf '%s\n' 'exit 1' > "$case_dir/scripts/not-a-test"
+run_step
+expect_result "skips directories and files whose names do not match" 0 ""
+
+new_case
+printf '%s\n' '#!/usr/bin/env bash' 'echo first' > "$case_dir/scripts/first.test"
+printf '%s\n' '#!/usr/bin/env bash' 'echo second' > "$case_dir/scripts/second test.test"
+run_step
+output=$(printf '%s\n' "$output" | sort)
+expect_result "runs every matching regular file, including non-executable files and names with spaces" 0 $'first\nsecond'
+
+new_case
+printf '%s\n' '#!/usr/bin/env bash' 'exit 7' > "$case_dir/scripts/first.test"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$case_dir/scripts/last.test"
+chmod +x "$case_dir/scripts/"*.test
+run_step
+expect_result "fails when a test before the last test fails" 7 ""
+
+new_case
+cat > "$case_dir/scripts/version.test" <<'TEST'
+#!/usr/bin/env bash
+printf '%s\n' "$BASH_VERSION"
+./scripts/child
+TEST
+cat > "$case_dir/scripts/child" <<'CHILD'
+#!/usr/bin/env bash
+printf '%s\n' "$BASH_VERSION"
+CHILD
+cp "$case_dir/scripts/child" "$case_dir/scripts/test-hooks"
+cp "$case_dir/scripts/child" "$case_dir/scripts/test-check"
+chmod +x "$case_dir/scripts/version.test" "$case_dir/scripts/child"
+run_step
+expect_result "uses the current bash for all three groups and child scripts" 0 "$BASH_VERSION"$'\n'"$BASH_VERSION"$'\n'"$BASH_VERSION"$'\n'"$BASH_VERSION"
+
+# Each group must start before any group finishes. Sequential execution times out.
+new_case
+for group in hooks check scripts; do
+  case "$group" in
+    hooks) file=test-hooks ;;
+    check) file=test-check ;;
+    scripts) file=meeting.test ;;
+  esac
+  cat > "$case_dir/scripts/$file" <<TEST
+#!/usr/bin/env bash
+echo "$group started"
+touch "$group.started"
+for ((tries = 0; tries < 100; tries++)); do
+  if [[ -f hooks.started && -f check.started && -f scripts.started ]]; then
+    echo "$group passed"
+    exit 0
+  fi
+  sleep 0.1
+done
+echo "error: the three groups did not start together." >&2
+exit 1
+TEST
+done
+run_step
+expect_result "runs all three groups at the same time and keeps their output together" 0 $'hooks started\nhooks passed\ncheck started\ncheck passed\nscripts started\nscripts passed'
+
+for group in test-hooks test-check; do
+  new_case
+  printf '%s\n' '#!/usr/bin/env bash' 'echo failed >&2' 'exit 7' > "$case_dir/scripts/$group"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo scripts passed' > "$case_dir/scripts/pass.test"
+  run_step
+  expect_result "fails when $group fails and still waits for the script tests" 7 $'failed\nscripts passed'
+done
+
+# Cases for the ShellCheck cases of scripts/test-check, which its option --shellcheck-only runs.
+
+new_case
+add_tool shellcheck
+printf '%s\n' '#!/usr/bin/env bash' 'echo "test-check ran with [$*]"' > "$case_dir/scripts/test-check"
+run_step
+output=$(printf '%s\n' "$output" | LC_ALL=C sort)
+expect_result "runs the ShellCheck cases of scripts/test-check too, where shellcheck is installed" 0 \
+  $'test-check ran with [--shellcheck-only]\ntest-check ran with []'
+
+new_case
+add_tool shellcheck
+printf '%s\n' '#!/usr/bin/env bash' 'if [[ $* == --shellcheck-only ]]; then echo "the ShellCheck cases failed" >&2; exit 7; fi' \
+  > "$case_dir/scripts/test-check"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "scripts passed"' > "$case_dir/scripts/pass.test"
+run_step
+expect_result "fails when the ShellCheck cases of scripts/test-check fail" 7 $'the ShellCheck cases failed\nscripts passed'
+
+new_case
+printf '%s\n' '#!/usr/bin/env bash' 'echo "test-check ran with [$*]"' > "$case_dir/scripts/test-check"
+run_step true
+expect_result "skips the ShellCheck cases of scripts/test-check where shellcheck isn't installed, in CI too" 0 \
+  "test-check ran with []"
+
+# Cases for the hooks' tests, which need jq.
+
+new_case
+rm "$case_dir/tools/jq"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "the hooks tests ran"' > "$case_dir/scripts/test-hooks"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "scripts passed"' > "$case_dir/scripts/pass.test"
+run_step
+expect_result "skips the hooks' tests where jq isn't installed, and runs the other tests" 0 \
+  $'Skipped the jq check because jq is not installed. To run it here, install it: https://jqlang.org/download/\nscripts passed'
+
+new_case
+rm "$case_dir/tools/jq"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "the hooks tests ran"' > "$case_dir/scripts/test-hooks"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "scripts passed"' > "$case_dir/scripts/pass.test"
+run_step true
+expect_result "fails in CI where jq isn't installed, before it starts a test" 1 \
+  "error: jq is not installed. Install it in scripts/install-check-tools, or in an earlier step of this job in .github/workflows/ci.yml."
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/ci.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/ci.test passed. Cases: $case_count."

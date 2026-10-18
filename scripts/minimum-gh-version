@@ -1,0 +1,18 @@
+# shellcheck shell=bash
+# The oldest gh that the commands in the rules work with, written as <major>.<minor>. The hooks in scripts/hooks
+# read it from here.
+minimum_gh_version=2.98
+
+# Prints the version that the output of gh --version names, such as 2.97.0, if it's older than minimum_gh_version.
+# Prints nothing if it's as new or newer, or if the output names no version: older_gh_version <output of gh --version>
+older_gh_version() {
+  local pattern='^gh version (([0-9]+)\.([0-9]+)[0-9.]*)' version major minor
+  local minimum_major=${minimum_gh_version%%.*} minimum_minor=${minimum_gh_version#*.}
+  if [[ ! $1 =~ $pattern ]]; then
+    return 0
+  fi
+  version=${BASH_REMATCH[1]} major=${BASH_REMATCH[2]} minor=${BASH_REMATCH[3]}
+  if ((major < minimum_major || (major == minimum_major && minor < minimum_minor))); then
+    printf '%s\n' "$version"
+  fi
+}

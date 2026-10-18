@@ -1,0 +1,84 @@
+# shellcheck shell=bash
+# Functions that read the open ready issues and say why a build run can't start one, for scripts/take-next-issue and
+# scripts/build-run-report. They ask gh about the repository of this checkout, or the one in GH_REPO. Run them from
+# the repository's root.
+# shellcheck source=scripts/issue-labels
+source scripts/issue-labels
+
+# Sets ready_issues to the facts about the open ready issues. Prints an error and fails when gh fails:
+# read_ready_issues
+# Each line of ready_issues holds one fact, as fields separated by tabs. The first field says what the line holds:
+# - issue <number> <assignees> <sub-issues> <closed sub-issues>, with the number of each
+# - label <issue> <name>, for each of the issue's labels
+# - blocked-by <issue> <state of the blocking issue> <blocking issue>, for each issue that blocks it
+read_ready_issues() {
+  local jq_filter
+  # shellcheck disable=SC2016 # $number is a jq variable, which jq expands.
+  jq_filter='.[] | .number as $number
+    | (["issue", $number, (.assignees | length), .subIssuesSummary.total, .subIssuesSummary.completed] | @tsv),
+      (.labels[] | ["label", $number, .name] | @tsv),
+      (.blockedBy.nodes[] | ["blocked-by", $number, .state, .number] | @tsv)'
+  if ! ready_issues=$(gh issue list --label ready --limit 200 --json number,labels,assignees,blockedBy,subIssuesSummary --jq "$jq_filter" 2>&1); then
+    echo "error: can't list the ready issues, because gh failed: $ready_issues" >&2
+    return 1
+  fi
+}
+
+# Prints the facts of one kind about a ready issue, without the kind and the number: ready_issue_facts <kind> <issue>
+ready_issue_facts() {
+  { grep -- "^$1"$'\t'"$2"$'\t' <<<"$ready_issues" || true; } | cut -f 3-
+}
+
+# Prints the numbers of the ready issues, lowest first: ready_issue_numbers
+ready_issue_numbers() {
+  { grep $'^issue\t' <<<"$ready_issues" || true; } | cut -f 2 | sort -n
+}
+
+# Succeeds if a word is one of the other words: is_one_of <word> [<other word>...]
+is_one_of() {
+  local word=$1 other
+  shift
+  for other in "$@"; do
+    if [[ $other == "$word" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Prints each reason that a build run can't start a ready issue, judged by everything but its pull requests, one to a
+# line, such as "it has needs-decision", or nothing if there's none: reasons_not_to_start <issue>
+reasons_not_to_start() {
+  local issue=$1 label type_count=0 state blocking_issue assignees sub_issues closed_sub_issues
+  while IFS= read -r label; do
+    if is_one_of "$label" "${status_labels[@]}"; then
+      echo "it has $label"
+    fi
+    if is_one_of "$label" "${type_labels[@]}"; then
+      type_count=$((type_count + 1))
+    fi
+  done <<<"$(ready_issue_facts label "$issue")"
+  if ((type_count == 0)); then
+    echo "it has no type label"
+  elif ((type_count > 1)); then
+    echo "it has $type_count type labels"
+  fi
+  IFS=$'\t' read -r assignees sub_issues closed_sub_issues <<<"$(ready_issue_facts issue "$issue")"
+  if ((assignees > 0)); then
+    echo "it's assigned"
+  fi
+  if ((sub_issues != closed_sub_issues)); then
+    echo "it has open sub-issues"
+  fi
+  while IFS=$'\t' read -r state blocking_issue; do
+    if [[ -n $state && $state != CLOSED ]]; then
+      echo "issue #$blocking_issue blocks it"
+    fi
+  done <<<"$(ready_issue_facts blocked-by "$issue")"
+}
+
+# Succeeds if a build run can start an issue for which scripts/pull-request-state prints a state:
+# can_start_with_pull_request_state <state>
+can_start_with_pull_request_state() {
+  [[ $1 == none || $1 == "left behind "* ]]
+}

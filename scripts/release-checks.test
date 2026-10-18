@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+# Tests scripts/release-checks on a copy of it in a clone whose origin is a repository in a temporary folder, with a
+# stand-in for gh.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+case_count=0
+failed_cases=0
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+origin=$base/origin.git
+work=$base/work
+clone=$base/clone
+case_folder=$base/case
+# git looks for no repository above the temporary folder, reads none of the person's settings, and commits as a
+# stand-in person.
+export GIT_CEILING_DIRECTORIES=$base
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com
+export GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
+
+# A stand-in for gh, first on the PATH. It answers from the files in TEST_CASE_FOLDER, as the script's --jq filters
+# print them:
+# - the command that lists the workflow runs on a commit, with the file runs-<SHA>, or with nothing when the commit
+#   has no such file
+# - the commands that list the open code scanning alerts and the open Dependabot alerts, with the files code-scanning
+#   and dependabot
+# It fails the command that starts with TEST_FAILING_CALL, as gh does without the network, and every command it
+# doesn't know.
+mkdir "$base/bin"
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+folder=$TEST_CASE_FOLDER
+if [[ -n $TEST_FAILING_CALL && $* == "$TEST_FAILING_CALL"* ]]; then
+  echo "error connecting to api.github.com" >&2
+  exit 1
+fi
+case "$*" in
+  "run list --commit "*" --limit 1000 --json workflowDatabaseId,databaseId,status,conclusion,workflowName --jq "*)
+    if [[ -f $folder/runs-$4 ]]; then
+      cat "$folder/runs-$4"
+    fi
+    ;;
+  "api --paginate repos/{owner}/{repo}/code-scanning/alerts?state=open --jq "*) cat "$folder/code-scanning" ;;
+  "api --paginate repos/{owner}/{repo}/dependabot/alerts?state=open --jq "*) cat "$folder/dependabot" ;;
+  *)
+    echo "The stand-in for gh doesn't answer: gh $*" >&2
+    exit 1
+    ;;
+esac
+STAND_IN
+chmod +x "$base/bin/gh"
+
+tab=$'\t'
+
+# Makes a new origin with one commit on main, a work clone to commit in, and the clone that the copy of the script
+# runs in.
+new_repositories() {
+  rm -rf "$origin" "$work" "$clone"
+  git init --quiet --bare --initial-branch=main "$origin"
+  git init --quiet --initial-branch=main "$work"
+  git -C "$work" remote add origin "$origin"
+  git -C "$work" commit --quiet --allow-empty -m "chore: start the project"
+  git -C "$work" push --quiet origin main
+  git clone --quiet "$origin" "$clone"
+  mkdir "$clone/scripts"
+  cp -p scripts/release-checks "$clone/scripts/"
+}
+
+# Adds a commit to main on origin, after the clone: add_commit_on_origin
+add_commit_on_origin() {
+  git -C "$work" commit --quiet --allow-empty -m "feat: export a month as CSV"
+  git -C "$work" push --quiet origin main
+}
+
+# Starts a case with no run and no alert.
+new_case() {
+  rm -rf "$case_folder"
+  mkdir -p "$case_folder"
+  : >"$case_folder/code-scanning"
+  : >"$case_folder/dependabot"
+}
+
+# Adds a workflow run on a commit, as the script's --jq filter prints it. The conclusion is none until the run ends:
+# add_run <SHA> <workflow's ID> <run's ID> <status> <conclusion> [<workflow's name>]
+add_run() {
+  printf '%s\n' "$2$tab$3$tab$4$tab$5$tab${6:-}" >>"$case_folder/runs-$1"
+}
+
+# Adds an open code scanning alert, as the script's --jq filter prints it: add_code_scanning_alert <number> <rule> [<severity>]
+add_code_scanning_alert() {
+  printf '%s\n' "$1$tab$2$tab${3:-}" >>"$case_folder/code-scanning"
+}
+
+# Adds an open Dependabot alert, as the script's --jq filter prints it: add_dependabot_alert <number> <severity> <package>
+add_dependabot_alert() {
+  printf '%s\n' "$1$tab$2$tab$3" >>"$case_folder/dependabot"
+}
+
+# The latest commit of main on origin: origin_main
+origin_main() {
+  git -C "$origin" rev-parse main
+}
+
+# Runs the copy of the script, and sets status and output, which holds what it printed and its errors:
+# run_release_checks [<argument>...]
+run_release_checks() {
+  status=0
+  output=$(TEST_CASE_FOLDER=$case_folder TEST_FAILING_CALL=${failing_call:-} PATH=$base/bin:$PATH \
+    "$clone/scripts/release-checks" "$@" 2>&1) || status=$?
+}
+
+# Checks the script's exit code and output: expect_result <description> <exit code> <output>
+expect_result() {
+  local description=$1 expected_status=$2 expected_output=$3
+  case_count=$((case_count + 1))
+  if [[ $status != "$expected_status" || $output != "$expected_output" ]]; then
+    echo "error: $description, scripts/release-checks must exit with code $expected_status and print \"$expected_output\", but it exited with code $status and printed \"$output\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Without a SHA, the script checks the commit that origin got after the clone.
+new_repositories
+first=$(origin_main)
+add_commit_on_origin
+second=$(origin_main)
+new_case
+add_run "$second" 2 21 completed skipped CodeQL
+add_run "$second" 1 11 completed success CI
+add_run "$first" 1 10 completed failure CI
+run_release_checks
+expect_result "When every run on main's latest commit succeeded or was skipped" 0 "$second
+Run 11 of CI passed.
+Run 21 of CodeQL passed.
+go"
+
+new_case
+add_run "$first" 1 10 completed success CI
+add_run "$second" 1 11 completed failure CI
+run_release_checks "$first"
+expect_result "With the SHA of an earlier commit, whose run passed" 0 "$first
+Run 10 of CI passed.
+go"
+
+new_case
+add_run "$second" 1 11 in_progress none CI
+add_run "$second" 2 21 queued none CodeQL
+add_run "$second" 3 31 completed success Release
+run_release_checks "$second"
+expect_result "When runs haven't finished" 0 "$second
+Run 11 of CI hasn't finished.
+Run 21 of CodeQL hasn't finished.
+Run 31 of Release passed.
+wait"
+
+new_case
+run_release_checks "$second"
+expect_result "When no run exists" 0 "$second
+No workflow has run on this commit yet.
+wait"
+
+new_case
+add_run "$second" 9 91 completed failure "Dependabot Updates"
+run_release_checks "$second"
+expect_result "When only Dependabot Updates ran, and failed" 0 "$second
+No workflow has run on this commit yet.
+wait"
+add_run "$second" 1 11 completed success CI
+run_release_checks "$second"
+expect_result "When Dependabot Updates failed, and the other run passed" 0 "$second
+Run 11 of CI passed.
+go"
+
+new_case
+add_run "$second" 2 22 completed failure CodeQL
+add_run "$second" 1 10 completed failure CI
+add_run "$second" 2 20 completed success CodeQL
+add_run "$second" 1 12 completed success CI
+add_run "$second" 1 11 completed failure CI
+run_release_checks "$second"
+expect_result "When a workflow ran more than once" 0 "$second
+Run 12 of CI passed.
+Run 22 of CodeQL failed, with the conclusion failure.
+stop"
+
+new_case
+add_run "$second" 1 11 completed cancelled CI
+add_run "$second" 2 21 completed timed_out CodeQL
+add_run "$second" 3 31 completed startup_failure Release
+add_run "$second" 4 41 in_progress none Pages
+run_release_checks "$second"
+expect_result "When runs were cancelled, timed out or couldn't start, and a run hasn't finished" 0 "$second
+Run 11 of CI failed, with the conclusion cancelled.
+Run 21 of CodeQL failed, with the conclusion timed_out.
+Run 31 of Release failed, with the conclusion startup_failure.
+Run 41 of Pages hasn't finished.
+stop"
+
+new_case
+add_run "$second" 5 51 completed success
+run_release_checks "$second"
+expect_result "When a workflow has no name" 0 "$second
+Run 51 of workflow 5 passed.
+go"
+
+new_case
+add_run "$second" 1 11 completed success CI
+add_code_scanning_alert 7 js/sql-injection high
+add_code_scanning_alert 8 js/xss critical
+add_code_scanning_alert 9 js/weak-hash medium
+add_code_scanning_alert 10 js/log-injection low
+add_code_scanning_alert 11 js/unused-variable
+add_dependabot_alert 3 critical lodash
+add_dependabot_alert 4 high minimist
+add_dependabot_alert 5 medium axios
+add_dependabot_alert 6 low debug
+run_release_checks "$second"
+expect_result "When alerts of each severity are open" 0 "$second
+Run 11 of CI passed.
+Code scanning alert 7 is open, of high severity, for the rule js/sql-injection.
+Code scanning alert 8 is open, of critical severity, for the rule js/xss.
+Dependabot alert 3 is open, of critical severity, for the package lodash.
+Dependabot alert 4 is open, of high severity, for the package minimist.
+stop"
+
+new_case
+add_run "$second" 1 11 completed success CI
+add_code_scanning_alert 9 js/weak-hash medium
+add_code_scanning_alert 11 js/unused-variable
+add_dependabot_alert 5 medium axios
+run_release_checks "$second"
+expect_result "When only alerts below high severity are open" 0 "$second
+Run 11 of CI passed.
+go"
+
+new_case
+add_run "$second" 1 11 in_progress none CI
+add_dependabot_alert 4 high minimist
+run_release_checks "$second"
+expect_result "When an alert is open, and a run hasn't finished" 0 "$second
+Run 11 of CI hasn't finished.
+Dependabot alert 4 is open, of high severity, for the package minimist.
+stop"
+
+new_case
+add_run "$second" 1 11 completed success CI
+failing_call="run list"
+run_release_checks "$second"
+expect_result "When gh can't list the runs" 1 "$second
+error: can't list the workflow runs on $second, because gh failed: error connecting to api.github.com"
+failing_call="api --paginate repos/{owner}/{repo}/code-scanning"
+run_release_checks "$second"
+expect_result "When gh can't list the code scanning alerts" 1 "$second
+Run 11 of CI passed.
+error: can't list the open code scanning alerts, because gh failed: error connecting to api.github.com"
+failing_call="api --paginate repos/{owner}/{repo}/dependabot"
+run_release_checks "$second"
+expect_result "When gh can't list the Dependabot alerts" 1 "$second
+Run 11 of CI passed.
+error: can't list the open Dependabot alerts, because gh failed: error connecting to api.github.com"
+failing_call=""
+
+missing_commit=0123456789abcdef0123456789abcdef01234567
+run_release_checks "$missing_commit"
+expect_result "With a SHA that the clone doesn't have" 1 \
+  "error: this clone has no commit $missing_commit. Run git fetch origin, and pass the SHA that scripts/release-checks printed first."
+run_release_checks "$first" "$second"
+expect_result "With two arguments" 1 \
+  "error: scripts/release-checks takes at most one argument, the SHA of the commit to check, and it got 2. Run it without one to check main's latest commit."
+
+git -C "$clone" remote set-url origin "$base/missing.git"
+run_release_checks
+case_count=$((case_count + 1))
+if [[ $status != 1 || $output != "error: can't fetch origin, because git failed: "?* ]]; then
+  echo "error: When git can't fetch origin, scripts/release-checks must exit with code 1 and print \"error: can't fetch origin, because git failed: \" and git's error, but it exited with code $status and printed \"$output\"." >&2
+  failed_cases=$((failed_cases + 1))
+fi
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/release-checks.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/release-checks.test passed. Cases: $case_count."

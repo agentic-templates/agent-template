@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Prints the state of an issue's open pull requests from this repository: scripts/pull-request-state <issue>
+# The issue's pull requests are the ones that close it. The script leaves out pull requests from forks and from other
+# repositories. It prints the first state that applies:
+# - merging: one has auto-merge on or is in the merge queue.
+# - stopped: one is a draft, or its auto-merge is off and the last AutoMergeDisabledEvent in its timeline has the
+#   reasonCode manually_disabled, which means that a person or an agent turned auto-merge off. GitHub also turns
+#   auto-merge off by itself, with another reasonCode, such as when someone without write access pushes to the branch.
+# - several: there's more than one.
+# - left behind <number>: there's one, which is neither of the above.
+# - none: there's none.
+# It asks gh about the repository of this checkout, or the one in GH_REPO. scripts/start-build-run,
+# scripts/take-next-issue and scripts/build-run-report run it.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if (($# != 1)); then
+  echo "error: scripts/pull-request-state takes one argument, the number of an issue, and it got $#." >&2
+  exit 1
+fi
+if [[ ! $1 =~ ^[1-9][0-9]*$ ]]; then
+  echo "error: scripts/pull-request-state takes the number of an issue, such as 12, and it got \"$1\"." >&2
+  exit 1
+fi
+issue=$1
+
+query=$(cat <<'GRAPHQL'
+query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $repo) {
+    nameWithOwner
+    issue(number: $number) {
+      closedByPullRequestsReferences(first: 100, after: $endCursor) {
+        nodes {
+          number state isCrossRepository isDraft isInMergeQueue
+          repository { nameWithOwner }
+          autoMergeRequest { enabledAt }
+          timelineItems(itemTypes: [AUTO_MERGE_DISABLED_EVENT], last: 1) {
+            nodes { ... on AutoMergeDisabledEvent { reasonCode } }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+GRAPHQL
+)
+# Prints each pull request that closes the issue on a line: its number, its state, whether it's from this repository,
+# whether it's a draft, whether auto-merge is on, whether it's in the merge queue and the reasonCode of the last time
+# auto-merge was turned off, if it ever was, separated by tabs. GitHub lists merged pull requests here too.
+# shellcheck disable=SC2016 # $this_repository is a jq variable, which jq expands.
+jq_filter='.data.repository.nameWithOwner as $this_repository
+  | .data.repository.issue.closedByPullRequestsReferences.nodes[]
+  | [.number, .state, (.isCrossRepository == false and .repository.nameWithOwner == $this_repository), .isDraft,
+     (.autoMergeRequest != null), .isInMergeQueue, (.timelineItems.nodes[0].reasonCode // "")]
+  | @tsv'
+
+# Prints the state of the open pull requests from this repository, from the lines that the jq filter prints:
+# state_of <pull requests>
+state_of() {
+  local number state is_from_this_repository is_draft has_auto_merge is_in_merge_queue disable_reason
+  local count=0 last_number="" is_merging="" is_stopped=""
+  # The reasonCode comes last, because read joins the tabs around an empty field.
+  while IFS=$'\t' read -r number state is_from_this_repository is_draft has_auto_merge is_in_merge_queue disable_reason; do
+    if [[ -z $number || $state != OPEN || $is_from_this_repository != true ]]; then
+      continue
+    fi
+    count=$((count + 1))
+    last_number=$number
+    if [[ $has_auto_merge == true || $is_in_merge_queue == true ]]; then
+      is_merging=yes
+    elif [[ $is_draft == true || $disable_reason == manually_disabled ]]; then
+      is_stopped=yes
+    fi
+  done <<<"$1"
+  if [[ -n $is_merging ]]; then
+    echo merging
+  elif [[ -n $is_stopped ]]; then
+    echo stopped
+  elif ((count > 1)); then
+    echo several
+  elif ((count == 1)); then
+    echo "left behind $last_number"
+  else
+    echo none
+  fi
+}
+
+if ! pull_requests=$(gh api graphql --paginate -F owner='{owner}' -F repo='{repo}' -F number="$issue" -f query="$query" --jq "$jq_filter" 2>&1); then
+  echo "error: can't list the pull requests of issue #$issue, because gh failed: $pull_requests" >&2
+  exit 1
+fi
+state_of "$pull_requests"

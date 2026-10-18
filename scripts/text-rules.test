@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Tests the functions in scripts/text-rules that print the problems in text that's posted on GitHub.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/text-rules
+source scripts/text-rules
+
+case_count=0
+failed_cases=0
+folder=$(mktemp -d)
+trap 'rm -rf "$folder"' EXIT
+
+# The name of a person's home folder. scripts/check doesn't take $person for a name, so this file holds no path into
+# a home folder.
+person=ana
+
+# Print the problems as scripts/text-rules words them: home_path <where> <path> and dash <where>, where <where> is as
+# in: The line "<line>"
+home_path() {
+  echo "$1 holds a path into a home folder, $2. Use a path relative to the repository, or ~ or \$HOME."
+}
+dash() {
+  echo "$1 has a dash between words in prose. If it joins two sentences, write two sentences, as \"Write clear sentences\" in docs/writing.md says. Otherwise, replace it with a word, as in \"pages 10 to 20\"."
+}
+
+# Prints each line of its input, and waits 1 second before the first line and 10 ms after each one, so that a write to
+# it waits until it reads: read_slowly
+read_slowly() {
+  local line
+  sleep 1
+  while IFS= read -r line; do
+    printf '%s\n' "$line"
+    sleep 0.01
+  done
+}
+
+# Checks that body_problems prints the expected problems and nothing else, and ends with code 0, when its reader reads
+# slowly: expect_problems_for_slow_reader <description of the body> <body> <expected problems>
+# Under bash 3.2, which macOS ships, printf fails with "write error: Interrupted system call" when a process that the
+# writer started ends while the write waits for the reader. The scripts that call body_problems stop at that error, so
+# the problems after it would go unreported.
+expect_problems_for_slow_reader() {
+  local description=$1 body=$2 expected=$3 problems status=0
+  case_count=$((case_count + 1))
+  rm -f "$folder/problems"
+  mkfifo "$folder/problems"
+  body_problems "$body" >"$folder/problems" 2>"$folder/errors" &
+  problems=$(read_slowly <"$folder/problems")
+  wait "$!" || status=$?
+  if [[ $status != 0 || $problems != "$expected" || -s $folder/errors ]]; then
+    echo "error: for $description, when its reader reads slowly, body_problems must print the $(grep -c . <<<"$expected") problems in the body and exit with code 0. It printed $(grep -c . <<<"$problems") lines and exited with code $status. Its errors: $(<"$folder/errors")" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Prints a sentence that has no problem, a number of times: sentences <count>
+sentences() {
+  local i
+  for ((i = 0; i < $1; i++)); do
+    printf '%s' " It adds each expense once."
+  done
+}
+
+# In the cases below, each problem has under 512 bytes, so that a write waits until all of a problem fits, and a signal
+# fails it instead of cutting it short. The lines are long, so that their problems fill the pipe to the reader within
+# 20 lines.
+body=""
+expected=""
+for ((i = 1; i <= 50; i++)); do
+  line="The app reads /Users/$person/bank-$i.csv.$(sentences 12)"
+  body+=$line$'\n'
+  expected+=$(home_path "The line \"$line\"" "/Users/$person/")$'\n'
+done
+expect_problems_for_slow_reader "a body of lines that each hold a path into a home folder" "$body" "${expected%$'\n'}"
+
+# The code block at the end has no problem. It's long, so that the body is still being read while body_problems waits
+# to write the problems with the dash.
+body=""
+expected=""
+for ((i = 1; i <= 30; i++)); do
+  line="Line $i: the app skips the expenses - it keeps the total.$(sentences 8)"
+  body+=$line$'\n'
+  expected+=$(dash "The line \"$line\"")$'\n'
+done
+code_line=""
+for ((i = 0; i < 600; i++)); do
+  code_line+="total += amount "
+done
+body+="~~~"$'\n'
+for ((i = 1; i <= 20; i++)); do
+  body+=$code_line$'\n'
+done
+body+="~~~"
+expect_problems_for_slow_reader "a body of lines that each have a dash between words, then a long code block" "$body" \
+  "${expected%$'\n'}"
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/text-rules.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/text-rules.test passed. Cases: $case_count."

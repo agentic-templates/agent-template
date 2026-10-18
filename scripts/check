@@ -1,0 +1,416 @@
+#!/usr/bin/env bash
+# Runs the checks that CI runs on the code. Run it before you push.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# When the checks pass, the script records the tree of the files it checked, which a hook compares with the files
+# of a pull request. It takes the tree before the checks start, so that a file changed during the checks doesn't
+# count as checked. If git can't give the tree, the checks still run, and the script fails at the end.
+# shellcheck source=scripts/hooks/check-passed.bash
+source scripts/hooks/check-passed.bash
+checked_tree=$(tree_on_disk) || checked_tree=""
+
+# The repository's settings require each action to be pinned to a full commit SHA, which doesn't show which version
+# of the action runs. So a comment after the SHA gives the version, as in "# v5.0.0".
+# A version starts with a digit, or with v and a digit.
+optional_quote="[\"']?"
+# Group 2 holds the action, and group 3 what follows the SHA.
+pinned_action="^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*$optional_quote([^@[:space:]\"']+)@[0-9a-f]{40}$optional_quote([[:space:]].*)?\$"
+version_comment='^[[:space:]]+#[[:space:]]*v?[0-9]'
+found_pin_without_version=""
+# git grep prints the file, NUL, the line number, NUL and the line, for each line that may pin an action.
+while IFS= read -r -d '' file && IFS= read -r -d '' line_number && IFS= read -r line; do
+  if [[ ! $line =~ $pinned_action ]]; then
+    continue
+  fi
+  action=${BASH_REMATCH[2]}
+  after_sha=${BASH_REMATCH[3]}
+  if [[ ! $after_sha =~ $version_comment ]]; then
+    echo "error: $file:$line_number pins $action to a commit SHA without a version comment. Write the version that the SHA pins in a comment after it, as in \"# v5.0.0\"." >&2
+    found_pin_without_version=yes
+  fi
+done < <(git grep --null -n -I -E -e 'uses:.*@[0-9a-f]{40}' -- '.github/*.yml' '.github/*.yaml')
+if [[ -n "$found_pin_without_version" ]]; then
+  exit 1
+fi
+
+# shellcheck source=scripts/missing-tools
+source scripts/missing-tools
+
+# Some tools read a file with one of these names instead of AGENTS.md.
+# shellcheck source=scripts/instruction-file-names
+source scripts/instruction-file-names
+found_instruction_file=""
+shopt -s nocasematch
+# git lists the tracked files, and the untracked files that it doesn't ignore.
+# -e and -L skip the deleted files that it also lists.
+while IFS= read -r -d '' file; do
+  if [[ $file =~ $instruction_file && (-e $file || -L $file) ]]; then
+    echo "error: $file makes a tool skip AGENTS.md. Move its rules into AGENTS.md or a guide in docs/, and delete the file." >&2
+    found_instruction_file=yes
+  fi
+done < <(git ls-files -z --cached --others --exclude-standard)
+shopt -u nocasematch
+if [[ -n "$found_instruction_file" ]]; then
+  exit 1
+fi
+
+# Unfinished work belongs in an issue, not in a comment, as the definition of done in AGENTS.md says.
+# The two words are split here, so that the search doesn't match its own lines.
+todo="TO""DO"
+fixme="FIX""ME"
+# -w matches the whole word, and -I skips binary files. Markdown is skipped, because the rules mention the words.
+if git grep -n -w -I -e "$todo" -e "$fixme" -- ':!*.md' >&2; then
+  echo "error: the lines above hold $todo or $fixme. Open an issue for the unfinished work instead, and remove the note." >&2
+  exit 1
+fi
+
+# shellcheck source=scripts/text-rules
+source scripts/text-rules
+
+# Files that .gitattributes marks as generated or vendored don't count.
+not_generated_or_vendored=(
+  ':(exclude,attr:linguist-generated)'
+  ':(exclude,attr:linguist-generated=true)'
+  ':(exclude,attr:linguist-vendored)'
+  ':(exclude,attr:linguist-vendored=true)'
+)
+
+# Paths into a person's home folder stay out of the files.
+found_home_path=""
+# git grep prints the file, NUL, the line number, NUL and the line, for each line that may hold such a path.
+while IFS= read -r -d '' file && IFS= read -r -d '' line_number && IFS= read -r line; do
+  while IFS= read -r path; do
+    echo "error: $file:$line_number holds a path into a home folder, $path. Use a path relative to the repository, or ~ or \$HOME." >&2
+    found_home_path=yes
+  done < <(home_paths_in "$line")
+done < <(git grep --null -n -I -E -e "$home_path" -- "${not_generated_or_vendored[@]}")
+if [[ -n "$found_home_path" ]]; then
+  exit 1
+fi
+
+# Each AGENTS.md stays small, because an agent reads every one from the root down to the folder it works in.
+max_lines=199
+max_bytes=24999
+max_bytes_on_one_path=31999
+advice='Move a procedure that only one kind of request needs into a guide of its own.'
+too_big=""
+
+agents_files=()
+while IFS= read -r -d '' file; do
+  # -f skips the deleted files that git ls-files also lists.
+  if [[ -f $file ]]; then
+    agents_files+=("$file")
+  fi
+done < <(git ls-files -z -- AGENTS.md '*/AGENTS.md')
+
+if ((${#agents_files[@]} > 0)); then
+  for file in "${agents_files[@]}"; do
+    lines=$(($(wc -l < "$file")))
+    bytes=$(($(wc -c < "$file")))
+    if ((lines > max_lines)); then
+      echo "error: $file has $lines lines, and the limit is $max_lines. $advice" >&2
+      too_big=yes
+    fi
+    if ((bytes > max_bytes)); then
+      echo "error: $file has $bytes bytes, and the limit is $max_bytes. $advice" >&2
+      too_big=yes
+    fi
+  done
+fi
+
+# Codex reads the AGENTS.md files from the root down to the folder it works in, up to a size limit for all of them together.
+if ((${#agents_files[@]} > 0)); then
+  for file in "${agents_files[@]}"; do
+    folder=$(dirname "$file")
+    bytes_on_path=0
+    files_on_path=0
+    for other in "${agents_files[@]}"; do
+      other_folder=$(dirname "$other")
+      if [[ $other_folder == . || $folder == "$other_folder" || $folder == "$other_folder"/* ]]; then
+        bytes_on_path=$((bytes_on_path + $(wc -c < "$other")))
+        files_on_path=$((files_on_path + 1))
+      fi
+    done
+    if ((files_on_path > 1 && bytes_on_path > max_bytes_on_one_path)); then
+      echo "error: the AGENTS.md files from the root down to $folder have $bytes_on_path bytes together, and the limit is $max_bytes_on_one_path. $advice" >&2
+      too_big=yes
+    fi
+  done
+fi
+if [[ -n "$too_big" ]]; then
+  exit 1
+fi
+
+# Succeeds if a line of the input is exactly the text: has_line <text>
+# With -q, grep would stop reading at the first match. The command that writes to grep could then fail
+# on the closed pipe, and pipefail would fail the whole pipeline.
+has_line() {
+  grep -F -x -- "$1" >/dev/null
+}
+
+# Each tracked text file stays at 1,000 lines or fewer, because an agent reads a whole file into its context.
+max_file_lines=1000
+# The list of files that may be longer, if the project has one. Each line holds a file's path from the repository's root,
+# a space and the reason. The errors don't mention the list, because adding a file to it loosens the check,
+# which docs/code.md allows only when the issue asks for it.
+long_files_list=scripts/long-files
+
+# Succeeds if a file has a lockfile's name: is_lockfile <path>
+# A package manager writes each lockfile, so the project can't split one. A project whose lockfile isn't here adds its name.
+is_lockfile() {
+  case ${1##*/} in
+    package-lock.json | pnpm-lock.yaml | yarn.lock | bun.lock | uv.lock | poetry.lock | Pipfile.lock | Cargo.lock | \
+      go.sum | Gemfile.lock | composer.lock | pubspec.lock | Package.resolved | mix.lock)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+long_file_error=""
+listed_files=""
+if [[ -f $long_files_list ]]; then
+  while read -r path reason || [[ -n $path ]]; do
+    # A blank line leaves path empty.
+    if [[ -z $path ]]; then
+      continue
+    fi
+    listed_files+=$path$'\n'
+    if [[ -z $reason ]]; then
+      echo "error: $long_files_list lists $path without a reason. Add a space and the reason after the path." >&2
+      long_file_error=yes
+    fi
+  done < "$long_files_list"
+fi
+
+files_over_the_limit=""
+# -I skips the files that git counts as binary. The empty pattern matches every line, so -c counts each file's lines.
+# git grep prints the file, NUL and the count.
+while IFS= read -r -d '' file && IFS= read -r line_count; do
+  if ((line_count <= max_file_lines)) || is_lockfile "$file"; then
+    continue
+  fi
+  files_over_the_limit+=$file$'\n'
+  if ! has_line "$file" <<<"$listed_files"; then
+    echo "error: $file has $line_count lines, and the limit is $max_file_lines. Move a part with its own responsibility into a file of its own." >&2
+    long_file_error=yes
+  fi
+done < <(git grep --null -I -c '' -- "${not_generated_or_vendored[@]}")
+
+while IFS= read -r path; do
+  if [[ -n $path ]] && ! has_line "$path" <<<"$files_over_the_limit"; then
+    echo "error: $long_files_list lists $path, which scripts/check accepts without the list. Remove its line, or fix the path." >&2
+    long_file_error=yes
+  fi
+done <<<"$listed_files"
+if [[ -n "$long_file_error" ]]; then
+  exit 1
+fi
+
+# Each tracked file that starts with #! is executable in git, because a clone can't run it otherwise,
+# and scripts/hooks/before-tool skips a check that isn't executable.
+found_mode_error=""
+# git ls-files -s prints each file's mode, object and stage, then a tab and its path. A regular file that isn't
+# executable has mode 100644. Symlinks and submodules have modes of their own.
+while IFS= read -r -d '' entry; do
+  file=${entry#*$'\t'}
+  if [[ ${entry%% *} != 100644 || ! -f $file ]]; then
+    continue
+  fi
+  first_line=""
+  IFS= read -r first_line < "$file" || true
+  if [[ $first_line == '#!'* ]]; then
+    # The allow rules for chmod in .claude/settings.json match chmod +x only when it runs as a command of its own.
+    echo "error: $file starts with #!, and git doesn't record it as executable. Run chmod +x $file as a command of its own, and then commit the change. If git ignores file modes, as it can on Windows, run git update-index --chmod=+x $file instead." >&2
+    found_mode_error=yes
+  fi
+done < <(git ls-files -s -z)
+if [[ -n "$found_mode_error" ]]; then
+  exit 1
+fi
+
+# Each check of the hooks has a test, as the comment at the top of scripts/hooks/before-tool asks,
+# because a check that fails on its own error lets every action through, and only its test shows that.
+found_untested_check=""
+while IFS= read -r -d '' hook_check; do
+  if [[ -f $hook_check && ! -f ${hook_check%.check}.test ]]; then
+    echo "error: $hook_check has no test. Add ${hook_check%.check}.test, which runs the check through scripts/hooks/before-tool, as the other tests in scripts/hooks/ do." >&2
+    found_untested_check=yes
+  fi
+done < <(git ls-files -z -- 'scripts/hooks/*.check')
+if [[ -n "$found_untested_check" ]]; then
+  exit 1
+fi
+
+# The Markdown files refer to sections by their headings, in quotes. Each name must match a heading in its file,
+# so that a renamed or removed section doesn't leave a name that leads nowhere.
+# A name is written as "<heading>" in <file>, or as "<heading>" describes or "<heading>" says for a section of its own file.
+# <file> is a path from the repository's root, written as AGENTS.md, `docs/planning.md` or [docs/releasing.md](docs/releasing.md).
+# In a link, its text names the file. A name with describes or says can also match the label of a field in an issue form.
+quoted_name='"([^"]+)"'
+markdown_path='([A-Za-z0-9_./-]+\.md)'
+named_file="($markdown_path|\`$markdown_path\`|\[$markdown_path]\([^)]*\))"
+# Text that matches this names a section.
+section_name="$quoted_name (in $named_file|describes|says)"
+issue_forms=.github/ISSUE_TEMPLATE
+
+# Prints the text of each heading in a Markdown file, at any level: headings <file>
+headings() {
+  sed -n 's/^#\{1,6\} //p' "$1"
+}
+
+# Prints the label of each field in the issue forms.
+form_field_labels() {
+  local form
+  for form in "$issue_forms"/*; do
+    if [[ -f $form ]]; then
+      sed -n 's/^[[:space:]]*label:[[:space:]]*//p' "$form"
+    fi
+  done
+}
+
+# Prints each section name in a Markdown file on a line of its own: its line number, the name and the file
+# that the name points to, separated by tabs. The file is empty for describes and says: section_names_in <file>
+section_names_in() {
+  local line line_number=0 rest
+  # The test after || also reads a last line that has no line break.
+  while IFS= read -r line || [[ -n $line ]]; do
+    line_number=$((line_number + 1))
+    rest=$line
+    while [[ $rest =~ $section_name ]]; do
+      # One of the groups 4, 5 and 6 holds the path, as it's written plainly, in backticks or as a link's text.
+      printf '%s\t%s\t%s\n' "$line_number" "${BASH_REMATCH[1]}" "${BASH_REMATCH[4]}${BASH_REMATCH[5]}${BASH_REMATCH[6]}"
+      rest=${rest#*"${BASH_REMATCH[0]}"}
+    done
+  done < "$1"
+}
+
+# Prints an error and fails if a section name matches nothing:
+# check_section_name <Markdown file> <line number> <name> <file that the name points to, or empty for its own file>
+check_section_name() {
+  local file=$1 line_number=$2 name=$3 target=$4
+  if [[ -z $target ]]; then
+    if headings "$file" | has_line "$name" || form_field_labels | has_line "$name"; then
+      return 0
+    fi
+    echo "error: $file:$line_number names \"$name\", which matches no heading in $file and no field label in $issue_forms/. Fix the name, or the heading." >&2
+    return 1
+  fi
+  if [[ ! -f $target ]]; then
+    echo "error: $file:$line_number names \"$name\" in $target, which doesn't exist. Write the path from the repository's root to the file." >&2
+    return 1
+  fi
+  if ! headings "$target" | has_line "$name"; then
+    echo "error: $file:$line_number names \"$name\" in $target, which has no such heading. Fix the name, or the heading." >&2
+    return 1
+  fi
+}
+
+broken_name=""
+while IFS= read -r -d '' file; do
+  # -f skips the deleted files that git ls-files also lists.
+  if [[ ! -f $file ]]; then
+    continue
+  fi
+  while IFS=$'\t' read -r line_number name target; do
+    if ! check_section_name "$file" "$line_number" "$name" "$target"; then
+      broken_name=yes
+    fi
+  done < <(section_names_in "$file")
+done < <(git ls-files -z -- '*.md')
+if [[ -n "$broken_name" ]]; then
+  exit 1
+fi
+
+# The prose in the Markdown files follows the rules that scripts/text-rules finds.
+found_prose_error=""
+while IFS= read -r -d '' file; do
+  # -f skips the deleted files that git ls-files also lists.
+  if [[ ! -f $file ]]; then
+    continue
+  fi
+  while IFS=$'\t' read -r line_number line; do
+    # prose_in only replaces parts of a line, and what it puts in their place can't break a rule.
+    # So a line that breaks no rule as it is passes, and the check skips prose_in, which is slower.
+    if [[ $line != *\;* && ! $line =~ $dash_between_words ]] && ! has_click_here_link "$line"; then
+      continue
+    fi
+    prose=$(prose_in "$line")
+    if [[ $prose == *\;* ]]; then
+      echo "error: $file:$line_number has a semicolon in prose. Write two sentences, as \"Write clear sentences\" in docs/writing.md says." >&2
+      found_prose_error=yes
+    fi
+    if [[ $prose =~ $dash_between_words ]]; then
+      echo "error: $file:$line_number has a dash between words in prose. If it joins two sentences, write two sentences, as \"Write clear sentences\" in docs/writing.md says. Otherwise, replace it with a word, as in \"pages 10 to 20\"." >&2
+      found_prose_error=yes
+    fi
+    if has_click_here_link "$prose"; then
+      echo "error: $file:$line_number has a link whose text is \"click here\". Make the link text name the page it opens, as \"Organize a page\" in docs/pages.md says." >&2
+      found_prose_error=yes
+    fi
+  done < <(lines_outside_code_blocks "$file")
+done < <(git ls-files -z -- '*.md' "${not_generated_or_vendored[@]}")
+if [[ -n "$found_prose_error" ]]; then
+  exit 1
+fi
+
+# scripts/test-check sets CHECK_UNDER_TEST in its copies to skip unrelated checks and prevent recursion.
+# Only its ShellCheck cases set the value to shellcheck, to test the real invocation and file discovery below.
+if [[ -z "${CHECK_UNDER_TEST:-}" || ${CHECK_UNDER_TEST:-} == shellcheck ]]; then
+  if has shellcheck https://github.com/koalaman/shellcheck#installing; then
+    shebang='^#!(/bin/|/usr/bin/env )(sh|bash)([[:space:]]|$)'
+    # -f skips the submodules and deleted files that git ls-files also lists.
+    git ls-files -z | while IFS= read -r -d '' file; do
+      if [[ -f $file ]] && IFS= read -r first_line < "$file" && [[ $first_line =~ $shebang ]]; then
+        printf '%s\0' "$file"
+      fi
+    done | xargs -0 shellcheck -x
+  fi
+fi
+
+if [[ -z "${CHECK_UNDER_TEST:-}" ]]; then
+  if has actionlint https://github.com/rhysd/actionlint/blob/main/docs/install.md; then
+    actionlint
+  fi
+
+  if has zizmor https://docs.zizmor.sh/installation/; then
+    # zizmor checks actions against GitHub's advisories only when it has a GitHub token,
+    # such as GH_TOKEN. CI gives it one.
+    zizmor .
+  fi
+
+  # Add the project's formatter check, linter, type checker, tests and coverage check here.
+  # The copies that scripts/test-check makes skip these checks, because the copies hold only the tracked files.
+  # Keep this comment after setup, because a case in scripts/test-check finds the place by it.
+fi
+
+# The linux job in .github/workflows/ci.yml sets SKIP_SCRIPT_TESTS, because the script-tests job runs the tests of the
+# scripts and hooks. A hook blocks opening a pull request until scripts/check has passed on the pull request's files,
+# so a run without those tests records no pass.
+if [[ -n "${SKIP_SCRIPT_TESTS:-}" ]]; then
+  echo "Skipped the tests of the scripts and hooks because SKIP_SCRIPT_TESTS is set. A run without them records no pass, so a hook blocks opening a pull request until scripts/check passes without SKIP_SCRIPT_TESTS." >&2
+  skipped="${skipped:+$skipped, }the tests of the scripts and hooks"
+else
+  if [[ -z "${CHECK_UNDER_TEST:-}" ]]; then
+    # scripts/script-tests-needed exits with code 1 when the branch changes no file that the tests test.
+    needed=0
+    scripts/script-tests-needed --branch || needed=$?
+    if ((needed == 1)); then
+      echo "Skipped the tests of the scripts and hooks, because this branch changes no file in scripts/, .github/, .claude/ or .codex/." >&2
+    else
+      scripts/test-scripts
+    fi
+  fi
+  record=$(pass_record_path)
+  if [[ -z $checked_tree ]] || ! printf '%s\n' "$checked_tree" > "$record"; then
+    echo "error: the checks passed, but scripts/check can't record the pass in $record, and a hook blocks opening a pull request without that record. Fix the error above, and run scripts/check again." >&2
+    exit 1
+  fi
+fi
+
+if [[ -n "$skipped" ]]; then
+  echo "The checks that ran passed. These were skipped, and CI runs them: $skipped."
+else
+  echo "Checks passed."
+fi

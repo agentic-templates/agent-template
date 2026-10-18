@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Succeeds if a change needs the tests of the scripts and hooks, and fails with code 1 if it doesn't:
+# scripts/script-tests-needed [--branch]
+# The tests test the files in scripts/, .github/, .claude/ and .codex/, so a change to other files, such as the docs,
+# doesn't need them.
+# - Without --branch, it reads the paths of the changed files from standard input, one to a line. The changes job in
+#   .github/workflows/ci.yml runs it this way.
+# - With --branch, it takes the files that this branch changes since the commit where it leaves origin/main, with the
+#   changes that aren't committed and the new files. When it can't find that commit, it succeeds, so that the tests
+#   run. scripts/check runs it this way.
+set -euo pipefail
+
+if (($# > 1)) || [[ $# == 1 && $1 != --branch ]]; then
+  echo "error: scripts/script-tests-needed takes no argument or --branch, and it got: $*" >&2
+  exit 2
+fi
+
+if (($# == 1)); then
+  if ! base=$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null); then
+    exit 0
+  fi
+  paths=$(git diff --name-only --no-renames "$base" -- && git ls-files --others --exclude-standard)
+else
+  paths=$(cat)
+fi
+
+while IFS= read -r path; do
+  case $path in
+    scripts/* | .github/* | .claude/* | .codex/*) exit 0 ;;
+  esac
+done <<<"$paths"
+exit 1

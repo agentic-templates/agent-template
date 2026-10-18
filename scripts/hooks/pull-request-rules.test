@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# Tests scripts/hooks/pull-request-rules.check through scripts/hooks/before-tool.
+set -euo pipefail
+# shellcheck source=scripts/hooks/testing.bash
+source "${BASH_SOURCE[0]%/*}/testing.bash"
+# shellcheck source=scripts/hooks/check-passed.bash
+source "$hooks_folder/check-passed.bash"
+
+# The cases run in repositories in a temporary folder, and git looks for no repository above it.
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+export GIT_CEILING_DIRECTORIES=$base
+# git reads none of the person's settings, such as one that signs each commit, and commits as a stand-in person.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
+
+# A stand-in for gh, first on the PATH, that answers the command that looks up an issue: #12 is an open issue, and no
+# other number exists. scripts/check-pull-request.test checks the command that the script runs.
+mkdir "$base/bin"
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+if [[ ${1:-} != api || ${2:-} != "repos/{owner}/{repo}/issues/"* ]]; then
+  echo "The stand-in for gh doesn't answer: gh $*" >&2
+  exit 1
+fi
+case ${2##*/} in
+  12) printf 'open\tfalse\tfalse\t0\n' ;;
+  *)
+    echo "gh: Not Found (HTTP 404)" >&2
+    exit 1
+    ;;
+esac
+STAND_IN
+chmod +x "$base/bin/gh"
+export PATH=$base/bin:$PATH
+
+# Prints the message that blocks a pull request with these errors: blocked <error>...
+blocked() {
+  printf '%s\n' "Blocked: the checks on pull requests in CI would fail on this one:" "$@" "Fix each problem, and run gh pr create again."
+}
+
+# Makes a folder the one that the agent works in. Cursor doesn't send that folder, so the hook uses its own,
+# which is this script's: work_in <folder>
+work_in() {
+  test_cwd=$1
+  cd "$1"
+}
+
+# Records a pass of scripts/check on the files of the current folder's repository, as scripts/check does, because
+# scripts/hooks/unchecked-pull-requests.check blocks gh pr create without it.
+record_pass() {
+  tree_on_disk >"$(pass_record_path)"
+}
+
+# A repository on GitHub, as a bare repository, whose main has notes.txt and scripts/configure-github,
+# and a clone of it with two branches:
+# - work adds a file in one commit.
+# - co-authored has a commit with a Co-authored-by trailer.
+origin=$base/origin.git
+clone=$base/clone
+git init --quiet --bare --initial-branch=main "$origin"
+git init --quiet --initial-branch=main "$base/seed"
+mkdir "$base/seed/scripts"
+echo "Notes" >"$base/seed/notes.txt"
+echo "echo Settings" >"$base/seed/scripts/configure-github"
+git -C "$base/seed" add --all
+git -C "$base/seed" commit --quiet -m "chore: start the project"
+git -C "$base/seed" push --quiet "$origin" main
+git clone --quiet "$origin" "$clone"
+git -C "$clone" switch --quiet -c co-authored
+git -C "$clone" commit --quiet --allow-empty -m "feat: export the totals" -m "Co-authored-by: Claude <noreply@anthropic.com>"
+git -C "$clone" switch --quiet -c work main
+echo "Imports" >"$clone/imports.txt"
+git -C "$clone" add imports.txt
+git -C "$clone" commit --quiet -m "feat: skip the expenses that were already imported"
+
+title="feat: skip the expenses that were already imported"
+body=$'Closes #12\n\n## What changed and why\n\nThe app skips the expenses that it has already imported.\n\n## How it was checked\n\nscripts/check passes.'
+printf '%s\n' "$body" >"$base/body.md"
+printf '%s\n' "${body/Closes #12/See #12}" >"$base/no-closing-line.md"
+no_closing_line="The body has no line that says which issue the pull request closes. Edit the body and add a line such as \"Closes #12\", with the number of the issue."
+not_a_type="The title \"skip the expenses that were already imported\" doesn't follow the format \"<type>: <what changed>\". Edit the title to match. The types are feat, fix, docs, test, refactor, perf, build, ci, revert, chore."
+
+work_in "$clone"
+record_pass
+
+# A title and body that the scripts pass, from --body, from --body-file, and from a path relative to the folder
+expect_allow Bash "gh pr create --title '$title' --body '$body'"
+expect_allow Bash "gh pr create --title '$title' --body-file $base/body.md"
+expect_allow Bash "gh pr create -t '$title' -F ../body.md --label feature"
+expect_allow Bash "gh pr new --title='$title' --body-file=../body.md"
+expect_allow Bash "gh pr create --base main --title '$title' --body-file ../body.md"
+
+# A title or body that a script fails, in commands that open a pull request in other ways
+expect_block Bash "gh pr create --title 'skip the expenses that were already imported' --body-file ../body.md" \
+  "$(blocked "$not_a_type")"
+expect_block Bash "gh pr create --title '$title' --body-file ../no-closing-line.md" "$(blocked "$no_closing_line")"
+expect_block Bash "git push && GH_DEBUG=1 gh pr new --body-file ../no-closing-line.md --title 'skip the expenses that were already imported'" \
+  "$(blocked "$not_a_type" "$no_closing_line")"
+
+# Each repository flag form preserves the title and body checks, including the new alias.
+for subcommand in create new; do
+  expect_repository_flags 0 "" pr "$subcommand" "--title '$title' --body '$body'"
+  expect_repository_flags 2 "Blocked: the command gives no title, so this hook can't check it. Give the title with --title." pr "$subcommand" '--fill'
+  expect_repository_flags 2 "$(blocked "$no_closing_line")" pr "$subcommand" "--title '$title' --body-file ../no-closing-line.md"
+  expect_repository_flags 2 "$(blocked "$not_a_type")" pr "$subcommand" "--title 'skip the expenses that were already imported' --body-file ../body.md"
+  expect_repository_flags 0 "" pr "$subcommand" '--help'
+  expect_repository_flags 0 "" pr "$subcommand" '--fill --dry-run'
+done
+expect_repository_flags 0 "" pr view '7'
+for repository in '-R jtmpl/other' '--repo jtmpl/other' '--repo=jtmpl/other'; do
+  expect_allow Bash "echo gh pr $repository create"
+  expect_block Bash "echo \"\$(gh pr $repository create --fill)\"" \
+    "Blocked: the command gives no title, so this hook can't check it. Give the title with --title."
+  expect_allow Bash "echo '\$(gh pr $repository create --fill)'"
+done
+
+# The commits of the branch that --head names, alone or after a person's name and a colon
+co_authored_commit=$(git rev-parse --short co-authored)
+co_authored="Commit $co_authored_commit \"feat: export the totals\" has a Co-authored-by trailer, for Claude <noreply@anthropic.com>. Rewrite the commit without the trailer, such as with git commit --amend when it's the latest commit, and push the branch again with --force-with-lease."
+expect_block Bash "gh pr create --head co-authored --title '$title' --body-file ../body.md" "$(blocked "$co_authored")"
+expect_block Bash "gh pr create -H jtmpl:co-authored --title '$title' --body-file ../body.md" "$(blocked "$co_authored")"
+
+# Bodies from here-documents and standard input, with quotes in the text, which would end a quoted word
+quoted_body=${body/"skips the expenses"/skips the \"imported\" expenses}
+expect_allow Bash "gh pr create --title '$title' --body \"\$(cat <<'EOF'
+$quoted_body
+EOF
+)\""
+expect_allow Bash "gh pr create --title '$title' --body-file - <<'EOF'
+$quoted_body
+EOF"
+expect_allow Bash "gh pr create --title '$title' --body-file - < ../body.md"
+
+# Titles and bodies that the hook reads as the command writes them, without filling in variables
+may_expand="This hook reads the title and body as the command writes them, without running \$( ) or filling in variables."
+expect_block Bash "gh pr create --title \"\$type: skip the expenses\" --body-file ../body.md" \
+  "$(blocked "The title \"\$type: skip the expenses\" doesn't follow the format \"<type>: <what changed>\". Edit the title to match. The types are feat, fix, docs, test, refactor, perf, build, ci, revert, chore.") $may_expand"
+expect_block Bash "gh pr create --title '$title' --body \"\$(cat ../body.md)\"" \
+  "$(blocked "$no_closing_line" "The body has no heading \"What changed and why\". Add it as .github/pull_request_template.md has it, and write under it what the template's comment asks for.") $may_expand"
+
+# Commands that give no title or no body, or a body file that the hook can't read before the command runs
+expect_block Bash "gh pr create --fill" "Blocked: the command gives no title, so this hook can't check it. Give the title with --title."
+expect_block Bash "gh pr create --body-file ../body.md" "Blocked: the command gives no title, so this hook can't check it. Give the title with --title."
+expect_block Bash "gh pr create --title '$title' --fill" \
+  "Blocked: the command gives no body, so this hook can't check the pull request's body. Give the body with --body, or write it to a file and give the file with --body-file."
+expect_block Bash "gh pr create --title '$title' --body-file ../missing.md" \
+  "Blocked: this hook checks the body file before the command runs, and ../missing.md doesn't exist yet or the command writes it. Write the file in a command of its own first, and give its path without variables."
+# copy.md exists, and the command writes it before gh reads it.
+cp "$base/body.md" "$base/copy.md"
+expect_block Bash "cat ../body.md > ../copy.md && gh pr create --title '$title' --body-file ../copy.md" \
+  "Blocked: this hook checks the body file before the command runs, and ../copy.md doesn't exist yet or the command writes it. Write the file in a command of its own first, and give its path without variables."
+
+# Commands that don't open a pull request
+expect_allow Bash "gh pr create --fill --dry-run"
+expect_allow Bash "gh pr create --help"
+expect_allow Bash "gh pr view 7 --json title"
+expect_allow Bash "echo gh pr create --fill"
+
+# A branch from a main that has moved on since the clone last fetched it. The commit on main that the clone hasn't
+# fetched changes scripts/configure-github and has a Co-authored-by trailer, and it's no part of the pull request.
+git -C "$base/seed" switch --quiet -c fresh
+echo "echo More settings" >>"$base/seed/scripts/configure-github"
+git -C "$base/seed" commit --quiet -am "feat: turn on code scanning" -m "Co-authored-by: Ana <ana@example.com>"
+git -C "$base/seed" push --quiet "$origin" fresh:main
+echo "Totals" >"$base/seed/totals.txt"
+git -C "$base/seed" add totals.txt
+git -C "$base/seed" commit --quiet -m "feat: show the monthly totals"
+git -C "$base/seed" push --quiet "$origin" fresh
+git fetch --quiet origin fresh
+git switch --quiet fresh
+record_pass
+expect_allow Bash "gh pr create --title 'feat: show the monthly totals' --body-file ../body.md"
+
+# When the hook can't find the pull request's commits, it has nothing to check them with.
+expect_allow Bash "gh pr create --head missing --title 'skip the expenses that were already imported' --body-file ../body.md"
+expect_allow Bash "gh pr create --base missing --title 'skip the expenses that were already imported' --body-file ../body.md"
+git init --quiet --initial-branch=main "$base/no-remote"
+work_in "$base/no-remote"
+git commit --quiet --allow-empty -m "chore: start the project"
+record_pass
+expect_allow Bash "gh pr create --title 'skip the expenses that were already imported' --body-file ../body.md"
+mkdir "$base/outside"
+work_in "$base/outside"
+expect_allow Bash "gh pr create --title 'skip the expenses that were already imported' --body-file ../body.md"
+
+finish_tests

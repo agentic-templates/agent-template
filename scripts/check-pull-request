@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# Checks a pull request's body, the prose of its title, and its commits: scripts/check-pull-request <base> <head>
+# <base> is the latest commit of the branch that the pull request merges into, and <head> the pull request's latest
+# commit. The title job in .github/workflows/pr-title.yml passes the title in TITLE and the body in BODY, and so does
+# the hook scripts/hooks/pull-request-rules.check before gh pr create. Run it in the repository's folder.
+# - The body has a line that closes an issue, such as "Closes #12", and no line that closes another issue. The issue,
+#   which gh looks up, is open, is in this repository, and has neither the label research nor sub-issues.
+# - No word that closes an issue comes right before an issue's number in the middle of a line, as in
+#   "the pull request that fixed #12", because GitHub closes that issue too.
+# - The body has the heading of .github/pull_request_template.md, "What changed and why", at any level, with text
+#   under it besides HTML comments.
+# - The title and the body have no path into a home folder, and no semicolon or dash between words in prose, as
+#   scripts/text-rules finds them.
+# - If the pull request changes scripts/configure-github, the body says that a maintainer needs to run it.
+# - No commit has a Co-authored-by trailer.
+# It prints each problem as an error for GitHub Actions, and fails once it has checked everything.
+set -euo pipefail
+# shellcheck source=scripts/text-rules
+source "$(dirname "$0")/text-rules"
+
+if (($# != 2)); then
+  echo "::error::scripts/check-pull-request takes two arguments, the base commit and the head commit of the pull request, and it got $#."
+  exit 1
+fi
+base=$1
+head=$2
+for commit in "$base" "$head"; do
+  if ! git rev-parse --verify --quiet "$commit^{commit}" >/dev/null; then
+    echo "::error::This repository has no commit $commit. Fetch it, and run scripts/check-pull-request again."
+    exit 1
+  fi
+done
+
+title=${TITLE:-}
+# The browser's editor ends each line of the body with \r\n.
+body=${BODY:-}
+body=${body//$'\r'/}
+problem_count=0
+
+# Prints a problem as an error for GitHub Actions, and counts it: report <message>
+report() {
+  echo "::error::$1"
+  problem_count=$((problem_count + 1))
+}
+
+# The words that GitHub treats as closing an issue, in any case, and the number of the issue they close.
+closing_words='(close[sd]?|fix(es|ed)?|resolve[sd]?):? +#([0-9]+)'
+# Closing words at the start of a line. Group 3 holds the issue's number.
+closing_line="^$closing_words"
+# Closing words in the middle of a line, after a character that can't be part of a word.
+# Group 1 holds the closing words, and group 4 the issue's number.
+mid_line_closing="[^[:alnum:]_]($closing_words)"
+
+# Prints the number of the issue that a line closes, or nothing: closed_number <line>
+closed_number() {
+  local number=""
+  shopt -s nocasematch
+  if [[ $1 =~ $closing_line ]]; then
+    number=${BASH_REMATCH[3]}
+  fi
+  shopt -u nocasematch
+  printf '%s' "$number"
+}
+
+# Reports the problem with the issue that a closing line names, if it has one: check_closed_issue <number> <line>
+check_closed_issue() {
+  local number=$1 line=$2 answer state is_pull_request is_research sub_issue_count
+  # gh prints the issue's state, whether it's a pull request, whether it has the label research, and the number of
+  # its sub-issues, separated by tabs. GitHub counts a pull request as an issue.
+  if ! answer=$(gh api "repos/{owner}/{repo}/issues/$number" \
+    --jq '[.state, (.pull_request != null), any(.labels[]; .name == "research"), (.sub_issues_summary.total // 0)] | @tsv' 2>&1); then
+    if [[ $answer == *"(HTTP 404)"* ]]; then
+      report "The line \"$line\" names #$number, which isn't an issue in this repository. Edit the line to name the open issue that the pull request closes."
+    else
+      report "Can't look up #$number, because gh failed: $answer. Try again once gh can reach GitHub."
+    fi
+    return 0
+  fi
+  IFS=$'\t' read -r state is_pull_request is_research sub_issue_count <<<"$answer"
+  if [[ $is_pull_request == true ]]; then
+    report "The line \"$line\" names #$number, which is a pull request, not an issue. Edit the line to name the open issue that the pull request closes."
+  elif [[ $state != open ]]; then
+    report "The line \"$line\" names #$number, which is closed. Edit the line to name the open issue that the pull request closes."
+  elif [[ $is_research == true ]]; then
+    report "The line \"$line\" names #$number, which is a research issue. A research issue ends in a comment that answers its question, not in a pull request. Edit the line to name the issue that the pull request builds."
+  elif [[ $sub_issue_count != 0 ]]; then
+    report "The line \"$line\" names #$number, which has sub-issues. Edit the line to name the sub-issue that the pull request builds."
+  fi
+}
+
+# Reports each closing word that comes right before an issue's number in the middle of a line: check_mid_line <line>
+check_mid_line() {
+  local line=$1 rest=$1 words number
+  shopt -s nocasematch
+  while [[ $rest =~ $mid_line_closing ]]; do
+    words=${BASH_REMATCH[1]}
+    number=${BASH_REMATCH[4]}
+    report "The line \"$line\" has the words \"$words\", so GitHub closes #$number when the pull request merges. Reword the sentence, such as from \"the pull request that fixed #$number\" to \"the pull request for #$number\"."
+    rest=${rest#*"${BASH_REMATCH[0]}"}
+  done
+  shopt -u nocasematch
+}
+
+# The numbers of the issues that the closing lines name, each once, separated by spaces.
+closed_numbers=""
+while IFS= read -r line; do
+  number=$(closed_number "$line")
+  if [[ -n $number ]]; then
+    if [[ " $closed_numbers " != *" $number "* ]]; then
+      closed_numbers+="${closed_numbers:+ }$number"
+    fi
+    check_closed_issue "$number" "$line"
+  fi
+  check_mid_line "$line"
+done <<<"$body"
+if [[ -z $closed_numbers ]]; then
+  report "The body has no line that says which issue the pull request closes. Edit the body and add a line such as \"Closes #12\", with the number of the issue."
+elif [[ $closed_numbers == *" "* ]]; then
+  report "The body closes more than one issue: #${closed_numbers// /, #}. A pull request closes one issue, so keep the line for the issue that it builds, and build each other issue in a pull request of its own."
+fi
+
+# The body without its HTML comments, which hold no headings or sentences that count.
+text=$(without_html_comments "$body")
+
+# A heading at any level. Group 2 holds its text.
+heading_line='^ {0,3}#{1,6}([[:space:]]+(.*))?$'
+# The #s that can close a heading, after a space. Group 1 holds the text before them.
+closing_hashes='^(.*[^[:space:]])[[:space:]]+#+$'
+
+# Prints a heading's text, without the spaces at its end and the #s that can close it: heading_text <line>
+heading_text() {
+  local text=""
+  if [[ $1 =~ $heading_line ]]; then
+    text=${BASH_REMATCH[2]}
+  fi
+  text=${text%"${text##*[![:space:]]}"}
+  if [[ $text =~ $closing_hashes ]]; then
+    text=${BASH_REMATCH[1]}
+  fi
+  printf '%s' "$text"
+}
+
+# Reports a heading of the template that's missing from the body, or has no text under it: check_section <heading>
+# A section runs to the next heading.
+check_section() {
+  local heading=$1 line is_in_section="" has_heading="" has_text=""
+  while IFS= read -r line; do
+    if [[ $line =~ $heading_line ]]; then
+      is_in_section=""
+      if [[ $(heading_text "$line") == "$heading" ]]; then
+        is_in_section=yes
+        has_heading=yes
+      fi
+    elif [[ -n $is_in_section && $line == *[![:space:]]* ]]; then
+      has_text=yes
+    fi
+  done <<<"$text"
+  if [[ -z $has_heading ]]; then
+    report "The body has no heading \"$heading\". Add it as .github/pull_request_template.md has it, and write under it what the template's comment asks for."
+  elif [[ -z $has_text ]]; then
+    report "The body has no text under the heading \"$heading\", apart from HTML comments. Write under it what the template's comment asks for."
+  fi
+}
+
+check_section "What changed and why"
+
+while IFS= read -r problem; do
+  report "$problem"
+done < <(title_problems "$title"; body_problems "$body")
+
+configure_github_sentence="A maintainer with admin access needs to run scripts/configure-github after the merge."
+# The files that the pull request changes. --no-renames lists a renamed file under its old path too.
+changed_files=$(git diff --name-only --no-renames "$base...$head")
+if grep -Fx scripts/configure-github >/dev/null <<<"$changed_files" && [[ $text != *"$configure_github_sentence"* ]]; then
+  report "The pull request changes scripts/configure-github, and the body doesn't say that a maintainer needs to run it. Add this sentence under \"What changed and why\": $configure_github_sentence"
+fi
+
+# git prints each commit's short hash, its subject and the people that its Co-authored-by trailers name, in any case,
+# separated by the character 0x1F, which a subject can't hold.
+while IFS=$'\x1f' read -r commit subject co_authors; do
+  if [[ -n $co_authors ]]; then
+    report "Commit $commit \"$subject\" has a Co-authored-by trailer, for $co_authors. Rewrite the commit without the trailer, such as with git commit --amend when it's the latest commit, and push the branch again with --force-with-lease."
+  fi
+done < <(git log --format='%h%x1f%s%x1f%(trailers:key=Co-authored-by,valueonly,separator=%x2C )' "$base..$head")
+
+if ((problem_count > 0)); then
+  exit 1
+fi

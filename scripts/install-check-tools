@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Installs shellcheck, actionlint and zizmor, the tools that scripts/check needs, into the folder you give it.
+# CI runs it. It installs only the Linux builds for x86-64, and prints nothing when it succeeds.
+set -euo pipefail
+
+# To update a tool, change its version and its checksum. GitHub lists the
+# SHA-256 checksum of every file on the tool's release page.
+shellcheck_version=0.11.0
+shellcheck_sha256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+actionlint_version=1.7.12
+actionlint_sha256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+zizmor_version=1.30.1
+zizmor_sha256=e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a
+
+if (($# != 1)); then
+  echo "error: scripts/install-check-tools takes one argument, the folder to install the tools into, and it got $#. For example: scripts/install-check-tools \"\$HOME/.local/bin\"" >&2
+  exit 1
+fi
+folder=$1
+
+system="$(uname -s) $(uname -m)"
+if [[ $system != "Linux x86_64" ]]; then
+  echo "error: this system is $system, and scripts/install-check-tools installs only Linux builds for x86-64. Install shellcheck, actionlint and zizmor another way." >&2
+  exit 1
+fi
+
+downloads=$(mktemp -d)
+trap 'rm -rf "$downloads"' EXIT
+
+# Downloads a tool's build to $downloads/<tool>, and stops unless it matches the checksum.
+download() {
+  local tool=$1 version=$2 sha256=$3 url=$4
+  if ! curl -fsSLo "$downloads/$tool" "$url"; then
+    echo "error: can't download $tool $version from $url. Check the network, and the version of $tool in scripts/install-check-tools." >&2
+    exit 1
+  fi
+  if ! echo "$sha256  $downloads/$tool" | sha256sum --check --status; then
+    echo "error: the download of $tool $version doesn't match its checksum. Check the version and the checksum of $tool in scripts/install-check-tools." >&2
+    exit 1
+  fi
+}
+
+# Every download is checked before any tool is installed, so a wrong checksum leaves the folder as it was.
+download shellcheck "$shellcheck_version" "$shellcheck_sha256" \
+  "https://github.com/koalaman/shellcheck/releases/download/v$shellcheck_version/shellcheck-v$shellcheck_version.linux.x86_64.tar.xz"
+download actionlint "$actionlint_version" "$actionlint_sha256" \
+  "https://github.com/rhysd/actionlint/releases/download/v$actionlint_version/actionlint_${actionlint_version}_linux_amd64.tar.gz"
+download zizmor "$zizmor_version" "$zizmor_sha256" \
+  "https://github.com/zizmorcore/zizmor/releases/download/v$zizmor_version/zizmor-x86_64-unknown-linux-gnu.tar.gz"
+
+mkdir -p "$folder"
+tar -xJf "$downloads/shellcheck" -C "$folder" --strip-components=1 "shellcheck-v$shellcheck_version/shellcheck"
+tar -xzf "$downloads/actionlint" -C "$folder" actionlint
+tar -xzf "$downloads/zizmor" -C "$folder" zizmor

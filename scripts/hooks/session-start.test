@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+# Tests scripts/hooks/session-start, run from a stand-in working folder two levels below a stand-in home folder.
+# The cases assume that no CLAUDE.md, .claude/CLAUDE.md or CLAUDE.local.md exists above the system's temporary folder.
+set -euo pipefail
+# shellcheck source=scripts/hooks/testing.bash
+source "${BASH_SOURCE[0]%/*}/testing.bash"
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+home=$base/home
+above=$home/work
+work=$above/repository
+
+# A stand-in for gh, first on the PATH, that reports the version in TEST_GH_VERSION.
+stand_in=$base/bin
+mkdir -p "$stand_in"
+# shellcheck disable=SC2016 # The stand-in reads TEST_GH_VERSION when it runs.
+printf '#!/usr/bin/env bash\necho "gh version $TEST_GH_VERSION (2026-08-20)"\n' >"$stand_in/gh"
+chmod +x "$stand_in/gh"
+export TEST_GH_VERSION=2.98.0
+
+# A stand-in for curl, first on the PATH, that records each call and then fails, so that an install fails without the network.
+# A stand-in for uname reports Linux on x86-64, which scripts/install-check-tools needs before it calls curl.
+# shellcheck disable=SC2016 # $1 is the stand-in's own argument.
+printf '#!/usr/bin/env bash\ncase $1 in -s) echo Linux ;; -m) echo x86_64 ;; esac\n' >"$stand_in/uname"
+chmod +x "$stand_in/uname"
+curl_calls=$base/curl-calls
+printf '#!/usr/bin/env bash\necho "curl $*" >>"%s"\nexit 1\n' "$curl_calls" >"$stand_in/curl"
+chmod +x "$stand_in/curl"
+
+# A folder whose PATH has bash and the stand-in gh, but no jq.
+no_jq=$base/no-jq
+mkdir -p "$no_jq"
+ln -s "$(command -v bash)" "$no_jq/bash"
+ln -s "$stand_in/gh" "$no_jq/gh"
+
+# A folder whose PATH has bash and jq, but no gh.
+no_gh=$base/no-gh
+mkdir -p "$no_gh"
+ln -s "$(command -v bash)" "$no_gh/bash"
+ln -s "$(command -v jq)" "$no_gh/jq"
+
+# The file that the hook reads on standard input, in place of the JSON that Claude Code sends it.
+input_file=$base/input
+
+# Gives each case a new home and working folder, with a repository that has an AGENTS.md,
+# and the input that Claude Code sends when a session starts.
+new_folders() {
+  rm -rf "$home"
+  mkdir -p "$work/.git"
+  echo "# How to work in this repository" >"$work/AGENTS.md"
+  echo '{"source": "startup"}' >"$input_file"
+}
+
+# Runs the hook in the working folder as Claude Code does on a person's machine, and sets hook_status and hook_output.
+# Arguments such as CLAUDE_CODE_REMOTE=true set more variables: run_session_start [<name>=<value>...]
+run_session_start() {
+  hook_status=0
+  hook_output=$(cd "$work" && env -u CLAUDE_CODE_REMOTE -u CLAUDE_ENV_FILE HOME="$home" CLAUDECODE=1 PATH="$stand_in:$PATH" "$@" \
+    "$hooks_folder/session-start" <"$input_file") || hook_status=$?
+}
+
+# Checks the hook's output: expect_output <description> <text the output holds, or "" for no output>
+expect_output() {
+  local description=$1 text=$2
+  case_count=$((case_count + 1))
+  if [[ -z $text && -n $hook_output ]]; then
+    echo "error: $description, the hook must print nothing, but it printed: $hook_output" >&2
+    failed_cases=$((failed_cases + 1))
+  elif [[ -n $text && $hook_output != *"$text"* ]]; then
+    echo "error: $description, the hook's note must hold \"$text\", but it printed: $hook_output" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks that the hook's output doesn't hold a text: expect_output_without <description> <text>
+expect_output_without() {
+  local description=$1 text=$2
+  case_count=$((case_count + 1))
+  if [[ $hook_output == *"$text"* ]]; then
+    echo "error: $description, the hook must not print \"$text\", but it printed: $hook_output" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+hidden="Claude Code didn't load AGENTS.md"
+compacted="This conversation was just compacted, so the guides that this session read from docs/ survive only in the summary. Read again each guide that \"Read the guides\" in AGENTS.md names for the work you're doing, and AGENTS.md itself if its text isn't in your context."
+
+new_folders
+echo '{"source": "compact"}' >"$input_file"
+run_session_start
+expect_output "After a compaction" "$compacted"
+
+new_folders
+echo '{"source": "compact"}' >"$input_file"
+echo "Rules" >"$work/CLAUDE.md"
+run_session_start
+expect_output "After a compaction, with a CLAUDE.md in the working folder, the note about the compaction comes first" \
+  "$compacted"$'\n'"$hidden"
+
+for source in startup clear resume; do
+  new_folders
+  echo "{\"source\": \"$source\"}" >"$input_file"
+  run_session_start
+  expect_output "With the source $source" ""
+done
+
+new_folders
+: >"$input_file"
+run_session_start
+expect_output "With no input" ""
+
+new_folders
+echo '{}' >"$input_file"
+run_session_start
+expect_output "With the input {}" ""
+
+new_folders
+echo 'source: compact' >"$input_file"
+run_session_start
+expect_output "With input that isn't JSON" ""
+
+new_folders
+echo '{"source": "compact"}' >"$input_file"
+hook_output=$(cd "$work" && HOME=$home CLAUDECODE=1 PATH=$no_jq "$hooks_folder/session-start" <"$input_file")
+expect_output_without "After a compaction, without jq" "$compacted"
+expect_output "After a compaction, without jq" "The hooks in scripts/hooks need jq"
+
+new_folders
+echo '{"source": "compact"}' >"$input_file"
+hook_output=$(cd "$work" && HOME=$home PATH=$stand_in:$PATH env -u CLAUDECODE "$hooks_folder/session-start" <"$input_file")
+expect_output "After a compaction, without CLAUDECODE" ""
+
+new_folders
+run_session_start
+expect_output "With no file that hides AGENTS.md" ""
+
+new_folders
+echo "Rules" >"$work/CLAUDE.md"
+run_session_start
+expect_output "With a CLAUDE.md in the working folder" "- $work/CLAUDE.md"
+expect_output "With a CLAUDE.md in the working folder" "Read AGENTS.md before you do anything else"
+
+new_folders
+mkdir -p "$above/.claude"
+echo "Rules" >"$above/.claude/CLAUDE.md"
+run_session_start
+expect_output "With a .claude/CLAUDE.md in the folder above" "- $above/.claude/CLAUDE.md"
+
+new_folders
+echo "Rules" >"$work/CLAUDE.local.md"
+run_session_start
+expect_output "With a CLAUDE.local.md in the working folder" "- $work/CLAUDE.local.md"
+
+new_folders
+mkdir -p "$home/.claude"
+echo "Rules" >"$home/.claude/CLAUDE.md"
+run_session_start
+expect_output "With only ~/.claude/CLAUDE.md" ""
+
+new_folders
+printf 'Rules\n@AGENTS.md\n' >"$work/CLAUDE.md"
+run_session_start
+expect_output "With a CLAUDE.md next to AGENTS.md that imports it" ""
+
+new_folders
+printf 'Rules\n@AGENTS.md\n' >"$above/CLAUDE.md"
+run_session_start
+expect_output "With a CLAUDE.md above the repository whose @AGENTS.md line doesn't reach it" "- $above/CLAUDE.md"
+
+new_folders
+echo "Rules" >"$work/CLAUDE.md"
+mkdir -p "$home/.claude"
+echo '{"pluginConfigs": {"agents-md@builtin": {"options": {"instructionFiles": "claude-md-and-agents-md"}}}}' >"$home/.claude/settings.json"
+run_session_start
+expect_output "With Project instructions set to read both files" ""
+
+new_folders
+echo "Rules" >"$work/CLAUDE.md"
+hook_output=$(cd "$work" && HOME=$home PATH=$stand_in:$PATH env -u CLAUDECODE "$hooks_folder/session-start" <"$input_file")
+expect_output "Without CLAUDECODE" ""
+
+new_folders
+TEST_GH_VERSION=2.97.0
+run_session_start
+expect_output "With gh 2.97.0" "need gh 2.98 or later, and this machine has gh 2.97.0"
+TEST_GH_VERSION="something else"
+run_session_start
+expect_output "With a gh whose version can't be read" ""
+TEST_GH_VERSION=2.98.0
+
+new_folders
+hook_output=$(cd "$work" && HOME=$home CLAUDECODE=1 PATH=$no_gh "$hooks_folder/session-start" <"$input_file")
+expect_output "Without gh" "need gh 2.98 or later, and gh isn't installed"
+
+new_folders
+echo "Rules" >"$work/CLAUDE.md"
+mkdir -p "$home/.claude"
+echo '{"pluginConfigs": {"agents-md@builtin": {"options": {"instructionFiles": "claude-md-and-agents-md"}}}}' >"$home/.claude/settings.json"
+hook_output=$(cd "$work" && HOME=$home CLAUDECODE=1 PATH=$no_jq "$hooks_folder/session-start" <"$input_file")
+expect_output "Without jq" "The hooks in scripts/hooks need jq"
+expect_output "Without jq, which the hook needs to read the settings" "$hidden"
+
+# In a Claude Code on the web session, the hook installs the check tools into a folder under the home folder,
+# and puts that folder first on the PATH through CLAUDE_ENV_FILE.
+tools_folder=$home/.check-tools
+env_file=$base/env-file
+
+# Checks that the stand-in curl was called or not, and what the env file holds: expect_install <description> <called or not called> <env file text>
+expect_install() {
+  local description=$1 curl=$2 env_text=$3 calls="" written=""
+  case_count=$((case_count + 1))
+  if [[ -f $curl_calls ]]; then
+    calls=$(<"$curl_calls")
+  fi
+  if [[ -f $env_file ]]; then
+    written=$(<"$env_file")
+  fi
+  if [[ $curl == "not called" && -n $calls ]]; then
+    echo "error: $description, the hook must not call curl, but it called: $calls" >&2
+    failed_cases=$((failed_cases + 1))
+  elif [[ $curl == called && -z $calls ]]; then
+    echo "error: $description, the hook must try to install the tools with curl, but it didn't call curl." >&2
+    failed_cases=$((failed_cases + 1))
+  elif [[ $written != "$env_text" ]]; then
+    echo "error: $description, CLAUDE_ENV_FILE must hold \"$env_text\", but it holds \"$written\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+new_folders
+rm -f "$curl_calls" "$env_file"
+run_session_start CLAUDE_ENV_FILE="$env_file"
+expect_install "Without CLAUDE_CODE_REMOTE" "not called" ""
+
+new_folders
+rm -f "$curl_calls" "$env_file"
+mkdir -p "$tools_folder"
+for tool in shellcheck actionlint zizmor; do
+  printf '#!/usr/bin/env bash\n' >"$tools_folder/$tool"
+  chmod +x "$tools_folder/$tool"
+done
+run_session_start CLAUDE_CODE_REMOTE=true CLAUDE_ENV_FILE="$env_file"
+expect_install "With CLAUDE_CODE_REMOTE=true and the three tools in the folder" "not called" "export PATH=\"$tools_folder:\$PATH\""
+
+new_folders
+rm -f "$curl_calls" "$env_file"
+run_session_start CLAUDE_CODE_REMOTE=true CLAUDE_ENV_FILE="$env_file"
+case_count=$((case_count + 1))
+if ((hook_status != 0)); then
+  echo "error: With CLAUDE_CODE_REMOTE=true and an install that fails, the hook must exit with code 0, but it exited with code $hook_status." >&2
+  failed_cases=$((failed_cases + 1))
+fi
+expect_output "With CLAUDE_CODE_REMOTE=true and an install that fails" "The check tools shellcheck, actionlint and zizmor are missing"
+expect_install "With CLAUDE_CODE_REMOTE=true and an install that fails" called ""
+
+finish_tests

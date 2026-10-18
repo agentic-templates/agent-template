@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# The agent's tool runs this hook before each action, because .claude/settings.json and .codex/hooks.json list it.
+# It reads the fields of the tool's input that the checks use, and runs each check in this folder, the files that end
+# in .check. A check blocks the action with exit code 2 and the reason on stderr, and this script passes both on.
+# To add a check, add its .check file and its .test file. A check for a tool that isn't in the list below also adds
+# the tool there. Neither hook file needs a change.
+#
+# In a git worktree, the commands in .claude/settings.json run the worktree's hooks. Claude Code can run the commands
+# in the main checkout, which can be older than the worktree, so they find the worktree from the folder in the input's
+# cwd field. They run the hooks of the folder they run in when the input has no cwd, as in Cursor, or when that
+# folder is in another repository, because that repository's code isn't trusted.
+#
+# When the hook fails on its own error, such as when jq is missing or the input isn't JSON, it exits with
+# code 0, so the action goes ahead. A broken hook must never stop work, and Copilot CLI blocks on every
+# exit code other than 0 and 2.
+
+# The checks read a command one character at a time. In a multibyte locale, such as en_US.UTF-8, bash takes longer to
+# find each character the longer the command is, so a long body in a command would take seconds.
+export LC_ALL=C
+
+IFS= read -r -d '' input
+# One jq call reads the fields for all the checks, because each call takes several milliseconds. read_input in
+# helpers.bash takes them from the HOOK_ variables. The call fails without jq too, and when the input isn't JSON.
+if ! fields=$(jq -r -f "${BASH_SOURCE[0]%/*}/input.jq" 2>/dev/null <<<"$input"); then
+  exit 0
+fi
+eval "$fields"
+export HOOK_TOOL_NAME HOOK_COMMAND HOOK_FILE_PATH HOOK_CWD
+
+# The checks act only on these tools, so every other tool's action goes ahead at once. Cursor calls Bash Shell, and
+# Codex edits files with apply_patch.
+case $HOOK_TOOL_NAME in
+  Bash | Shell | Read | Write | Edit | apply_patch) ;;
+  *) exit 0 ;;
+esac
+
+for check in "${BASH_SOURCE[0]%/*}"/*.check; do
+  if [[ ! -x $check ]]; then
+    continue
+  fi
+  reason=$("$check" 2>&1 >/dev/null </dev/null)
+  if (($? == 2)); then
+    printf '%s\n' "$reason" >&2
+    exit 2
+  fi
+done
+exit 0

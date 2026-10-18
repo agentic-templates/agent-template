@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Blocks opening a pull request with gh pr create, or its alias gh pr new, when the title job in
+# .github/workflows/pr-title.yml would fail on it: when scripts/check-title fails on its title, or
+# scripts/check-pull-request on its title, body and commits. The message gives the scripts' errors.
+# - The hook reads the title from --title, and the body as read_body in helpers.bash reads it, as the command writes
+#   them, without running $( ) or filling in variables. It blocks a command that gives no title or no body, such as
+#   one with --fill.
+# - The pull request's commits are those on its branch, the one that --head names or HEAD, that aren't on the base
+#   branch on GitHub. The base branch is the one that --base names, or the one that origin/HEAD points to, and the
+#   hook fetches it from origin first. It allows the command when it can't find those commits, such as outside a
+#   git repository or before the branch exists here.
+# shellcheck source=scripts/hooks/helpers.bash
+source "${BASH_SOURCE[0]%/*}/helpers.bash"
+
+# The folder of scripts/check-title and scripts/check-pull-request, as an absolute path, because the hook changes
+# to the folder that the agent works in.
+scripts_folder=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
+
+no_title="Blocked: the command gives no title, so this hook can't check it. Give the title with --title."
+
+# Sets base_commit and head_commit to the commits that the pull request compares, or fails when it can't find them.
+find_commits() {
+  local base_branch head_ref=HEAD
+  base_branch=$pr_base
+  if [[ -z $base_branch ]]; then
+    base_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD) || return 1
+    base_branch=${base_branch#origin/}
+  fi
+  # The local copy of the base branch can be older than GitHub's. The commits that GitHub's has and the local copy
+  # doesn't would then count as the pull request's own, and so would the files that they change.
+  GIT_TERMINAL_PROMPT=0 git fetch --quiet origin "$base_branch" >/dev/null 2>&1 || true
+  base_commit=$(git rev-parse --verify --quiet "refs/remotes/origin/$base_branch^{commit}") || return 1
+  # --head can name the branch as <user>:<branch>.
+  if [[ -n $pr_head ]]; then
+    head_ref=refs/heads/${pr_head#*:}
+  fi
+  head_commit=$(git rev-parse --verify --quiet "$head_ref^{commit}") || return 1
+}
+
+check_gh_pr_create() {
+  local problems="" output message
+  if ! opens_pull_request; then
+    return 0
+  fi
+  if [[ -z $pr_has_title ]]; then
+    block "$no_title"
+  fi
+  read_body "the pull request's body"
+  if ! find_commits; then
+    return 0
+  fi
+  # The subshells drop the trap, which would otherwise turn every exit code of the scripts into 1.
+  if ! output=$(trap - ERR && TITLE=$pr_title "$scripts_folder/check-title" 2>&1); then
+    problems+=$output$'\n'
+  fi
+  if ! output=$(trap - ERR && TITLE=$pr_title BODY=$body "$scripts_folder/check-pull-request" "$base_commit" "$head_commit" 2>&1); then
+    problems+=$output$'\n'
+  fi
+  if [[ -z $problems ]]; then
+    return 0
+  fi
+  # The scripts mark each error for GitHub Actions.
+  message="Blocked: the checks on pull requests in CI would fail on this one:"$'\n'"${problems//::error::/}"
+  message+="Fix each problem, and run gh pr create again."
+  if [[ -n $body_may_expand || -n $pr_title_may_expand ]]; then
+    message+=" This hook reads the title and body as the command writes them, without running \$( ) or filling in variables."
+  fi
+  block "$message"
+}
+
+check_simple_command() {
+  record_written_files
+  drop_command_prefixes "$@"
+  move_gh_repository_flags
+  if ((${#command_words[@]} == 0)); then
+    return 0
+  fi
+  check_gh_pr_create
+}
+
+read_input
+if [[ $tool_name == Bash ]]; then
+  # A relative path to a body file starts from the folder the agent works in, and git finds the repository from it.
+  # Cursor doesn't send that folder, so for Cursor the hook's own folder counts.
+  cd -- "${cwd:-.}" 2>/dev/null || exit 0
+  written_files=()
+  for_each_simple_command check_simple_command "$shell_command"
+fi

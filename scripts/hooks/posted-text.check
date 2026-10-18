@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Blocks the gh commands that would post text with a problem that scripts/check-pull-request finds in a pull request:
+# a path into a home folder, or a semicolon or a dash between words in prose, as scripts/text-rules finds them.
+# The commands and their text are:
+# - the title and body of gh issue create, its alias gh issue new, and gh issue edit
+# - the body of gh issue comment, gh pr comment and gh pr review
+# - the comment that -c or --comment gives to gh issue close, gh issue reopen, gh pr close and gh pr reopen
+# It reads the title from --title, the comment from --comment, and the body as read_body in helpers.bash reads it, as
+# the command writes them, without running $( ) or filling in variables. It allows a command that gives none of them,
+# such as gh issue edit 7 --add-label ready. scripts/hooks/pull-request-rules.check checks the text of gh pr create.
+# shellcheck source=scripts/hooks/helpers.bash
+source "${BASH_SOURCE[0]%/*}/helpers.bash"
+# shellcheck source=scripts/text-rules
+source "${BASH_SOURCE[0]%/*}/../text-rules"
+
+# The flags that take a value, as the --help of these commands lists them. gh issue comment and gh pr comment take the
+# same flags, and so do gh issue reopen and gh pr reopen.
+comment_flags_with_value=" --attach -b --body -F --body-file -R --repo "
+review_flags_with_value=" -b --body -F --body-file -R --repo "
+issue_close_flags_with_value=" -c --comment --duplicate-of -r --reason -R --repo "
+reopen_flags_with_value=" -c --comment -R --repo "
+
+# Reads the text that a gh command gives from command_words, from its fourth word on: read_text <flags that take a value>
+# It sets title to the value of --title, and has_title to yes when the command gives --title, whose value can be empty.
+# It sets body_source, body_word and body_file for read_body, from --body, --body-file or --comment, and records
+# expansion syntax in each checked field. It fails when the command asks for help, because gh then posts nothing.
+# Only a flag that takes a value gives text, so the -c of gh pr review, which takes none, gives none.
+read_text() {
+  local flags_with_value=$1 i word flag value
+  title="" has_title="" title_may_expand="" body_source="" body_word="" body_file="" body_may_expand=""
+  for ((i = 3; i < ${#command_words[@]}; i++)); do
+    word=${command_words[i]}
+    case $word in
+      -h | --help) return 1 ;;
+      --*=*)
+        flag=${word%%=*}
+        value=${word#*=}
+        ;;
+      -*)
+        flag=$word
+        value=${command_words[i + 1]:-}
+        ;;
+      *) continue ;;
+    esac
+    if [[ $flags_with_value != *" $flag "* ]]; then
+      continue
+    fi
+    # The word after a flag that takes a value is that value, even if it starts with a dash.
+    if [[ $word == "$flag" ]]; then
+      i=$((i + 1))
+    fi
+    case $flag in
+      -t | --title) title=$value has_title=yes title_may_expand=${command_word_may_expand[i]:-} ;;
+      -b | --body | -c | --comment) body_source=text body_word=$value body_may_expand=${command_word_may_expand[i]:-} ;;
+      -F | --body-file) body_source=file body_file=$value ;;
+    esac
+  done
+}
+
+# Blocks a gh command whose text has a problem, with a message that lists every problem: check_text <flags that take a value>
+check_text() {
+  local problems message
+  if ! read_text "$1"; then
+    return 0
+  fi
+  if [[ -n $body_source ]]; then
+    read_body "the body for paths into a home folder, semicolons and dashes"
+  fi
+  problems=$(
+    if [[ -n $has_title ]]; then
+      title_problems "$title"
+    fi
+    if [[ -n $body_source ]]; then
+      body_problems "$body"
+    fi
+  )
+  if [[ -z $problems ]]; then
+    return 0
+  fi
+  message="Blocked: the text that this command would post has these problems:"$'\n'"$problems"$'\n'
+  message+="Fix each problem, and run gh ${command_words[1]} ${command_words[2]} again."
+  if [[ -n $body_may_expand || -n $title_may_expand ]]; then
+    message+=" This hook reads the text as the command writes it, without running \$( ) or filling in variables."
+  fi
+  block "$message"
+}
+
+check_simple_command() {
+  record_written_files
+  drop_command_prefixes "$@"
+  move_gh_repository_flags
+  if ((${#command_words[@]} < 3)) || [[ ${command_words[0]##*/} != gh ]]; then
+    return 0
+  fi
+  case "${command_words[1]} ${command_words[2]}" in
+    "issue create" | "issue new") check_text "$issue_create_flags_with_value" ;;
+    "issue edit") check_text "$issue_edit_flags_with_value" ;;
+    "issue comment" | "pr comment") check_text "$comment_flags_with_value" ;;
+    "pr review") check_text "$review_flags_with_value" ;;
+    "issue close") check_text "$issue_close_flags_with_value" ;;
+    "pr close") check_text "$pr_close_flags_with_value" ;;
+    "issue reopen" | "pr reopen") check_text "$reopen_flags_with_value" ;;
+  esac
+}
+
+read_input
+if [[ $tool_name == Bash ]]; then
+  # A relative path to a body file starts from the folder the agent works in. Cursor doesn't send that folder, so for
+  # Cursor the hook's own folder counts.
+  cd -- "${cwd:-.}" 2>/dev/null || exit 0
+  written_files=()
+  for_each_simple_command check_simple_command "$shell_command"
+fi

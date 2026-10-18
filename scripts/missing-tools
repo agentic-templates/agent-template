@@ -1,0 +1,23 @@
+# shellcheck shell=bash
+# The function has, which scripts/check and scripts/test-scripts use to find out whether a tool that a check needs is
+# installed. CI installs every tool, so a missing tool there is an error. On your machine the check is skipped, and CI
+# still runs it.
+
+# The checks that were skipped, separated by commas. has adds the tool of each check that it skips.
+skipped=""
+
+# Succeeds if a tool is installed. If it isn't, it stops the script with an error in CI. On your machine, it says that
+# the check is skipped, adds the tool to skipped, and fails: has <tool> <URL of the tool's installation guide>
+has() {
+  local tool=$1 install_url=$2
+  if command -v "$tool" >/dev/null; then
+    return 0
+  fi
+  if [[ -n "${CI:-}" ]]; then
+    echo "error: $tool is not installed. Install it in scripts/install-check-tools, or in an earlier step of this job in .github/workflows/ci.yml." >&2
+    exit 1
+  fi
+  echo "Skipped the $tool check because $tool is not installed. To run it here, install it: $install_url" >&2
+  skipped="${skipped:+$skipped, }$tool"
+  return 1
+}

@@ -1,0 +1,9 @@
+# shellcheck shell=bash
+# The names of the files that make a tool skip AGENTS.md, because some tools read one of them instead,
+# as docs/rules.md describes. scripts/check and scripts/hooks/instruction-files.check read the names from here.
+# The first group can be in any folder, and the second only in the repository's root.
+# Match them in any case, because some file systems ignore case.
+in_any_folder='(.*/)?(CLAUDE\.md|CLAUDE\.local\.md|AGENTS\.override\.md)'
+in_the_root='\.rules|\.cursorrules|\.windsurfrules|\.clinerules(/.*)?|\.github/copilot-instructions\.md|AGENT\.md'
+# A path from the repository's root that matches this is one of the files.
+instruction_file="^($in_any_folder|$in_the_root)$"

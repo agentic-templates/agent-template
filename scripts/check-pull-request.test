@@ -1,0 +1,269 @@
+#!/usr/bin/env bash
+# Tests scripts/check-pull-request with a stand-in for gh, on bodies made from .github/pull_request_template.md,
+# in a repository with a branch for each kind of pull request.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+script=$PWD/scripts/check-pull-request
+
+case_count=0
+failed_cases=0
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+# git looks for no repository above the temporary folder, reads none of the person's settings,
+# and commits as a stand-in person.
+export GIT_CEILING_DIRECTORIES=$base
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
+
+stand_in=$base/bin
+mkdir "$stand_in"
+# A stand-in for gh, first on the PATH, that answers the command that looks up an issue, as GitHub would:
+# #12 and #17 are open issues, #13 a closed issue, #14 a pull request, #15 an open research issue and #16 an open
+# issue with sub-issues, and no other number exists.
+# With TEST_GH=fail, it fails, as gh does without the network.
+cat >"$stand_in/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+jq_filter='[.state, (.pull_request != null), any(.labels[]; .name == "research"), (.sub_issues_summary.total // 0)] | @tsv'
+if [[ $# != 4 || $1 != api || $2 != "repos/{owner}/{repo}/issues/"* || $3 != --jq || $4 != "$jq_filter" ]]; then
+  echo "The stand-in for gh doesn't answer: gh $*" >&2
+  exit 1
+fi
+if [[ ${TEST_GH:-} == fail ]]; then
+  echo "error connecting to api.github.com" >&2
+  exit 1
+fi
+case ${2##*/} in
+  12 | 17) printf 'open\tfalse\tfalse\t0\n' ;;
+  13) printf 'closed\tfalse\tfalse\t0\n' ;;
+  14) printf 'open\ttrue\tfalse\t0\n' ;;
+  15) printf 'open\tfalse\ttrue\t0\n' ;;
+  16) printf 'open\tfalse\tfalse\t3\n' ;;
+  *)
+    echo '{"message":"Not Found","documentation_url":"https://docs.github.com/rest/issues/issues#get-an-issue","status":"404"}'
+    echo "gh: Not Found (HTTP 404)" >&2
+    exit 1
+    ;;
+esac
+STAND_IN
+chmod +x "$stand_in/gh"
+
+# A repository whose main has scripts/configure-github, with a branch for each kind of pull request:
+# - work adds a file in one commit.
+# - configure changes scripts/configure-github.
+# - co-authored has a commit without a Co-authored-by trailer, and one with two of them.
+# After the branches, main gets a commit that changes scripts/configure-github and has a Co-authored-by trailer,
+# which is no part of any branch's pull request.
+repository=$base/repository
+git init --quiet --initial-branch=main "$repository"
+mkdir "$repository/scripts"
+echo "Notes" >"$repository/notes.txt"
+echo "echo Settings" >"$repository/scripts/configure-github"
+git -C "$repository" add --all
+git -C "$repository" commit --quiet -m "chore: start the project"
+git -C "$repository" switch --quiet -c work
+echo "Imports" >"$repository/imports.txt"
+git -C "$repository" add imports.txt
+git -C "$repository" commit --quiet -m "feat: skip the expenses that were already imported"
+git -C "$repository" switch --quiet -c configure main
+echo "echo More settings" >>"$repository/scripts/configure-github"
+git -C "$repository" commit --quiet -am "feat: turn on the merge queue"
+git -C "$repository" switch --quiet -c co-authored main
+git -C "$repository" commit --quiet --allow-empty -m "feat: add the monthly totals"
+git -C "$repository" commit --quiet --allow-empty -m "feat: export the totals" -m "The export has a row for each month." \
+  -m $'Co-Authored-By: Claude <noreply@anthropic.com>\nCo-authored-by: Ana <ana@example.com>'
+git -C "$repository" switch --quiet main
+echo "echo Other settings" >>"$repository/scripts/configure-github"
+git -C "$repository" commit --quiet -am "feat: turn on code scanning" -m "Co-authored-by: Ana <ana@example.com>"
+
+template=$(<.github/pull_request_template.md)
+# The template with each part filled in, as a pull request for #12
+filled_in=${template/"Closes #"/Closes #12}
+filled_in+=$'\n'"The app skips the expenses that it has already imported."
+
+# The title of the pull request, and its branch, which a case can change for itself, as in title=<title> expect_pass ...
+title="feat: skip the expenses that were already imported"
+branch=work
+
+# Runs the script on a body, for a pull request from the branch into main, and sets status and output:
+# run_check <body>
+run_check() {
+  status=0
+  output=$(cd "$repository" && TITLE=$title BODY=$1 PATH=$stand_in:$PATH "$script" main "$branch" 2>&1) || status=$?
+}
+
+# Checks that the script passes a body: expect_pass <description> <body>
+expect_pass() {
+  case_count=$((case_count + 1))
+  run_check "$2"
+  if [[ $status != 0 || -n $output ]]; then
+    echo "error: $1, scripts/check-pull-request must pass and print nothing, but it exited with code $status and printed: $output" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks that the script fails on a body with these errors, and no others: expect_errors <description> <body> <error>...
+expect_errors() {
+  local description=$1 body=$2 expected
+  shift 2
+  expected=$(printf '::error::%s\n' "$@")
+  case_count=$((case_count + 1))
+  run_check "$body"
+  if [[ $status != 1 || $output != "$expected" ]]; then
+    echo "error: $description, scripts/check-pull-request must exit with code 1 and print:" >&2
+    printf '%s\n' "$expected" >&2
+    echo "It exited with code $status and printed:" >&2
+    printf '%s\n' "$output" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Each part of the error that the script reports about a closing line
+edit_the_line="Edit the line to name the open issue that the pull request closes."
+no_closing_line="The body has no line that says which issue the pull request closes. Edit the body and add a line such as \"Closes #12\", with the number of the issue."
+
+# Prints the error about a missing heading: no_heading <heading>
+no_heading() {
+  echo "The body has no heading \"$1\". Add it as .github/pull_request_template.md has it, and write under it what the template's comment asks for."
+}
+
+# Prints the error about a section with no text: no_text <heading>
+no_text() {
+  echo "The body has no text under the heading \"$1\", apart from HTML comments. Write under it what the template's comment asks for."
+}
+
+# Prints the error about a body that closes more than one issue: more_than_one_issue <issues>
+more_than_one_issue() {
+  echo "The body closes more than one issue: $1. A pull request closes one issue, so keep the line for the issue that it builds, and build each other issue in a pull request of its own."
+}
+
+# Prints the errors about prose: semicolon <where> and dash <where>, where <where> is as in: The title "<title>"
+semicolon() {
+  echo "$1 has a semicolon in prose. Replace it with a period or a word such as \"and\", as \"Write clear sentences\" in docs/writing.md says."
+}
+dash() {
+  echo "$1 has a dash between words in prose. If it joins two sentences, write two sentences, as \"Write clear sentences\" in docs/writing.md says. Otherwise, replace it with a word, as in \"pages 10 to 20\"."
+}
+
+# Prints the error about a path into a home folder: home_path <where> <path>
+home_path() {
+  echo "$1 holds a path into a home folder, $2. Use a path relative to the repository, or ~ or \$HOME."
+}
+
+expect_pass "With the template filled in" "$filled_in"
+expect_pass "With the template filled in and \\r\\n at each line's end" "${filled_in//$'\n'/$'\r\n'}"
+expect_pass "With other closing words, and headings at other levels with #s or spaces at their end" \
+  $'fixes: #12\nResolved #12\n\n### What changed and why ###\nThe app skips imported expenses.\n# How it was checked  \nscripts/check passes.'
+
+# The issues that closing lines name
+expect_errors "With no closing line" "${filled_in/"Closes #12"/See #12}" "$no_closing_line"
+expect_errors "With a closed issue" "${filled_in/"Closes #12"/Closes #13}" \
+  "The line \"Closes #13\" names #13, which is closed. $edit_the_line"
+expect_errors "With a pull request's number" "${filled_in/"Closes #12"/Fixes #14}" \
+  "The line \"Fixes #14\" names #14, which is a pull request, not an issue. $edit_the_line"
+expect_errors "With a number that no issue has" "${filled_in/"Closes #12"/Closes #99}" \
+  "The line \"Closes #99\" names #99, which isn't an issue in this repository. $edit_the_line"
+expect_errors "With an open issue and a closed one" "${filled_in/"Closes #12"/Closes #12$'\n'Closes #13}" \
+  "The line \"Closes #13\" names #13, which is closed. $edit_the_line" "$(more_than_one_issue "#12, #13")"
+expect_errors "With two open issues" "${filled_in/"Closes #12"/Closes #12$'\n'Closes #17}" \
+  "$(more_than_one_issue "#12, #17")"
+expect_errors "With two open issues, each on more than one line" \
+  "${filled_in/"Closes #12"/Closes #12$'\n'Fixes #17$'\n'Closes #12$'\n'Resolves #12$'\n'Closes #17}" \
+  "$(more_than_one_issue "#12, #17")"
+expect_errors "With a research issue" "${filled_in/"Closes #12"/Closes #15}" \
+  "The line \"Closes #15\" names #15, which is a research issue. A research issue ends in a comment that answers its question, not in a pull request. Edit the line to name the issue that the pull request builds."
+expect_errors "With an issue that has sub-issues" "${filled_in/"Closes #12"/Closes #16}" \
+  "The line \"Closes #16\" names #16, which has sub-issues. Edit the line to name the sub-issue that the pull request builds."
+crlf_body=${filled_in//$'\n'/$'\r\n'}
+expect_errors "With a closed issue and \\r\\n at each line's end" "${crlf_body/"Closes #12"/Closes #13}" \
+  "The line \"Closes #13\" names #13, which is closed. $edit_the_line"
+TEST_GH=fail expect_errors "When gh fails" "$filled_in" \
+  "Can't look up #12, because gh failed: error connecting to api.github.com. Try again once gh can reach GitHub."
+
+# Closing words in the middle of a line
+expect_pass "With a closing word that doesn't come right before an issue's number, and a word that ends in a closing word" \
+  "${filled_in/"already imported."/already imported. It fixes the total that #12 reports, and prefixes #12 to the note.}"
+expect_errors "With a closing word before an issue's number in the middle of a line" \
+  "${filled_in/"already imported."/already imported, as the pull request that fixed #12 asked.}" \
+  "The line \"The app skips the expenses that it has already imported, as the pull request that fixed #12 asked.\" has the words \"fixed #12\", so GitHub closes #12 when the pull request merges. Reword the sentence, such as from \"the pull request that fixed #12\" to \"the pull request for #12\"."
+expect_errors "With closing words in another case, with a colon, after a closing line and after a character other than a space" \
+  "${filled_in/"Closes #12"/Closes #12, and FIXES: #13 (resolves #20)}" \
+  "The line \"Closes #12, and FIXES: #13 (resolves #20)\" has the words \"FIXES: #13\", so GitHub closes #13 when the pull request merges. Reword the sentence, such as from \"the pull request that fixed #13\" to \"the pull request for #13\"." \
+  "The line \"Closes #12, and FIXES: #13 (resolves #20)\" has the words \"resolves #20\", so GitHub closes #20 when the pull request merges. Reword the sentence, such as from \"the pull request that fixed #20\" to \"the pull request for #20\"."
+
+# The template's headings, and the text under them
+expect_errors "Without the heading \"What changed and why\"" "${filled_in/"## What changed and why"/## What changed}" \
+  "$(no_heading "What changed and why")"
+expect_errors "With a section that's empty" \
+  $'Closes #12\n\n## What changed and why\n\n## How it was checked\nscripts/check passes.' \
+  "$(no_text "What changed and why")"
+expect_errors "With the template as it is, apart from the closing line" "${template/"Closes #"/Closes #12}" \
+  "$(no_text "What changed and why")"
+expect_errors "With a section whose text is all in a comment over two lines" \
+  $'Closes #12\n## What changed and why\n<!-- The app skips\nimported expenses. -->\n## How it was checked\nscripts/check passes.' \
+  "$(no_text "What changed and why")"
+expect_errors "With a heading in a comment" \
+  $'Closes #12\n<!--\n## What changed and why\n-->\nThe app skips imported expenses.\n## How it was checked\nscripts/check passes.' \
+  "$(no_heading "What changed and why")"
+expect_errors "With an empty body" "" \
+  "$no_closing_line" "$(no_heading "What changed and why")"
+
+# The prose of the title
+title="feat: skip imported expenses; keep the total" expect_errors "With a semicolon in the title" "$filled_in" \
+  "$(semicolon "The title \"feat: skip imported expenses; keep the total\"")"
+title="feat: skip imported expenses - keep the total" expect_errors "With a dash between words in the title" "$filled_in" \
+  "$(dash "The title \"feat: skip imported expenses - keep the total\"")"
+title="fix: keep \`a; b - c\` in the total" expect_pass "With a semicolon and a dash in a code span in the title" "$filled_in"
+# The name of a person's home folder. scripts/check doesn't take $person for a name, so this file holds no path into
+# a home folder.
+person=ana
+title="fix: read /Users/$person/bank.csv" expect_errors "With a path into a home folder in the title" "$filled_in" \
+  "$(home_path "The title \"fix: read /Users/$person/bank.csv\"" "/Users/$person/")"
+title="fix: read /home/<name>/bank.csv" expect_pass "With a placeholder for a home folder in the title" "$filled_in"
+
+# The prose of the body
+expect_errors "With a semicolon in the body" "${filled_in/"already imported."/already imported; it keeps the total.}" \
+  "$(semicolon "The line \"The app skips the expenses that it has already imported; it keeps the total.\"")"
+expect_errors "With a dash between words in the body" "${filled_in/"already imported."/already imported – it keeps the total.}" \
+  "$(dash "The line \"The app skips the expenses that it has already imported – it keeps the total.\"")"
+expect_pass "With semicolons and dashes in a code span, a code block and an HTML comment" \
+  "$filled_in"$'\nRun `a; b - c`.\n```\nfor file in a b; do\n  wc -l "$file" - 1\ndone\n```\n<!-- a; b\n- c -->'
+expect_errors "With paths into a home folder in a code block and in an HTML comment" \
+  "$filled_in"$'\n```\ncat /home/'"$person"$'/bank.csv\n```\n<!-- Copy it from C:\\Users\\'"$person"$'\\bank.csv -->' \
+  "$(home_path "The line \"cat /home/$person/bank.csv\"" "/home/$person/")" \
+  "$(home_path "The line \"<!-- Copy it from C:\\Users\\$person\\bank.csv -->\"" "C:\\Users\\$person\\")"
+
+# The files that the pull request changes. The branch work doesn't change scripts/configure-github, though main
+# changed it after the branch started.
+configure_github_sentence="A maintainer with admin access needs to run scripts/configure-github after the merge."
+branch=configure expect_errors "With a change to scripts/configure-github" "$filled_in" \
+  "The pull request changes scripts/configure-github, and the body doesn't say that a maintainer needs to run it. Add this sentence under \"What changed and why\": $configure_github_sentence"
+branch=configure expect_pass "With a change to scripts/configure-github, and the sentence that asks a maintainer to run it" \
+  "${filled_in/"already imported."/already imported. $configure_github_sentence}"
+branch=configure expect_errors "With a change to scripts/configure-github, and the sentence in an HTML comment" \
+  "${filled_in/"already imported."/already imported. <!-- $configure_github_sentence -->}" \
+  "The pull request changes scripts/configure-github, and the body doesn't say that a maintainer needs to run it. Add this sentence under \"What changed and why\": $configure_github_sentence"
+
+# The commits of the pull request. The commit on main with a Co-authored-by trailer is no part of any branch's.
+co_authored_commit=$(git -C "$repository" rev-parse --short co-authored)
+branch=co-authored expect_errors "With a commit that has Co-authored-by trailers" "$filled_in" \
+  "Commit $co_authored_commit \"feat: export the totals\" has a Co-authored-by trailer, for Claude <noreply@anthropic.com>, Ana <ana@example.com>. Rewrite the commit without the trailer, such as with git commit --amend when it's the latest commit, and push the branch again with --force-with-lease."
+
+# The arguments
+case_count=$((case_count + 1))
+status=0
+output=$(cd "$repository" && TITLE=$title BODY=$filled_in PATH=$stand_in:$PATH "$script" main 2>&1) || status=$?
+expected="::error::scripts/check-pull-request takes two arguments, the base commit and the head commit of the pull request, and it got 1."
+if [[ $status != 1 || $output != "$expected" ]]; then
+  echo "error: With one argument, scripts/check-pull-request must exit with code 1 and print: $expected" >&2
+  echo "It exited with code $status and printed: $output" >&2
+  failed_cases=$((failed_cases + 1))
+fi
+branch=missing expect_errors "With a head commit that the repository doesn't have" "$filled_in" \
+  "This repository has no commit missing. Fetch it, and run scripts/check-pull-request again."
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/check-pull-request.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/check-pull-request.test passed. Cases: $case_count."

@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Creates a security advisory's temporary private fork, in which an agent builds the fix:
+# scripts/create-private-fork <GHSA ID>
+# Step 1 of "Fix a security vulnerability" in docs/releasing.md runs it. It prints the fork's full name.
+# GitHub copies each of the repository's branches into the fork, and step 1 of "Publish a release" would report a
+# copy as a waiting fix. GitHub makes the copies after it creates the fork, so the script waits until the fork has
+# main, and then deletes every other branch from it. It prints a line for each branch it deleted.
+# When the advisory has a private fork already, the script prints the fork's name and changes nothing, because the
+# fork's branches can hold a fix in progress.
+# It stops with an error, and exits with code 1, without admin access, when main doesn't appear in the fork in time,
+# when it can't delete a branch, and when gh fails. It asks gh about the repository of this checkout, or the one in
+# GH_REPO.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/admin-access
+source scripts/admin-access
+
+# How often the script checks whether the fork has main, and how long it waits for main
+check_interval_seconds=5
+wait_limit_seconds=300
+
+# Each line holds a branch's name, a tab and the name percent-encoded for a URL path, with its slashes kept. Without
+# the encoding, the path for a branch such as main?x would end at the ?, and deleting that branch would delete main.
+branch_filter='.[] | [.name, (.name | @uri | gsub("%2F"; "/"))] | @tsv'
+
+# Prints an error and stops: stop <message>
+stop() {
+  echo "error: $1" >&2
+  exit 1
+}
+
+# Lists the fork's branches in branches, and succeeds if main is one of them. GitHub creates the fork in the
+# background, so listing its branches may fail at first. A failure counts as no main, and its error goes to
+# last_error: fork_has_main
+fork_has_main() {
+  local name path
+  if ! branches=$(gh api --paginate "repos/$fork/branches" --jq "$branch_filter" 2>&1); then
+    last_error=$branches
+    branches=""
+    return 1
+  fi
+  last_error=""
+  while IFS=$'\t' read -r name path; do
+    if [[ $name == main ]]; then
+      return 0
+    fi
+  done <<<"$branches"
+  return 1
+}
+
+if (($# != 1)); then
+  stop "scripts/create-private-fork takes one argument, the GHSA ID of a security advisory, and it got $#."
+fi
+# The ID goes into the paths of GitHub's API, where a character such as / would change which request gh sends.
+if [[ ! $1 =~ ^GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$ ]]; then
+  stop "scripts/create-private-fork takes the GHSA ID of a security advisory, such as GHSA-2c5x-3m4v-7q8r, and it got \"$1\"."
+fi
+ghsa_id=$1
+
+if ! repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>&1); then
+  stop "can't read the repository's name, because gh failed: $repo"
+fi
+if ! permission=$(gh repo view --json viewerPermission --jq .viewerPermission 2>&1); then
+  stop "can't read your access to $repo, because gh failed: $permission"
+fi
+require_admin "$permission" "$repo" "creating a private fork for a security advisory"
+
+if ! fork=$(gh api "repos/$repo/security-advisories/$ghsa_id" --jq '.private_fork.full_name // ""' 2>&1); then
+  stop "can't read the security advisory $ghsa_id of $repo, because gh failed: $fork"
+fi
+if [[ -n $fork ]]; then
+  printf '%s\n' "$fork"
+  exit 0
+fi
+
+if ! fork=$(gh api --method POST "repos/$repo/security-advisories/$ghsa_id/forks" --jq .full_name 2>&1); then
+  stop "can't create a private fork for the security advisory $ghsa_id, because gh failed: $fork"
+fi
+printf '%s\n' "$fork"
+
+branches_page=https://github.com/$fork/branches
+copies="because they're copies of the branches of $repo, not fixes"
+waited_seconds=0
+until fork_has_main; do
+  if ((waited_seconds >= wait_limit_seconds)); then
+    if [[ -n $last_error ]]; then
+      stop "can't list the branches of the private fork $fork for $((wait_limit_seconds / 60)) minutes, because gh failed: $last_error. Once the fork has main, delete its other branches at $branches_page, $copies."
+    fi
+    stop "the private fork $fork still has no branch main after $((wait_limit_seconds / 60)) minutes. Once it has main, delete its other branches at $branches_page, $copies."
+  fi
+  sleep "$check_interval_seconds"
+  waited_seconds=$((waited_seconds + check_interval_seconds))
+done
+
+failed_deletes=""
+while IFS=$'\t' read -r name path; do
+  if [[ -z $name || $name == main ]]; then
+    continue
+  fi
+  if answer=$(gh api --method DELETE "repos/$fork/git/refs/heads/$path" 2>&1); then
+    echo "Deleted $name"
+  else
+    failed_deletes+="- $name: $answer"$'\n'
+  fi
+done <<<"$branches"
+if [[ -n $failed_deletes ]]; then
+  stop "can't delete these branches from the private fork $fork, because gh failed:"$'\n'"$failed_deletes""Delete them at $branches_page, $copies."
+fi

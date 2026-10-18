@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Does step 1 of "Build the ready issues" in docs/building.md:
+# - It records the time it starts in the git folder of this checkout, in build-run-start, as scripts/check records
+#   its passes, so that scripts/build-run-report can list what merged since. The time is in UTC, as in
+#   2026-05-04T09:30:00Z.
+# - It removes the current account from each ready issue assigned to it, unless scripts/pull-request-state prints
+#   merging or stopped for the issue. It prints each issue it leaves assigned, with that state.
+# - It turns on auto-merge for each open pull request of Dependabot's into main that isn't DIRTY, has no failed check,
+#   doesn't have auto-merge on, isn't in the merge queue and was never removed from it. It prints each other one,
+#   with why it skipped it. It skips them all when scripts/check-main-rules exits with code 1, and prints that
+#   script's message.
+# - Last, it runs scripts/clear-worktrees, which frees the branch of each ready issue that a leftover worktree holds.
+#   It prints what that script prints, and exits with that script's exit code.
+# It stops with an error, and exits with code 1, when gh fails. It asks gh about the repository of this checkout,
+# or the one in GH_REPO.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/open-pull-requests
+source scripts/open-pull-requests
+
+# Prints the error of scripts/check-main-rules and fails when the rules for main no longer require a check that
+# scripts/configure-github requires there. Like the hook for gh pr merge, it succeeds when it can't tell.
+main_requires_checks() {
+  local problem status=0
+  problem=$(scripts/check-main-rules 2>&1) || status=$?
+  if ((status == 1)); then
+    printf '%s\n' "$problem" >&2
+    return 1
+  fi
+}
+
+# Prints an error and stops: stop <message>
+stop() {
+  echo "error: $1" >&2
+  exit 1
+}
+
+if ! record=$(git rev-parse --git-path build-run-start 2>&1); then
+  stop "can't find the git folder to record the time the build run starts in, because git failed: $record"
+fi
+if ! date -u +%Y-%m-%dT%H:%M:%SZ >"$record"; then
+  stop "can't record the time the build run starts in $record. Fix the error above, and run scripts/start-build-run again."
+fi
+
+if ! assigned_issues=$(gh issue list --label ready --assignee @me --limit 200 --json number --jq '.[].number' 2>&1); then
+  stop "can't list the ready issues assigned to you, because gh failed: $assigned_issues"
+fi
+for issue in $assigned_issues; do
+  # scripts/pull-request-state prints its own error.
+  if ! state=$(scripts/pull-request-state "$issue"); then
+    exit 1
+  fi
+  if [[ $state == merging || $state == stopped ]]; then
+    echo "Left issue #$issue assigned to you, because scripts/pull-request-state prints $state for it."
+    continue
+  fi
+  if ! answer=$(gh issue edit "$issue" --remove-assignee @me 2>&1); then
+    stop "can't remove your assignment from issue #$issue, because gh failed: $answer"
+  fi
+done
+
+if ! main_requires_checks; then
+  echo "error: scripts/start-build-run turned on auto-merge for no pull request of Dependabot's, because of the error above. Go on with the other work, and list this in your report for the maintainer." >&2
+else
+  # read_open_pull_requests prints its own error.
+  read_open_pull_requests || exit 1
+  while IFS=$'\t' read -r kind number is_from_fork author is_in_queue merge_state auto_merge_since; do
+    if [[ $kind != pull-request ]] || ! is_by_dependabot "$author"; then
+      continue
+    fi
+    # One reason to a line.
+    reasons=""
+    if [[ $is_from_fork == true ]]; then
+      reasons+=$'it comes from a fork\n'
+    fi
+    if [[ $merge_state == DIRTY ]]; then
+      reasons+=$'it\'s DIRTY\n'
+    fi
+    failed=$(failed_checks_in_words "$number")
+    if [[ -n $failed ]]; then
+      reasons+="the $failed failed"$'\n'
+    fi
+    if [[ -n $auto_merge_since ]]; then
+      reasons+=$'its auto-merge is on already\n'
+    fi
+    if [[ $is_in_queue == true ]]; then
+      reasons+=$'it\'s in the merge queue\n'
+    fi
+    if [[ -n $(facts removal "$number") ]]; then
+      reasons+=$'the merge queue removed it before\n'
+    fi
+    if [[ -n $reasons ]]; then
+      echo "Skipped pull request $number of Dependabot's, because $(in_words "$reasons")."
+      continue
+    fi
+    # With checks that have passed, gh pr merge adds the pull request to the merge queue instead.
+    if ! answer=$(gh pr merge "$number" 2>&1 </dev/null); then
+      stop "can't turn on auto-merge for pull request $number of Dependabot's, because gh failed: $answer"
+    fi
+  done <<<"$pull_requests"
+fi
+
+scripts/clear-worktrees

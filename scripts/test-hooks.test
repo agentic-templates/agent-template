@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# Tests scripts/test-hooks on copies of it, each in a folder that holds stand-ins for the hooks' tests.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+case_count=0
+failed_cases=0
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+
+# Makes a folder for a case, with a copy of the script, an empty scripts/hooks/ and an empty temporary folder,
+# and sets case_dir to it: new_case
+new_case() {
+  case_dir=$(mktemp -d "$base/case.XXXXXX")
+  mkdir -p "$case_dir/scripts/hooks" "$case_dir/tmp"
+  cp scripts/test-hooks "$case_dir/scripts/test-hooks"
+}
+
+# Writes a stand-in for a hook's test to scripts/hooks/<name>.test in the case's folder. The stand-in runs the lines
+# given in scripts/hooks/: write_test <name> <line>...
+write_test() {
+  local file=$case_dir/scripts/hooks/$1.test
+  shift
+  printf '%s\n' '#!/usr/bin/env bash' "cd '$case_dir/scripts/hooks'" "$@" >"$file"
+  chmod +x "$file"
+}
+
+# Writes a stand-in that prints a line, waits for the other stand-in to start, and prints a second line.
+# It fails if the other stand-in doesn't start within 10 seconds, as when the tests run one after another:
+# write_meeting_test <name> <the other's name>
+write_meeting_test() {
+  write_test "$1" "echo '$1 started'" "touch '$1.started'" \
+    "for ((tries = 0; tries < 100; tries++)); do" \
+    "  if [[ -e '$2.started' ]]; then" \
+    "    echo '$1 ended'" \
+    "    exit 0" \
+    "  fi" \
+    "  sleep 0.1" \
+    "done" \
+    "echo 'error: $2.test started more than 10 seconds after $1.test.' >&2" \
+    "exit 1"
+}
+
+# Waits up to 10 seconds for a file to exist, and fails if it doesn't: wait_for_file <path>
+wait_for_file() {
+  local tries
+  for ((tries = 0; tries < 100; tries++)); do
+    if [[ -e $1 ]]; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+# Runs the copy of the script, with the case's temporary folder as TMPDIR, and sets status, output and errors: run_script
+run_script() {
+  status=0
+  output=$(TMPDIR=$case_dir/tmp "$case_dir/scripts/test-hooks" 2>"$case_dir/errors") || status=$?
+  errors=$(<"$case_dir/errors")
+}
+
+# Checks the result of run_script, and that the script left no files in the temporary folder:
+# expect_result <description> <exit code> <output> <errors>
+expect_result() {
+  local description=$1 expected_status=$2 expected_output=$3 expected_errors=$4 left_files
+  case_count=$((case_count + 1))
+  left_files=$(ls -A "$case_dir/tmp")
+  if [[ $status != "$expected_status" || $output != "$expected_output" || $errors != "$expected_errors" || -n $left_files ]]; then
+    echo "error: scripts/test-hooks $description. So it must exit with code $expected_status, print \"$expected_output\", print the errors \"$expected_errors\" and leave no files in TMPDIR." >&2
+    echo "It exited with code $status, printed \"$output\", printed the errors \"$errors\" and left these files in TMPDIR: \"$left_files\"" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Starts the copy of the script in the background, and stops it once the stand-in endless.test has started.
+# Prints an error and fails if the script leaves the stand-in running or leaves files in TMPDIR: stop_script
+stop_script() {
+  local runner
+  TMPDIR=$case_dir/tmp "$case_dir/scripts/test-hooks" >/dev/null 2>&1 &
+  runner=$!
+  if ! wait_for_file "$case_dir/scripts/hooks/endless.started"; then
+    echo "error: scripts/test-hooks didn't start endless.test within 10 seconds." >&2
+    return 1
+  fi
+  kill "$runner"
+  # The redirection hides the shell's message that the script was stopped.
+  wait "$runner" 2>/dev/null || true
+  if ! wait_for_file "$case_dir/scripts/hooks/endless.stopped"; then
+    echo "error: when scripts/test-hooks stops, it must stop each test that still runs, but endless.test went on running." >&2
+    return 1
+  fi
+  if [[ -n $(ls -A "$case_dir/tmp") ]]; then
+    echo "error: when scripts/test-hooks stops, it must remove its files from TMPDIR, but it left: $(ls -A "$case_dir/tmp")" >&2
+    return 1
+  fi
+}
+
+new_case
+write_meeting_test first second
+write_meeting_test second first
+run_script
+expect_result "runs the tests at the same time, and prints each test's output once the test ends, in the order of their names" \
+  0 $'first started\nfirst ended\nsecond started\nsecond ended' ""
+
+new_case
+write_test first "echo 'error: 1 of the 3 cases in first.test failed.' >&2" "exit 1"
+write_test second "echo 'second.test passed.'"
+run_script
+expect_result "fails when a test fails, and still runs the tests after it" \
+  1 "second.test passed." "error: 1 of the 3 cases in first.test failed."
+
+# The stand-in runs for 10 seconds, unless it's stopped.
+new_case
+write_test endless "trap 'touch endless.stopped; exit 1' TERM" "touch endless.started" \
+  "for ((tries = 0; tries < 100; tries++)); do" "  sleep 0.1" "done"
+case_count=$((case_count + 1))
+if ! stop_script; then
+  failed_cases=$((failed_cases + 1))
+fi
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/test-hooks.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/test-hooks.test passed. Cases: $case_count."

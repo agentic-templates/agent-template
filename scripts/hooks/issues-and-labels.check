@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+# Blocks the commands that would leave an issue without its headings or its one type label, and the commands that
+# change the project's labels:
+# - gh issue create, or its alias gh issue new, unless the issue gets exactly one type label and its body has the
+#   headings for that type
+# - gh issue edit, on what the edit changes: the type labels when it adds or removes a label, and the headings when it
+#   sets the body or changes the type label. So an edit that changes neither goes ahead, such as one that assigns the
+#   issue, and so does removing needs-triage from an issue that the bug form opened, whose headings differ.
+# - gh label create, gh label edit, gh label delete and gh label clone, because scripts/configure-github sets the labels
+# It reads the body as the command writes it: from --body, from the file that --body-file names, or from a
+# here-document, without running $( ) or filling in variables. It asks gh for the labels and body of each issue that
+# an edit changes, and allows the edit when gh fails, such as without a network.
+# shellcheck source=scripts/hooks/helpers.bash
+source "${BASH_SOURCE[0]%/*}/helpers.bash"
+# shellcheck source=scripts/issue-labels
+source "${BASH_SOURCE[0]%/*}/../issue-labels"
+
+change_headings=("What should change" "Why" "Done when")
+research_headings=("Question" "What depends on the answer" "Done when")
+
+heading_rule="An issue's body has the headings \"What should change\", \"Why\" and \"Done when\", and a research issue's body has \"Question\", \"What depends on the answer\" and \"Done when\" instead."
+label_commands="Blocked: scripts/configure-github creates the project's labels, the ones that \"Labels\" in AGENTS.md names. To add, change or remove a label, change both files in a pull request, as docs/rules.md describes, and a maintainer runs the script after the merge."
+
+# A Markdown heading at any level. Group 2 holds its text.
+heading_line='^ {0,3}#{1,6}([[:space:]]+(.*))?$'
+# The #s that can close a heading, after a space. Group 1 holds the text before them.
+closing_hashes='^(.*[^[:space:]])[[:space:]]+#+$'
+
+# Prints a list of words in prose, such as "bug and feature": join_words <word>...
+join_words() {
+  local text="" i
+  for ((i = 1; i <= $#; i++)); do
+    if ((i > 1 && i == $#)); then
+      text+=" and "
+    elif ((i > 1)); then
+      text+=", "
+    fi
+    text+=${!i}
+  done
+  printf '%s' "$text"
+}
+
+type_label_rule="An issue has exactly one of the type labels $(join_words "${type_labels[@]}"), chosen by what changes for users, as \"Labels\" in AGENTS.md describes."
+
+# Succeeds if a list holds a label. GitHub matches label names in any case: has_label <label> [<label in the list>]...
+has_label() {
+  local wanted=$1 label is_found=1
+  shift
+  shopt -s nocasematch
+  for label in "$@"; do
+    if [[ $label == "$wanted" ]]; then
+      is_found=0
+    fi
+  done
+  shopt -u nocasematch
+  return "$is_found"
+}
+
+# Adds the labels in a value of --label, --add-label or --remove-label, which can list several separated by commas,
+# to the array split_labels: split_label_value <value>
+split_label_value() {
+  local label
+  local -a labels=()
+  IFS=, read -r -a labels <<<"$1"
+  for label in ${labels[@]+"${labels[@]}"}; do
+    label=${label#"${label%%[![:space:]]*}"}
+    label=${label%"${label##*[![:space:]]}"}
+    if [[ -n $label ]]; then
+      split_labels+=("$label")
+    fi
+  done
+}
+
+# Reads the flags and arguments of a gh issue command from command_words, from its fourth word on, into
+# issue_arguments, added_labels, removed_labels, repository, asks_for_help, body_source (empty, text or file),
+# body_word, body_file and body_may_expand: read_issue_command <flags that take a value>
+read_issue_command() {
+  local flags_with_value=$1 i word flag value
+  local -a split_labels
+  issue_arguments=() added_labels=() removed_labels=() repository=()
+  asks_for_help="" body_source="" body_word="" body_file="" body_may_expand=""
+  for ((i = 3; i < ${#command_words[@]}; i++)); do
+    word=${command_words[i]}
+    case $word in
+      -h | --help)
+        asks_for_help=yes
+        continue
+        ;;
+      --*=*)
+        flag=${word%%=*}
+        value=${word#*=}
+        ;;
+      -*)
+        if [[ $flags_with_value != *" $word "* ]]; then
+          continue
+        fi
+        flag=$word
+        value=${command_words[i + 1]:-}
+        i=$((i + 1))
+        ;;
+      *)
+        issue_arguments+=("$word")
+        continue
+        ;;
+    esac
+    split_labels=()
+    case $flag in
+      -b | --body) body_source=text body_word=$value body_may_expand=${command_word_may_expand[i]:-} ;;
+      -F | --body-file) body_source=file body_file=$value ;;
+      -l | --label | --add-label)
+        split_label_value "$value"
+        added_labels+=(${split_labels[@]+"${split_labels[@]}"})
+        ;;
+      --remove-label)
+        split_label_value "$value"
+        removed_labels+=(${split_labels[@]+"${split_labels[@]}"})
+        ;;
+      -R | --repo) repository=(--repo "$value") ;;
+    esac
+  done
+}
+
+# Prints the text of each heading in a body, one to a line, without the spaces and #s at its end: headings_in <body>
+headings_in() {
+  local line text
+  while IFS= read -r line; do
+    # The browser's editor ends each line with \r\n.
+    line=${line%$'\r'}
+    if [[ ! $line =~ $heading_line ]]; then
+      continue
+    fi
+    text=${BASH_REMATCH[2]}
+    text=${text%"${text##*[![:space:]]}"}
+    if [[ $text =~ $closing_hashes ]]; then
+      text=${BASH_REMATCH[1]}
+    fi
+    printf '%s\n' "$text"
+  done <<<"$1"
+}
+
+# Sets type_labels_before and type_labels_after to the type labels that an issue has before and after the command,
+# from current_labels, added_labels and removed_labels. gh adds the labels before it removes them.
+find_type_labels() {
+  local label
+  type_labels_before=()
+  type_labels_after=()
+  for label in "${type_labels[@]}"; do
+    if has_label "$label" ${current_labels[@]+"${current_labels[@]}"}; then
+      type_labels_before+=("$label")
+    fi
+    if has_label "$label" ${removed_labels[@]+"${removed_labels[@]}"}; then
+      continue
+    fi
+    if has_label "$label" ${current_labels[@]+"${current_labels[@]}"} ${added_labels[@]+"${added_labels[@]}"}; then
+      type_labels_after+=("$label")
+    fi
+  done
+}
+
+# Blocks unless the issue ends up with exactly one type label:
+# check_type_labels <the issue, in a sentence> <how to add a label> <how to drop the others>
+check_type_labels() {
+  case ${#type_labels_after[@]} in
+    1) return 0 ;;
+    0) block "Blocked: $1 would have no type label. $type_label_rule $2" ;;
+    *) block "Blocked: $1 would have the type labels $(join_words "${type_labels_after[@]}"). $type_label_rule $3" ;;
+  esac
+}
+
+# Blocks unless a body has the headings for the type labels in type_labels_after:
+# check_headings <the body, in a sentence> <body> <what else to do, or nothing>
+check_headings() {
+  local subject=$1 text=$2 advice=$3 found heading message
+  local -a required=("${change_headings[@]}") missing=()
+  if has_label research ${type_labels_after[@]+"${type_labels_after[@]}"}; then
+    required=("${research_headings[@]}")
+  fi
+  found=$(headings_in "$text")
+  for heading in "${required[@]}"; do
+    if ! grep -qxF -- "$heading" <<<"$found"; then
+      missing+=("\"$heading\"")
+    fi
+  done
+  if ((${#missing[@]} == 0)); then
+    return 0
+  fi
+  if ((${#missing[@]} == 1)); then
+    message="Blocked: $subject lacks the heading ${missing[0]}."
+  else
+    message="Blocked: $subject lacks the headings $(join_words "${missing[@]}")."
+  fi
+  message+=" $heading_rule Write each heading on a line of its own, such as ## ${missing[0]//\"/}.$advice"
+  if [[ -n $body_may_expand ]]; then
+    message+=" This hook reads the body as the command writes it, without running \$( ) or filling in variables."
+  fi
+  block "$message"
+}
+
+check_issue_create() {
+  read_issue_command "$issue_create_flags_with_value"
+  if [[ -n $asks_for_help ]]; then
+    return 0
+  fi
+  current_labels=()
+  find_type_labels
+  check_type_labels "the new issue" "Add it with --label <label>." "Keep one of them in --label."
+  read_body "the issue's headings"
+  check_headings "the body of the new issue" "$body" ""
+}
+
+check_issue_edit() {
+  local issue answer labels label current_body
+  read_issue_command "$issue_edit_flags_with_value"
+  if [[ -n $asks_for_help ]] || ((${#issue_arguments[@]} == 0)); then
+    return 0
+  fi
+  if [[ -z $body_source ]] && ((${#added_labels[@]} == 0 && ${#removed_labels[@]} == 0)); then
+    return 0
+  fi
+  if [[ -n $body_source ]]; then
+    read_body "the issue's headings"
+  fi
+  for issue in "${issue_arguments[@]}"; do
+    answer=$(gh issue view "$issue" ${repository[@]+"${repository[@]}"} --json labels,body 2>/dev/null) || continue
+    labels=$(jq -r '.labels[].name' <<<"$answer") || continue
+    current_body=$(jq -r '.body // ""' <<<"$answer") || continue
+    current_labels=()
+    while IFS= read -r label; do
+      if [[ -n $label ]]; then
+        current_labels+=("$label")
+      fi
+    done <<<"$labels"
+    find_type_labels
+    if ((${#added_labels[@]} > 0 || ${#removed_labels[@]} > 0)); then
+      check_type_labels "issue $issue" "Add it with --add-label <label>." "Remove the others with --remove-label <label>."
+    fi
+    if [[ -n $body_source ]]; then
+      check_headings "the new body of issue $issue" "$body" ""
+    elif [[ ${type_labels_before[*]-} != "${type_labels_after[*]-}" ]]; then
+      check_headings "the body of issue $issue" "$current_body" " Change the body in the same command, with --body or --body-file."
+    fi
+  done
+}
+
+check_simple_command() {
+  record_written_files
+  drop_command_prefixes "$@"
+  move_gh_repository_flags
+  if ((${#command_words[@]} < 3)) || [[ ${command_words[0]##*/} != gh ]]; then
+    return 0
+  fi
+  case "${command_words[1]} ${command_words[2]}" in
+    "issue create" | "issue new") check_issue_create ;;
+    "issue edit") check_issue_edit ;;
+    "label create" | "label edit" | "label delete" | "label clone") block "$label_commands" ;;
+  esac
+}
+
+read_input
+if [[ $tool_name == Bash ]]; then
+  # A relative path to a body file starts from the folder the agent works in, and gh finds the repository from it.
+  # Cursor doesn't send that folder, so for Cursor the hook's own folder counts.
+  cd -- "${cwd:-.}" 2>/dev/null || exit 0
+  written_files=()
+  for_each_simple_command check_simple_command "$shell_command"
+fi

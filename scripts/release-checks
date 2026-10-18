@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Checks whether a commit can be released: scripts/release-checks [<sha>]
+# Step 2 of "Publish a release" in docs/releasing.md runs it. Without a SHA, it runs git fetch origin and checks the
+# latest commit of origin/main. With one, it checks that commit, so that the release keeps the same commit while it
+# waits, even when more pull requests merge.
+# It prints the commit's full SHA, then a line for the latest run of each workflow on it, leaving out Dependabot
+# Updates, and a line for each open code scanning alert and each open Dependabot alert of high or critical severity.
+# A run passed when it succeeded or was skipped, and failed when it finished in any other way, such as failure,
+# cancelled or timed_out. Its last line is the first of these that fits:
+# - stop, when a run failed or an alert is open
+# - wait, when a run hasn't finished or no run exists yet
+# - go
+# It stops with an error, and exits with code 1, when gh or git fails. It asks gh about the repository of this
+# checkout, or the one in GH_REPO.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# Prints an error and stops: stop <message>
+stop() {
+  echo "error: $1" >&2
+  exit 1
+}
+
+if (($# > 1)); then
+  stop "scripts/release-checks takes at most one argument, the SHA of the commit to check, and it got $#. Run it without one to check main's latest commit."
+fi
+if (($# == 0)); then
+  if ! answer=$(git fetch --quiet origin 2>&1); then
+    stop "can't fetch origin, because git failed: $answer"
+  fi
+  commit=origin/main
+else
+  commit=$1
+fi
+if ! sha=$(git rev-parse --verify --quiet --end-of-options "$commit^{commit}"); then
+  stop "this clone has no commit $commit. Run git fetch origin, and pass the SHA that scripts/release-checks printed first."
+fi
+echo "$sha"
+
+# Each line holds a run: the workflow's ID, the run's ID, its status, its conclusion and the workflow's name. A later
+# run has a higher ID. The conclusion is none until the run finishes, and the name comes last, because it can be
+# empty, and read joins the tabs around an empty field.
+if ! runs=$(gh run list --commit "$sha" --limit 1000 --json workflowDatabaseId,databaseId,status,conclusion,workflowName \
+  --jq '.[] | [.workflowDatabaseId, .databaseId, .status, ((.conclusion | select(. != "")) // "none"), .workflowName] | @tsv' 2>&1); then
+  stop "can't list the workflow runs on $sha, because gh failed: $runs"
+fi
+
+run_count=0
+has_failed_run=""
+has_unfinished_run=""
+previous_workflow=""
+# sort puts the runs of each workflow together, the latest first.
+while IFS=$'\t' read -r workflow run status conclusion name; do
+  if [[ -z $workflow || $workflow == "$previous_workflow" ]]; then
+    continue
+  fi
+  previous_workflow=$workflow
+  # GitHub runs Dependabot Updates on main to open Dependabot's pull requests, so its result says nothing about the commit.
+  if [[ $name == "Dependabot Updates" ]]; then
+    continue
+  fi
+  run_count=$((run_count + 1))
+  # gh run list gives no name for a workflow that an organization's ruleset runs.
+  name=${name:-workflow $workflow}
+  if [[ $status != completed ]]; then
+    echo "Run $run of $name hasn't finished."
+    has_unfinished_run=yes
+  elif [[ $conclusion == success || $conclusion == skipped ]]; then
+    echo "Run $run of $name passed."
+  else
+    echo "Run $run of $name failed, with the conclusion $conclusion."
+    has_failed_run=yes
+  fi
+done <<<"$(sort -t $'\t' -k 1,1n -k 2,2nr <<<"$runs")"
+if ((run_count == 0)); then
+  echo "No workflow has run on this commit yet."
+fi
+
+has_alert=""
+# The severity comes last, because an alert of a rule that isn't about security has none.
+if ! alerts=$(gh api --paginate "repos/{owner}/{repo}/code-scanning/alerts?state=open" \
+  --jq '.[] | [.number, .rule.id, (.rule.security_severity_level // "")] | @tsv' 2>&1); then
+  stop "can't list the open code scanning alerts, because gh failed: $alerts"
+fi
+while IFS=$'\t' read -r number rule severity; do
+  if [[ $severity == high || $severity == critical ]]; then
+    echo "Code scanning alert $number is open, of $severity severity, for the rule $rule."
+    has_alert=yes
+  fi
+done <<<"$alerts"
+
+if ! alerts=$(gh api --paginate "repos/{owner}/{repo}/dependabot/alerts?state=open" \
+  --jq '.[] | [.number, .security_advisory.severity, .dependency.package.name] | @tsv' 2>&1); then
+  stop "can't list the open Dependabot alerts, because gh failed: $alerts"
+fi
+while IFS=$'\t' read -r number severity package; do
+  if [[ $severity == high || $severity == critical ]]; then
+    echo "Dependabot alert $number is open, of $severity severity, for the package $package."
+    has_alert=yes
+  fi
+done <<<"$alerts"
+
+if [[ -n $has_failed_run || -n $has_alert ]]; then
+  echo stop
+elif [[ -n $has_unfinished_run ]] || ((run_count == 0)); then
+  echo wait
+else
+  echo go
+fi

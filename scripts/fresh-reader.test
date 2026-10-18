@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# Tests scripts/fresh-reader with a stand-in for claude.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+script=$(pwd)/scripts/fresh-reader
+
+case_count=0
+failed_cases=0
+
+base=$(mktemp -d)
+trap 'rm -rf "$base"' EXIT
+mkdir -p "$base/bin" "$base/project/docs"
+# The folder that the stand-in writes what it got to
+records=$base/records
+
+# A stand-in for claude, first on the PATH. Each run adds a line with its arguments, each in brackets, to the file
+# calls in TEST_RECORDS. It writes the folder it runs in to the file folder, the names of that folder's files to the
+# file files, and its input to the file input. Its first TEST_FAILURES runs fail with an error that names the run.
+# It prints the error on its output, as claude does for an API error, or on its error output when
+# TEST_ERROR_ON_STDERR isn't empty. The other runs print an answer that names the run.
+cat >"$base/bin/claude" <<'STAND_IN'
+#!/usr/bin/env bash
+records=$TEST_RECORDS
+printf '[%s]' "$@" >>"$records/calls"
+echo >>"$records/calls"
+run=$(($(wc -l <"$records/calls")))
+pwd -P >"$records/folder"
+ls -A >"$records/files"
+cat >"$records/input"
+if ((run > TEST_FAILURES)); then
+  echo "The reader's answer from run $run"
+  exit 0
+fi
+if [[ -n $TEST_ERROR_ON_STDERR ]]; then
+  echo "Error: the error of run $run" >&2
+else
+  echo "API Error: the error of run $run"
+fi
+exit 1
+STAND_IN
+chmod +x "$base/bin/claude"
+
+# The page holds characters that a shell or printf would change: a backquote, a dollar sign, a percent sign and a
+# backslash.
+page_text=$(
+  cat <<'PAGE'
+# Record what you spend
+
+Run `expenses add 12.50 lunch` to add an expense.
+The app saves 100% of your expenses to $HOME/expenses.csv, and writes \n for a new line in a description.
+PAGE
+)
+printf '%s\n' "$page_text" >"$base/project/docs/expenses.md"
+
+reader="a developer who wants to record what they spend"
+claude_arguments="[-p][--safe-mode][--tools][]"
+prompt="You are a developer who wants to record what they spend. Read this page once, the way that reader would. Quote each sentence you had to read twice, and say what made you stop. Then quote each sentence you didn't need, and say why. Leave out sentences that you'd only word differently."
+
+# Starts a case in which claude fails its first <failures> runs: new_case <failures>
+new_case() {
+  failures=$1
+  error_on_stderr=""
+  rm -rf "$records"
+  mkdir -p "$records"
+  : >"$records/calls"
+}
+
+# Runs scripts/fresh-reader in the folder project with the arguments, and sets status and output:
+# run_fresh_reader [<argument>...]
+run_fresh_reader() {
+  status=0
+  output=$(cd "$base/project" && TEST_RECORDS=$records TEST_FAILURES=$failures \
+    TEST_ERROR_ON_STDERR=$error_on_stderr PATH=$base/bin:$PATH "$script" "$@" 2>&1) || status=$?
+}
+
+# Reports a failed case: fail_case <message>
+fail_case() {
+  echo "error: $1" >&2
+  failed_cases=$((failed_cases + 1))
+}
+
+# Checks how the script ended, and what it printed: expect_result <description> <succeeds or fails> <output>
+# The script fails when it exits with a code other than 0.
+expect_result() {
+  local description=$1 expected_end=$2 expected_output=$3 end=succeeds expected_code="code 0"
+  if ((status != 0)); then
+    end=fails
+  fi
+  if [[ $expected_end == fails ]]; then
+    expected_code="a code other than 0"
+  fi
+  case_count=$((case_count + 1))
+  if [[ $end != "$expected_end" || $output != "$expected_output" ]]; then
+    fail_case "$description, scripts/fresh-reader must exit with $expected_code and print \"$expected_output\", but it exited with code $status and printed \"$output\"."
+  fi
+}
+
+# Checks the arguments of each run of claude, one run to a line: expect_calls <description> <calls>
+expect_calls() {
+  local description=$1 expected_calls=$2 calls
+  calls=$(<"$records/calls")
+  case_count=$((case_count + 1))
+  if [[ $calls != "$expected_calls" ]]; then
+    fail_case "$description, claude must get the arguments \"$expected_calls\", but it got \"$calls\"."
+  fi
+}
+
+# Checks that the last run of claude got the prompt, an empty line and the page on its input:
+# expect_input <description>
+expect_input() {
+  local description=$1 input=""
+  case_count=$((case_count + 1))
+  if [[ -f $records/input ]]; then
+    input=$(<"$records/input")
+  fi
+  if [[ $input != "$prompt"$'\n\n'"$page_text" ]]; then
+    fail_case "$description, claude must get the prompt, an empty line and the page on its input, but it got \"$input\"."
+  fi
+}
+
+# Checks that the last run of claude ran in an empty folder, and that the folder is gone once the script ends:
+# expect_empty_temporary_folder <description>
+expect_empty_temporary_folder() {
+  local description=$1 folder files
+  case_count=$((case_count + 1))
+  if [[ ! -f $records/folder ]]; then
+    fail_case "$description, scripts/fresh-reader must run claude, but it didn't."
+    return 0
+  fi
+  folder=$(<"$records/folder")
+  files=$(<"$records/files")
+  if [[ -n $files ]]; then
+    fail_case "$description, claude must run in an empty folder, but its folder held \"$files\"."
+  elif [[ -e $folder ]]; then
+    fail_case "$description, scripts/fresh-reader must remove the folder that claude ran in, but $folder is still there."
+  fi
+}
+
+new_case 0
+run_fresh_reader "$reader" docs/expenses.md
+expect_result "When claude answers" succeeds "The reader's answer from run 1"
+expect_calls "When claude answers" "$claude_arguments"
+expect_input "When claude answers"
+expect_empty_temporary_folder "When claude answers"
+
+new_case 1
+run_fresh_reader "$reader" docs/expenses.md
+expect_result "When claude fails once" succeeds "The reader's answer from run 2"
+expect_calls "When claude fails once" "$claude_arguments"$'\n'"$claude_arguments"
+expect_input "When claude fails once"
+expect_empty_temporary_folder "When claude fails once"
+
+new_case 2
+run_fresh_reader "$reader" docs/expenses.md
+expect_result "When claude fails twice" fails \
+  "error: can't get the reader's answer, because claude failed twice. The second time, it exited with code 1 and printed: API Error: the error of run 2"
+expect_calls "When claude fails twice" "$claude_arguments"$'\n'"$claude_arguments"
+
+new_case 2
+error_on_stderr=yes
+run_fresh_reader "$reader" docs/expenses.md
+expect_result "When claude fails twice with an error on its error output" fails \
+  "error: can't get the reader's answer, because claude failed twice. The second time, it exited with code 1 and printed: Error: the error of run 2"
+
+new_case 0
+run_fresh_reader
+expect_result "When it gets no argument" fails \
+  "error: scripts/fresh-reader takes two arguments, the page's reader and the page's path, as in scripts/fresh-reader \"a developer who wants to use this project\" README.md, and it got 0."
+expect_calls "When it gets no argument" ""
+
+new_case 0
+run_fresh_reader docs/expenses.md
+expect_result "When it gets only the page" fails \
+  "error: scripts/fresh-reader takes two arguments, the page's reader and the page's path, as in scripts/fresh-reader \"a developer who wants to use this project\" README.md, and it got 1."
+expect_calls "When it gets only the page" ""
+
+new_case 0
+run_fresh_reader "$reader" docs/missing.md
+expect_result "When the page doesn't exist" fails \
+  "error: docs/missing.md isn't a file. Give the page's path, such as README.md."
+expect_calls "When the page doesn't exist" ""
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/fresh-reader.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/fresh-reader.test passed. Cases: $case_count."

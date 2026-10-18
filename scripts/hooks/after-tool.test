@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# Tests scripts/hooks/after-tool in a small repository, with a stand-in for gh.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+# shellcheck source=scripts/testing-required-checks.bash
+source scripts/testing-required-checks.bash
+
+case_count=0
+failed_cases=0
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+repository=$base/repository
+mkdir -p "$repository/scripts/hooks" "$base/bin"
+cp -p scripts/hooks/after-tool "$repository/scripts/hooks/"
+cp -p scripts/check-main-rules scripts/required-checks scripts/configure-github "$repository/scripts/"
+git -C "$repository" init --quiet
+
+# A stand-in for gh, first on the PATH. It answers gh pr view with TEST_PULL_REQUEST, and the command in
+# scripts/check-main-rules with the checks in TEST_MAIN_RULES, and fails on either when its variable is fail. It writes
+# each gh pr merge command to TEST_CALLS, and fails it when TEST_MERGE is fail.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "pr view")
+    if [[ $TEST_PULL_REQUEST == fail ]]; then
+      exit 1
+    fi
+    printf '%s\n' "$TEST_PULL_REQUEST"
+    ;;
+  "api repos/{owner}/{repo}/rules/branches/main")
+    if [[ $TEST_MAIN_RULES == fail ]]; then
+      exit 1
+    fi
+    for check in $TEST_MAIN_RULES; do
+      echo "$check"
+    done
+    printf '%s\n' "$TEST_PROJECT_CHECKS"
+    ;;
+  "pr merge")
+    echo "$*" >>"$TEST_CALLS"
+    if [[ $TEST_MERGE == fail ]]; then
+      echo "HTTP 502: Bad Gateway"
+      exit 1
+    fi
+    ;;
+  *)
+    echo "The stand-in for gh doesn't answer: gh $*" >&2
+    exit 1
+    ;;
+esac
+STAND_IN
+chmod +x "$base/bin/gh"
+
+# Prints a pull request as gh pr view prints it: pull_request [<state> <draft> <from a fork> <auto-merge>]
+pull_request() {
+  local auto_merge=null
+  if [[ ${4:-false} == true ]]; then
+    auto_merge='{"enabledAt": "2026-05-04T09:00:00Z"}'
+  fi
+  printf '{"number": 12, "state": "%s", "isDraft": %s, "isCrossRepository": %s, "autoMergeRequest": %s}\n' \
+    "${1:-OPEN}" "${2:-false}" "${3:-false}" "$auto_merge"
+}
+
+# Runs the hook after an action, and sets output and calls: run_hook <tool> <command> [<NAME=value>...]
+run_hook() {
+  local tool=$1 command=$2 input
+  shift 2
+  input=$(jq -n --arg tool "$tool" --arg command "$command" --arg cwd "$repository" \
+    '{hook_event_name: "PostToolUse", cwd: $cwd, tool_name: $tool, tool_input: {command: $command}}')
+  : >"$base/calls"
+  output=$(env TEST_PULL_REQUEST="$(pull_request)" TEST_MAIN_RULES="check title" TEST_MERGE="" "$@" \
+    TEST_CALLS="$base/calls" PATH="$base/bin:$PATH" "$repository/scripts/hooks/after-tool" <<<"$input" 2>&1) || true
+  calls=$(<"$base/calls")
+}
+
+# Checks what the hook told the agent and the gh pr merge commands it ran:
+# expect_result <description> <message, or nothing> <gh pr merge commands, or nothing>
+expect_result() {
+  local description=$1 message=$2 expected_calls=$3 actual_message=""
+  case_count=$((case_count + 1))
+  if [[ -n $output ]]; then
+    actual_message=$(jq -r .hookSpecificOutput.additionalContext <<<"$output" 2>/dev/null) || actual_message=$output
+  fi
+  if [[ $actual_message != "$message" || $calls != "$expected_calls" ]]; then
+    echo "error: $description, the hook must tell \"$message\" and run \"$expected_calls\", but it told \"$actual_message\" and ran \"$calls\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+turned_on="Turned on auto-merge for pull request #12, so GitHub merges it once its checks pass. Don't wait for them."
+
+run_hook Bash "gh pr create --title 'feat: add totals' --body-file body.md"
+expect_result "After gh pr create" "$turned_on" "pr merge 12"
+
+run_hook Bash "git push -u origin HEAD && gh pr new --fill"
+expect_result "After gh pr new later in a command" "$turned_on" "pr merge 12"
+
+run_hook Bash "gh pr ready"
+expect_result "After gh pr ready" "$turned_on" "pr merge 12"
+
+run_hook Bash "gh pr create --draft --fill" TEST_PULL_REQUEST="$(pull_request OPEN true)"
+expect_result "For a draft" "" ""
+
+run_hook Bash "gh pr create --fill" TEST_PULL_REQUEST="$(pull_request OPEN false true)"
+expect_result "For a pull request from a fork" "" ""
+
+run_hook Bash "gh pr create --fill" TEST_PULL_REQUEST="$(pull_request OPEN false false true)"
+expect_result "When auto-merge is on already" "" ""
+
+run_hook Bash "gh pr ready" TEST_PULL_REQUEST="$(pull_request MERGED)"
+expect_result "For a pull request that merged" "" ""
+
+run_hook Bash "gh pr create --fill" TEST_PULL_REQUEST=fail
+expect_result "When gh can't find the pull request" "" ""
+
+run_hook Bash "gh pr create --fill" TEST_MAIN_RULES=title
+expect_result "When the rules for main lack the check job" \
+  "Auto-merge stays off for pull request #12. main no longer requires the check job, so a pull request can merge without passing it. A maintainer with admin access restores it by running scripts/configure-github. List this in your report for the maintainer." ""
+
+run_hook Bash "gh pr create --fill" TEST_MAIN_RULES=fail
+expect_result "When gh can't read the rules for main" "$turned_on" "pr merge 12"
+
+run_hook Bash "gh pr create --fill" TEST_MERGE=fail
+expect_result "When gh pr merge fails" \
+  "Couldn't turn on auto-merge for pull request #12, because gh failed: HTTP 502: Bad Gateway Run gh pr merge 12." "pr merge 12"
+
+run_hook Bash "gh pr view 12 && git status"
+expect_result "After a command that opens no pull request" "" ""
+
+run_hook Read "gh pr create"
+expect_result "After an action of another tool" "" ""
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/hooks/after-tool.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/hooks/after-tool.test passed. Cases: $case_count."

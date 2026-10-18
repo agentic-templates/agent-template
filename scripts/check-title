@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Checks that the title of a pull request, which the title job in .github/workflows/pr-title.yml passes in TITLE,
+# follows the format of a commit subject, "<type>: <what changed>", as "Commits" in AGENTS.md describes.
+# It prints the problem as an error for GitHub Actions.
+set -euo pipefail
+
+title=${TITLE:-}
+# scripts/title-types reads the types from this line.
+types="feat|fix|docs|test|refactor|perf|build|ci|revert|chore"
+pattern="^($types)(\([^)]+\))?!?: [^ ]"
+if [[ $title =~ $pattern ]]; then
+  exit 0
+fi
+echo "::error::The title \"$title\" doesn't follow the format \"<type>: <what changed>\". Edit the title to match. The types are ${types//|/, }."
+exit 1

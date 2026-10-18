@@ -1,0 +1,220 @@
+# shellcheck shell=bash
+# Functions that find text that breaks a writing rule, for the rules that a check can find by matching text.
+# scripts/check runs them on the repository's files, scripts/check-pull-request on a pull request's title and body, and
+# scripts/hooks/posted-text.check on the text of the issues, comments and reviews that gh posts.
+# Paths into a person's home folder stay out of the files, issues and pull requests, as "Keep the repository clean" in
+# AGENTS.md says.
+# A path counts only at the start of a line or after a character other than a letter, a digit, ".", "_" or "-".
+# So the path of a URL, as in https://example.com/home/docs/, doesn't count, and neither does a relative path, as in src/home/<name>/.
+home_path_start='(^|[^A-Za-z0-9._-])'
+# A Windows path can have either slash, and JSON doubles each backslash.
+separator='[\/]+'
+# /users/ in lower case is also a path in GitHub's API, so only /Users/ counts. A Windows path can have any case.
+home_folders="(/(home|Users)/|[A-Za-z]:${separator}[Uu][Ss][Ee][Rr][Ss]${separator})"
+# A name can't hold whitespace, so that "/home/ or /Users/" doesn't count. Nor can it hold the characters of a placeholder,
+# so that /home/<name>/, /home/$USER/ and C:\Users\%USERNAME%\ don't count.
+home_folder_name='([^/\<>$%{}[:space:]]+)'
+# Group 2 holds the path, and group 5 the name.
+home_path="$home_path_start($home_folders$home_folder_name$separator)"
+
+# Succeeds if a home folder belongs to an account that no person uses: is_shared_home_folder <name>
+is_shared_home_folder() {
+  case $1 in
+    # GitHub's runners, then containers, then macOS and Windows.
+    runner | runneradmin | node | linuxbrew | vscode | Shared | Public) return 0 ;;
+  esac
+  return 1
+}
+
+# Prints each path into a person's home folder in a line, one to a line: home_paths_in <line>
+home_paths_in() {
+  local rest=$1 path name
+  while [[ $rest =~ $home_path ]]; do
+    path=${BASH_REMATCH[2]}
+    name=${BASH_REMATCH[5]}
+    rest=${rest#*"${BASH_REMATCH[0]}"}
+    if ! is_shared_home_folder "$name"; then
+      printf '%s\n' "$path"
+    fi
+  done
+}
+
+# The prose in the Markdown files follows three rules that a check can find by matching text.
+# "Write clear sentences" in docs/writing.md bans semicolons and dashes that join two sentences.
+# "Organize a page" in docs/pages.md bans links whose text is "click here".
+# A dash that joins two sentences looks like any other dash between words, so the check fails on each dash
+# that has a space on each side and a letter or digit beyond each space, as in "pages 10 - 20".
+# Only ASCII letters and digits count, so that the check gives the same result in every locale.
+dash_between_words='[A-Za-z0-9] (—|–|-) [A-Za-z0-9]'
+# A link's text in brackets, then its target in parentheses or a reference in brackets. An image, which starts with "!",
+# isn't a link.
+click_here_link='(^|[^!])\[[[:space:]]*click[[:space:]]+here[[:space:]]*\](\(|\[)'
+# A fence starts or ends a code block. It's three or more backticks or tildes, after any indentation, as in a list item.
+code_fence="^[[:space:]]*(\`{3,}|~{3,})(.*)$"
+# A run of backticks, with the text before it and the text after it.
+backtick_run="^([^\`]*)(\`+)(.*)$"
+html_comment_start='<!--'
+html_comment_end='-->'
+# An HTML tag, as in <br> or </details>, or a link in angle brackets, as in <https://example.com>.
+html_tag='<[A-Za-z/][^>]*>'
+# An HTML entity, as in &nbsp;, &#160; or &#xA0;.
+html_entity='&([A-Za-z][A-Za-z0-9]*|#[0-9]+|#[xX][0-9A-Fa-f]+);'
+# A link's target, in parentheses after the link's text.
+link_target='\]\([^)]+\)'
+# A line that gives the target of a reference link, as in [guide]: https://example.com.
+# A footnote, as in [^1]: text, is prose.
+link_definition='^ {0,3}\[[^]^][^]]*\]:'
+
+# Prints each line of a Markdown file that's outside its code blocks: its line number, a tab and the line.
+# A code block ends at a fence of the same character that's at least as long and holds nothing else,
+# or at the end of the file. An indented code block, which has no fences, counts as prose,
+# because telling it apart from the text of a list item takes a Markdown parser: lines_outside_code_blocks <file>
+lines_outside_code_blocks() {
+  local line line_number=0 fence=""
+  # The test after || also reads a last line that has no line break.
+  while IFS= read -r line || [[ -n $line ]]; do
+    line_number=$((line_number + 1))
+    if [[ $line =~ $code_fence ]]; then
+      if [[ -z $fence ]]; then
+        fence=${BASH_REMATCH[1]}
+        continue
+      fi
+      # A fence of the same character that's at least as long starts with the fence that opened the block.
+      if [[ ${BASH_REMATCH[1]} == "$fence"* && -z ${BASH_REMATCH[2]//[[:space:]]/} ]]; then
+        fence=""
+        continue
+      fi
+    fi
+    if [[ -z $fence ]]; then
+      printf '%s\t%s\n' "$line_number" "$line"
+    fi
+  done < "$1"
+}
+
+# Prints the prose in a line of Markdown: the line with each code span, HTML comment, HTML tag and HTML entity
+# replaced by an underscore, and each link's target left out, so that [text](target) becomes [text]().
+# A line that gives the target of a reference link becomes a single underscore.
+# An HTML comment over several lines counts as prose, because the check reads one line at a time: prose_in <line>
+prose_in() {
+  local rest=$1 prose="" opening after is_closed comment_and_after empty_target=']()'
+  if [[ $rest =~ $link_definition ]]; then
+    echo _
+    return 0
+  fi
+  # A run of backticks starts a code span, which ends at the next run of as many backticks.
+  # A run that no such run follows is text, as in CommonMark.
+  while [[ $rest =~ $backtick_run ]]; do
+    prose+=${BASH_REMATCH[1]}
+    opening=${BASH_REMATCH[2]}
+    rest=${BASH_REMATCH[3]}
+    after=$rest
+    is_closed=""
+    while [[ $after =~ $backtick_run ]]; do
+      after=${BASH_REMATCH[3]}
+      if [[ ${BASH_REMATCH[2]} == "$opening" ]]; then
+        is_closed=yes
+        break
+      fi
+    done
+    if [[ -n $is_closed ]]; then
+      prose+=_
+      rest=$after
+    else
+      prose+=$opening
+    fi
+  done
+  prose+=$rest
+  while [[ $prose == *"$html_comment_start"*"$html_comment_end"* ]]; do
+    comment_and_after=${prose#*"$html_comment_start"}
+    prose=${prose%%"$html_comment_start"*}_${comment_and_after#*"$html_comment_end"}
+  done
+  while [[ $prose =~ $html_tag || $prose =~ $html_entity ]]; do
+    prose=${prose/"${BASH_REMATCH[0]}"/_}
+  done
+  while [[ $prose =~ $link_target ]]; do
+    prose=${prose/"${BASH_REMATCH[0]}"/$empty_target}
+  done
+  printf '%s\n' "$prose"
+}
+
+# Succeeds if a line has a link whose text is "click here", in any case: has_click_here_link <line>
+has_click_here_link() {
+  local result=1
+  shopt -s nocasematch
+  if [[ $1 =~ $click_here_link ]]; then
+    result=0
+  fi
+  shopt -u nocasematch
+  return "$result"
+}
+
+# Prints a piece of Markdown without its HTML comments, which can span lines. A comment that doesn't end runs to the
+# end of the text: without_html_comments <text>
+without_html_comments() {
+  local rest=$1 text=""
+  while [[ $rest == *"$html_comment_start"* ]]; do
+    text+=${rest%%"$html_comment_start"*}
+    rest=${rest#*"$html_comment_start"}
+    if [[ $rest != *"$html_comment_end"* ]]; then
+      rest=""
+      break
+    fi
+    rest=${rest#*"$html_comment_end"}
+  done
+  printf '%s\n' "$text$rest"
+}
+
+# The functions below print each problem they find in text that's posted on GitHub, such as a pull request's title
+# and body, one to a line. Each problem starts with <where>, which names the text, such as: The title "fix: keep the total"
+# They start no process with <(...), because of the write error that scripts/required-checks describes. The error
+# ends the process that prints, so the problems after it would go unreported.
+
+# Prints the problem with each path into a home folder in a line: home_path_problems <where> <line>
+home_path_problems() {
+  local path paths
+  paths=$(home_paths_in "$2")
+  if [[ -z $paths ]]; then
+    return 0
+  fi
+  while IFS= read -r path; do
+    printf '%s\n' "$1 holds a path into a home folder, $path. Use a path relative to the repository, or ~ or \$HOME."
+  done <<<"$paths"
+}
+
+# Prints the problem with each semicolon and dash between words in the prose of a line of Markdown:
+# prose_problems <where> <line>
+prose_problems() {
+  local prose
+  # prose_in only replaces parts of a line, so a line that breaks no rule as it is passes.
+  if [[ $2 != *\;* && ! $2 =~ $dash_between_words ]]; then
+    return 0
+  fi
+  prose=$(prose_in "$2")
+  if [[ $prose == *\;* ]]; then
+    printf '%s\n' "$1 has a semicolon in prose. Replace it with a period or a word such as \"and\", as \"Write clear sentences\" in docs/writing.md says."
+  fi
+  if [[ $prose =~ $dash_between_words ]]; then
+    printf '%s\n' "$1 has a dash between words in prose. If it joins two sentences, write two sentences, as \"Write clear sentences\" in docs/writing.md says. Otherwise, replace it with a word, as in \"pages 10 to 20\"."
+  fi
+}
+
+# Prints the problems in a title: title_problems <title>
+title_problems() {
+  home_path_problems "The title \"$1\"" "$1"
+  prose_problems "The title \"$1\"" "$1"
+}
+
+# Prints the problems in a body of Markdown, each with the line it's on: body_problems <body>
+# A path into a home folder counts on every line, also in a code block or an HTML comment, because they're public too.
+# A semicolon or a dash counts only in prose.
+body_problems() {
+  local line line_number text lines
+  while IFS= read -r line; do
+    home_path_problems "The line \"$line\"" "$line"
+  done <<<"$1"
+  text=$(without_html_comments "$1")
+  lines=$(lines_outside_code_blocks /dev/stdin <<<"$text")
+  while IFS=$'\t' read -r line_number line; do
+    prose_problems "The line \"$line\"" "$line"
+  done <<<"$lines"
+}

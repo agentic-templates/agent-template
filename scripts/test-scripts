@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Runs the tests of the scripts and hooks in three groups at the same time: the hooks' tests, the cases of
+# scripts/test-check and each scripts/*.test. Running the groups in sequence took 10m14s in CI run 38080017684,
+# above the ten-minute limit. Each group's output stays together, and a failure in any group fails the script.
+# scripts/check runs it, and so do the script-tests and bash-3-2 jobs in .github/workflows/ci.yml.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# shellcheck source=scripts/missing-tools
+source scripts/missing-tools
+# The hooks' tests need jq.
+runs_hooks_tests=""
+if has jq https://jqlang.org/download/; then
+  runs_hooks_tests=yes
+fi
+
+outputs=$(mktemp -d)
+stop_tests() {
+  local process_id
+  for process_id in $(jobs -pr); do
+    kill "$process_id" 2>/dev/null || true
+  done
+  rm -rf "$outputs"
+}
+trap stop_tests EXIT
+
+# Each group writes its output and errors to files named for its place in the list. A group that doesn't start
+# leaves its place empty.
+process_ids=()
+if [[ -n $runs_hooks_tests ]]; then
+  bash scripts/test-hooks >"$outputs/0.out" 2>"$outputs/0.err" &
+  process_ids[0]=$!
+fi
+(
+  # The ShellCheck cases run shellcheck, which the bash-3-2 job doesn't install, so they run only where shellcheck is
+  # installed, in CI too.
+  if command -v shellcheck >/dev/null; then
+    bash scripts/test-check --shellcheck-only
+  fi
+  bash scripts/test-check
+) >"$outputs/1.out" 2>"$outputs/1.err" &
+process_ids[1]=$!
+(
+  # -f skips the pattern itself, which the loop gets when no test matches it.
+  for script_test in scripts/*.test; do
+    if [[ -f $script_test ]]; then
+      bash "$script_test"
+    fi
+  done
+) >"$outputs/2.out" 2>"$outputs/2.err" &
+process_ids[2]=$!
+
+status=0
+for index in "${!process_ids[@]}"; do
+  if wait "${process_ids[index]}"; then
+    test_status=0
+  else
+    test_status=$?
+  fi
+  if ((status == 0 && test_status != 0)); then
+    status=$test_status
+  fi
+  cat "$outputs/$index.out"
+  cat "$outputs/$index.err" >&2
+done
+stop_tests
+trap - EXIT
+exit "$status"

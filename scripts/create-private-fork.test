@@ -1,0 +1,313 @@
+#!/usr/bin/env bash
+# Tests scripts/create-private-fork with stand-ins for gh and sleep.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+case_count=0
+failed_cases=0
+
+base=$(mktemp -d)
+trap 'rm -rf "$base"' EXIT
+mkdir -p "$base/bin"
+state=$base/state
+
+repo=octo-org/expenses
+ghsa_id=GHSA-2c5x-3m4v-7q8r
+fork=octo-org/expenses-ghsa-2c5x-3m4v-7q8r
+tab=$'\t'
+
+# A stand-in for gh, first on the PATH. It writes each command to the file calls in TEST_STATE, one to a line. It
+# answers that the repository is octo-org/expenses, that the person has TEST_PERMISSION access, and that the advisory
+# GHSA-2c5x-3m4v-7q8r has the private fork in the file existing-fork, which is empty when it has none. It creates the
+# fork octo-org/expenses-ghsa-2c5x-3m4v-7q8r. The first TEST_LISTINGS_WITHOUT_MAIN listings of the fork's branches
+# list none, or fail when TEST_EARLY_LISTINGS is fail, as GitHub can while it creates the fork. Later listings print
+# the file branches, as the script's --jq filter prints it. Deleting a branch fails when the file undeletable holds its
+# path. It fails the command that starts with TEST_FAILING_CALL, as gh does for an advisory that doesn't exist, and
+# every command it doesn't know.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+state=$TEST_STATE
+fork=octo-org/expenses-ghsa-2c5x-3m4v-7q8r
+echo "$*" >>"$state/calls"
+if [[ -n $TEST_FAILING_CALL && $* == "$TEST_FAILING_CALL"* ]]; then
+  echo "HTTP 404: Not Found" >&2
+  exit 1
+fi
+case "$*" in
+  "repo view --json nameWithOwner --jq .nameWithOwner") echo octo-org/expenses ;;
+  "repo view --json viewerPermission --jq .viewerPermission") echo "$TEST_PERMISSION" ;;
+  "api repos/octo-org/expenses/security-advisories/GHSA-2c5x-3m4v-7q8r --jq "*) cat "$state/existing-fork" ;;
+  "api --method POST repos/octo-org/expenses/security-advisories/GHSA-2c5x-3m4v-7q8r/forks --jq .full_name")
+    echo "$fork"
+    ;;
+  "api --paginate repos/$fork/branches --jq "*)
+    listings=$(($(<"$state/listings") + 1))
+    echo "$listings" >"$state/listings"
+    if ((listings > TEST_LISTINGS_WITHOUT_MAIN)); then
+      cat "$state/branches"
+    elif [[ $TEST_EARLY_LISTINGS == fail ]]; then
+      echo "gh: Not Found (HTTP 404)" >&2
+      exit 1
+    fi
+    ;;
+  "api --method DELETE repos/$fork/git/refs/heads/"*)
+    path=${4#"repos/$fork/git/refs/heads/"}
+    if grep -qxF -- "$path" "$state/undeletable"; then
+      echo "gh: Reference does not exist (HTTP 422)" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "The stand-in for gh doesn't answer: gh $*" >&2
+    exit 1
+    ;;
+esac
+STAND_IN
+chmod +x "$base/bin/gh"
+
+# A stand-in for sleep, first on the PATH, that writes its argument to the file sleeps in TEST_STATE and returns at
+# once.
+cat >"$base/bin/sleep" <<'STAND_IN'
+#!/usr/bin/env bash
+echo "$*" >>"$TEST_STATE/sleeps"
+STAND_IN
+chmod +x "$base/bin/sleep"
+
+# Starts a case in which the person has admin access, the advisory has no private fork, and the fork that the script
+# creates lists main and two other branches at the first listing.
+new_case() {
+  rm -rf "$state"
+  mkdir "$state"
+  : >"$state/calls"
+  : >"$state/sleeps"
+  : >"$state/existing-fork"
+  : >"$state/undeletable"
+  echo 0 >"$state/listings"
+  set_branches main 441-fix-import dependabot/github_actions/actions/checkout-5
+  permission=ADMIN
+  listings_without_main=0
+  early_listings=empty
+  failing_call=""
+}
+
+# Sets the branches that the fork lists, each with its name as its path: set_branches [<name>...]
+set_branches() {
+  local name
+  : >"$state/branches"
+  for name in "$@"; do
+    printf '%s\n' "$name$tab$name" >>"$state/branches"
+  done
+}
+
+# Runs scripts/create-private-fork with the arguments, and sets status and output, which holds what it printed and
+# its errors: run_create_private_fork [<argument>...]
+run_create_private_fork() {
+  status=0
+  output=$(TEST_STATE=$state TEST_PERMISSION=$permission TEST_LISTINGS_WITHOUT_MAIN=$listings_without_main \
+    TEST_EARLY_LISTINGS=$early_listings TEST_FAILING_CALL=$failing_call PATH=$base/bin:$PATH \
+    scripts/create-private-fork "$@" 2>&1) || status=$?
+}
+
+# Checks the script's exit code and output: expect_result <description> <exit code> <output>
+expect_result() {
+  local description=$1 expected_status=$2 expected_output=$3
+  case_count=$((case_count + 1))
+  if [[ $status != "$expected_status" || $output != "$expected_output" ]]; then
+    echo "error: $description, scripts/create-private-fork must exit with code $expected_status and print \"$expected_output\", but it exited with code $status and printed \"$output\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks the gh commands that the script ran, in order, one to a line: expect_calls <description> <commands>
+expect_calls() {
+  local description=$1 expected_calls=$2 calls
+  calls=$(<"$state/calls")
+  case_count=$((case_count + 1))
+  if [[ $calls != "$expected_calls" ]]; then
+    echo "error: $description, scripts/create-private-fork must run \"$expected_calls\", but it ran \"$calls\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks how many times the script listed the fork's branches and deleted a branch, and the seconds of each sleep,
+# separated by spaces: expect_waiting <description> <listings> <deletions> <sleeps>
+expect_waiting() {
+  local description=$1 expected_listings=$2 expected_deletions=$3 expected_sleeps=$4 listings deletions sleeps
+  listings=$(grep -c "^api --paginate repos/$fork/branches " "$state/calls" || true)
+  deletions=$(grep -c "^api --method DELETE " "$state/calls" || true)
+  sleeps=$(paste -sd ' ' - <"$state/sleeps")
+  case_count=$((case_count + 1))
+  if [[ $listings != "$expected_listings" || $deletions != "$expected_deletions" || $sleeps != "$expected_sleeps" ]]; then
+    echo "error: $description, scripts/create-private-fork must list the fork's branches $expected_listings times, delete $expected_deletions branches and sleep \"$expected_sleeps\" seconds, but it listed them $listings times, deleted $deletions branches and slept \"$sleeps\" seconds." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Prints the seconds of the sleeps between a number of checks, separated by spaces: sleeps_between <checks>
+sleeps_between() {
+  local sleeps="" check
+  for ((check = 2; check <= $1; check++)); do
+    sleeps+="${sleeps:+ }5"
+  done
+  printf '%s\n' "$sleeps"
+}
+
+read_repo="repo view --json nameWithOwner --jq .nameWithOwner"
+read_permission="repo view --json viewerPermission --jq .viewerPermission"
+read_advisory="api repos/$repo/security-advisories/$ghsa_id --jq .private_fork.full_name // \"\""
+create_fork="api --method POST repos/$repo/security-advisories/$ghsa_id/forks --jq .full_name"
+list_branches="api --paginate repos/$fork/branches --jq .[] | [.name, (.name | @uri | gsub(\"%2F\"; \"/\"))] | @tsv"
+delete_prefix="api --method DELETE repos/$fork/git/refs/heads/"
+deleted="$fork
+Deleted 441-fix-import
+Deleted dependabot/github_actions/actions/checkout-5"
+copies="because they're copies of the branches of $repo, not fixes"
+
+new_case
+run_create_private_fork "$ghsa_id"
+expect_result "When the fork has main at the first check" 0 "$deleted"
+expect_calls "When the fork has main at the first check" \
+  "$read_repo"$'\n'"$read_permission"$'\n'"$read_advisory"$'\n'"$create_fork"$'\n'"$list_branches"$'\n'"${delete_prefix}441-fix-import"$'\n'"${delete_prefix}dependabot/github_actions/actions/checkout-5"
+expect_waiting "When the fork has main at the first check" 1 2 ""
+
+new_case
+listings_without_main=3
+run_create_private_fork "$ghsa_id"
+expect_result "When the fork lists no branches at the first 3 checks" 0 "$deleted"
+expect_waiting "When the fork lists no branches at the first 3 checks" 4 2 "5 5 5"
+
+new_case
+listings_without_main=3
+early_listings=fail
+run_create_private_fork "$ghsa_id"
+expect_result "When gh can't list the fork's branches at the first 3 checks" 0 "$deleted"
+expect_waiting "When gh can't list the fork's branches at the first 3 checks" 4 2 "5 5 5"
+
+new_case
+listings_without_main=2
+set_branches 441-fix-import
+run_create_private_fork "$ghsa_id"
+expect_result "When the fork lists branches without main" 1 \
+  "$fork
+error: the private fork $fork still has no branch main after 5 minutes. Once it has main, delete its other branches at https://github.com/$fork/branches, $copies."
+expect_waiting "When the fork lists branches without main" 61 0 "$(sleeps_between 61)"
+
+new_case
+listings_without_main=60
+run_create_private_fork "$ghsa_id"
+expect_result "When main appears at the last check, after 5 minutes" 0 "$deleted"
+expect_waiting "When main appears at the last check, after 5 minutes" 61 2 "$(sleeps_between 61)"
+
+new_case
+listings_without_main=61
+run_create_private_fork "$ghsa_id"
+expect_result "When main doesn't appear within 5 minutes" 1 \
+  "$fork
+error: the private fork $fork still has no branch main after 5 minutes. Once it has main, delete its other branches at https://github.com/$fork/branches, $copies."
+expect_waiting "When main doesn't appear within 5 minutes" 61 0 "$(sleeps_between 61)"
+
+new_case
+listings_without_main=61
+early_listings=fail
+run_create_private_fork "$ghsa_id"
+expect_result "When gh can't list the fork's branches for 5 minutes" 1 \
+  "$fork
+error: can't list the branches of the private fork $fork for 5 minutes, because gh failed: gh: Not Found (HTTP 404). Once the fork has main, delete its other branches at https://github.com/$fork/branches, $copies."
+expect_waiting "When gh can't list the fork's branches for 5 minutes" 61 0 "$(sleeps_between 61)"
+
+new_case
+set_branches main
+run_create_private_fork "$ghsa_id"
+expect_result "When the fork has only main" 0 "$fork"
+expect_waiting "When the fork has only main" 1 0 ""
+
+new_case
+set_branches 441-fix-import main dependabot/github_actions/actions/checkout-5 release-notes
+printf '%s\n' 441-fix-import release-notes >"$state/undeletable"
+run_create_private_fork "$ghsa_id"
+expect_result "When gh can't delete two of the branches" 1 \
+  "$fork
+Deleted dependabot/github_actions/actions/checkout-5
+error: can't delete these branches from the private fork $fork, because gh failed:
+- 441-fix-import: gh: Reference does not exist (HTTP 422)
+- release-notes: gh: Reference does not exist (HTTP 422)
+Delete them at https://github.com/$fork/branches, $copies."
+expect_waiting "When gh can't delete two of the branches" 1 3 ""
+
+new_case
+printf '%s\n' "main${tab}main" "main?x${tab}main%3Fx" "fix#12${tab}fix%2312" >"$state/branches"
+run_create_private_fork "$ghsa_id"
+expect_result "When branches' names hold ? and #" 0 "$fork
+Deleted main?x
+Deleted fix#12"
+expect_calls "When branches' names hold ? and #" \
+  "$read_repo"$'\n'"$read_permission"$'\n'"$read_advisory"$'\n'"$create_fork"$'\n'"$list_branches"$'\n'"${delete_prefix}main%3Fx"$'\n'"${delete_prefix}fix%2312"
+
+new_case
+echo "$fork" >"$state/existing-fork"
+run_create_private_fork "$ghsa_id"
+expect_result "When the advisory has a private fork already" 0 "$fork"
+expect_calls "When the advisory has a private fork already" "$read_repo"$'\n'"$read_permission"$'\n'"$read_advisory"
+expect_waiting "When the advisory has a private fork already" 0 0 ""
+
+new_case
+permission=MAINTAIN
+run_create_private_fork "$ghsa_id"
+expect_result "With maintain access" 1 \
+  "error: creating a private fork for a security advisory of $repo needs admin access, and you have MAINTAIN access. Ask a maintainer with admin access to run this script."
+expect_calls "With maintain access" "$read_repo"$'\n'"$read_permission"
+
+new_case
+failing_call=$read_repo
+run_create_private_fork "$ghsa_id"
+expect_result "When gh can't read the repository's name" 1 \
+  "error: can't read the repository's name, because gh failed: HTTP 404: Not Found"
+
+new_case
+failing_call=$read_permission
+run_create_private_fork "$ghsa_id"
+expect_result "When gh can't read the person's access" 1 \
+  "error: can't read your access to $repo, because gh failed: HTTP 404: Not Found"
+expect_calls "When gh can't read the person's access" "$read_repo"$'\n'"$read_permission"
+
+new_case
+failing_call="api repos/$repo/security-advisories/$ghsa_id "
+run_create_private_fork "$ghsa_id"
+expect_result "When gh can't read the advisory" 1 \
+  "error: can't read the security advisory $ghsa_id of $repo, because gh failed: HTTP 404: Not Found"
+expect_calls "When gh can't read the advisory" "$read_repo"$'\n'"$read_permission"$'\n'"$read_advisory"
+
+new_case
+failing_call=$create_fork
+run_create_private_fork "$ghsa_id"
+expect_result "When gh can't create the fork" 1 \
+  "error: can't create a private fork for the security advisory $ghsa_id, because gh failed: HTTP 404: Not Found"
+expect_waiting "When gh can't create the fork" 0 0 ""
+
+new_case
+run_create_private_fork
+expect_result "When it gets no argument" 1 \
+  "error: scripts/create-private-fork takes one argument, the GHSA ID of a security advisory, and it got 0."
+expect_calls "When it gets no argument" ""
+
+new_case
+run_create_private_fork "$ghsa_id" "$ghsa_id"
+expect_result "When it gets two arguments" 1 \
+  "error: scripts/create-private-fork takes one argument, the GHSA ID of a security advisory, and it got 2."
+
+new_case
+run_create_private_fork "$ghsa_id/forks"
+expect_result "When the GHSA ID ends in a path" 1 \
+  "error: scripts/create-private-fork takes the GHSA ID of a security advisory, such as GHSA-2c5x-3m4v-7q8r, and it got \"$ghsa_id/forks\"."
+expect_calls "When the GHSA ID ends in a path" ""
+
+new_case
+run_create_private_fork GHSA-2c5x-3m4v-7q8
+expect_result "When the GHSA ID's last part has 3 characters" 1 \
+  "error: scripts/create-private-fork takes the GHSA ID of a security advisory, such as GHSA-2c5x-3m4v-7q8r, and it got \"GHSA-2c5x-3m4v-7q8\"."
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/create-private-fork.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/create-private-fork.test passed. Cases: $case_count."

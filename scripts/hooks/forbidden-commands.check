@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# Blocks the commands that the rules forbid, with a message that says what to do instead:
+# - every gh command while gh is older than scripts/minimum-gh-version says, because the rules' commands need it
+# - approving a workflow run with gh api, because the run executes the code of a pull request from outside the project
+# - closing one of Dependabot's pull requests, or pushing to a dependabot/ branch, because a maintainer decides what
+#   happens to Dependabot's pull requests
+# - deleting a pull request's branch with gh pr close, because the next agent that works on its issue starts from it
+# - gh issue develop on an issue with needs-triage, because no maintainer has accepted the issue yet
+# - gh auth token, gh auth status with --show-token, gh auth git-credential and git credential fill, because they print
+#   the token that gh uses, and AGENTS.md says never to read or print secrets
+# It asks gh and git about the pull request, the issue or the branch, and allows the command when they fail, such as
+# without a network.
+# shellcheck source=scripts/hooks/helpers.bash
+source "${BASH_SOURCE[0]%/*}/helpers.bash"
+# shellcheck source=scripts/minimum-gh-version
+source "${BASH_SOURCE[0]%/*}/../minimum-gh-version"
+# shellcheck source=scripts/needs-triage
+source "${BASH_SOURCE[0]%/*}/../needs-triage"
+
+# The flags that take a value, as gh issue develop --help, git push -h, gh auth token --help and gh auth status --help
+# list them.
+develop_flags_with_value=" -b --base --branch-repo -n --name --worktree -R --repo "
+push_flags_with_value=" --repo --recurse-submodules --receive-pack --exec -o --push-option "
+token_flags_with_value=" -h --hostname -u --user "
+status_flags_with_value=" -h --hostname --jq --json --template "
+
+prints_token="Blocked: this command prints the token that gh uses, and AGENTS.md says never to read or print secrets. gh commands use the token without it."
+
+check_gh_version() {
+  local version_output found
+  version_output=$(gh --version 2>/dev/null) || return 0
+  found=$(older_gh_version "$version_output")
+  if [[ -n $found ]]; then
+    block "Blocked: the rules in AGENTS.md need gh $minimum_gh_version or later, and this machine has gh $found. Tell the maintainer, and that https://github.com/cli/cli#installation says how to update it."
+  fi
+}
+
+check_gh_api() {
+  local approval='(^|/)actions/runs/[^/]+/approve/?(\?.*)?$'
+  read_arguments 2 "$api_flags_with_value"
+  if [[ $argument =~ $approval ]]; then
+    block "Blocked: a maintainer decides whether to approve a workflow run, because the run executes the code of a pull request from outside the project. Go on with the other work, and list the run in your report for the maintainer."
+  fi
+}
+
+# Succeeds if a pull request is one of Dependabot's: is_from_dependabot [<pull request>] [--repo <repository>]
+# Without a pull request, gh asks about the current branch's.
+is_from_dependabot() {
+  local answer
+  answer=$(gh pr view "$@" --json author 2>/dev/null) || return 1
+  [[ $(jq -r .author.login <<<"$answer") == app/dependabot ]]
+}
+
+check_gh_pr_close() {
+  local pull_request="this branch's pull request"
+  read_arguments 3 "$pr_close_flags_with_value"
+  if [[ -n $argument ]]; then
+    pull_request="pull request $argument"
+  fi
+  if is_from_dependabot ${target[@]+"${target[@]}"}; then
+    block "Blocked: $pull_request is one of Dependabot's, and a maintainer decides what happens to it. Leave it open, and list it in your report for the maintainer."
+  fi
+  if has_flag -d --delete-branch --delete-branch=true; then
+    block "Blocked: gh pr close with --delete-branch or -d deletes the pull request's branch, and the next agent that works on its issue starts from that branch. Close the pull request without that flag."
+  fi
+}
+
+check_gh_issue_develop() {
+  local answer
+  read_arguments 3 "$develop_flags_with_value"
+  if [[ -z $argument ]]; then
+    return 0
+  fi
+  answer=$(gh issue view "${target[@]}" --json labels 2>/dev/null) || return 0
+  if jq -e 'any(.labels[]; .name == "needs-triage")' >/dev/null <<<"$answer"; then
+    block "Blocked: $(needs_triage_message "$argument" "${target[*]}")"
+  fi
+}
+
+# Reads the -C options at the start of a git command, and sets these variables:
+# - git_folder: the -C options that make git work in the same folder as the command, starting from the agent's folder
+# - git_subcommand: the index of the word after the options, such as push
+read_git_options() {
+  local i=1
+  git_folder=(-C "${cwd:-.}")
+  # git takes each -C relative to the folder before it, so the hook asks git about the branch in the same folder.
+  while [[ ${command_words[i]:-} == -C ]]; do
+    git_folder+=(-C "${command_words[i + 1]:-}")
+    i=$((i + 2))
+  done
+  git_subcommand=$i
+}
+
+check_git_push() {
+  local i word refspec branch
+  local -a words=() refspecs=(HEAD)
+  for ((i = git_subcommand + 1; i < ${#command_words[@]}; i++)); do
+    word=${command_words[i]}
+    case $word in
+      -*=*) ;;
+      -*)
+        if [[ $push_flags_with_value == *" $word "* ]]; then
+          i=$((i + 1))
+        fi
+        ;;
+      *) words+=("$word") ;;
+    esac
+  done
+  # The first word is the remote, and the words after it are refspecs. Without a refspec, git pushes the current branch.
+  if ((${#words[@]} > 1)); then
+    refspecs=("${words[@]:1}")
+  fi
+  for refspec in "${refspecs[@]}"; do
+    # A refspec is [+]<source>[:<branch>]. Without a colon, it pushes to the branch with the source's name.
+    branch=${refspec#+}
+    branch=${branch#*:}
+    if [[ $branch == HEAD ]]; then
+      branch=$(git "${git_folder[@]}" symbolic-ref --quiet --short HEAD 2>/dev/null) || continue
+    fi
+    branch=${branch#refs/heads/}
+    if [[ $branch == dependabot/* ]]; then
+      block "Blocked: $branch is the branch of one of Dependabot's pull requests, and a maintainer decides what happens to those. Leave the branch as it is, and list the pull request in your report for the maintainer."
+    fi
+  done
+}
+
+check_gh_auth_token() {
+  read_arguments 3 "$token_flags_with_value"
+  # Only --help shows the help instead of the token, because -h means --hostname here.
+  if ! has_flag --help; then
+    block "$prints_token"
+  fi
+}
+
+check_gh_auth_status() {
+  local flag
+  read_arguments 3 "$status_flags_with_value"
+  for flag in ${flags[@]+"${flags[@]}"}; do
+    case $flag in
+      --show-token=false) ;;
+      --show-token | --show-token=*) block "$prints_token" ;;
+      --*) ;;
+      # -t, or a group of short flags that holds it, such as -at
+      -*t*) block "$prints_token" ;;
+    esac
+  done
+}
+
+check_simple_command() {
+  drop_command_prefixes "$@"
+  move_gh_repository_flags
+  if ((${#command_words[@]} == 0)); then
+    return 0
+  fi
+  if [[ ${command_words[0]##*/} == git ]]; then
+    read_git_options
+    case "${command_words[git_subcommand]:-} ${command_words[git_subcommand + 1]:-}" in
+      "push "*) check_git_push ;;
+      "credential fill") block "$prints_token" ;;
+    esac
+    return 0
+  fi
+  if [[ ${command_words[0]##*/} != gh ]]; then
+    return 0
+  fi
+  check_gh_version
+  case "${command_words[1]:-} ${command_words[2]:-}" in
+    "api "*) check_gh_api ;;
+    "pr close") check_gh_pr_close ;;
+    "issue develop") check_gh_issue_develop ;;
+    "auth token") check_gh_auth_token ;;
+    "auth status") check_gh_auth_status ;;
+    "auth git-credential") block "$prints_token" ;;
+  esac
+}
+
+read_input
+if [[ $tool_name == Bash ]]; then
+  # A here-document holds text, such as a commit message that names a command, and not commands.
+  for_each_simple_command check_simple_command "$shell_command"
+fi

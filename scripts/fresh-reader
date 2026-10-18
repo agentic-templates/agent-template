@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Gives a page to a reader who has seen nothing else, and prints the reader's answer: scripts/fresh-reader <reader> <page>
+# <reader> is the page's reader and what they want to do, such as "a developer who wants to use this project", and
+# <page> is the page's path. The reader quotes each sentence they had to read twice and each sentence they didn't
+# need, with the reason.
+# It runs claude -p in an empty temporary folder, with --safe-mode, which keeps the login but turns off CLAUDE.md,
+# skills, plugins, hooks and MCP servers, and with no tools. If claude fails, the script runs it once more. If that run
+# fails too, it prints claude's error and exits with code 1. "Review a changed page with a fresh reader" in
+# docs/pages.md runs it.
+set -euo pipefail
+
+# Prints an error and stops: stop <message>
+stop() {
+  echo "error: $1" >&2
+  exit 1
+}
+
+if (($# != 2)); then
+  stop "scripts/fresh-reader takes two arguments, the page's reader and the page's path, as in scripts/fresh-reader \"a developer who wants to use this project\" README.md, and it got $#."
+fi
+reader=$1
+page=$2
+if [[ ! -f $page ]]; then
+  stop "$page isn't a file. Give the page's path, such as README.md."
+fi
+
+prompt="You are $reader. Read this page once, the way that reader would. Quote each sentence you had to read twice, and say what made you stop. Then quote each sentence you didn't need, and say why. Leave out sentences that you'd only word differently."
+input="$prompt"$'\n\n'"$(<"$page")"
+
+folder=$(mktemp -d)
+trap 'rm -rf "$folder"' EXIT
+cd "$folder"
+
+# Runs claude once, and prints what it prints on its output and its error output. claude gets the prompt on its input,
+# because --tools takes each argument after it as the name of a tool.
+ask_reader() {
+  claude -p --safe-mode --tools "" <<<"$input" 2>&1
+}
+
+# claude fails with an API error now and then, and a second run usually works.
+status=0
+answer=$(ask_reader) || answer=$(ask_reader) || status=$?
+if ((status != 0)); then
+  stop "can't get the reader's answer, because claude failed twice. The second time, it exited with code $status and printed: $answer"
+fi
+printf '%s\n' "$answer"

@@ -1,0 +1,70 @@
+name: PR title
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+  # The merge queue waits for the required check "title" on each group of pull requests that it tests.
+  merge_group:
+
+permissions: {}
+
+jobs:
+  # The rules for main require a job named "title". If you rename it, change scripts/configure-github too.
+  # In the merge queue, the job skips, and GitHub counts the skip as a pass. The pull request's own run has already
+  # checked its title and body.
+  title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    # scripts/check-pull-request reads the issues that the body closes.
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      # scripts/check-pull-request reads the pull request's commits, so the checkout fetches the whole history.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check that the title follows the rules for a commit subject
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: scripts/check-title
+
+      # Dependabot's pull requests have no issue and no template, so this step skips them.
+      # The checkout is GitHub's merge of the pull request into its base branch. The merge's first parent is the
+      # base branch, and its second the pull request's latest commit.
+      - name: Check the body, the prose of the title, and the commits
+        if: github.event.pull_request.user.login != 'dependabot[bot]'
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: scripts/check-pull-request HEAD^1 HEAD^2
+
+  # Release notes group pull requests by this label, as .github/release.yml sets out.
+  # Pull requests from forks and from Dependabot get a read-only token, so this job skips them.
+  # Dependabot's updates are left out of release notes, and whoever merges a fork's pull request labels it by hand.
+  label:
+    needs: title
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Label the pull request with the type in its title
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          case "$TITLE" in
+            feat*) label=feature ;;
+            fix*) label=bug ;;
+            *) label=maintenance ;;
+          esac
+          others=$(printf '%s\n' feature bug maintenance | grep -vx "$label" | paste -sd, -)
+          gh pr edit "$PR_URL" --add-label "$label" --remove-label "$others"

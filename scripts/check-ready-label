@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Removes a ready label that the definition of ready in docs/planning.md doesn't allow, and comments with the reasons.
+# .github/workflows/ready-label.yml runs it each time someone adds ready to an issue.
+# It reads the issue's number from ISSUE_NUMBER and the login of the person who added ready from LABELED_BY,
+# and asks gh for the rest. It fails when a gh call fails. When it removes ready, it exits with code 0,
+# because a failed run on main's latest commit stops a release.
+set -euo pipefail
+# shellcheck source=scripts/issue-labels
+source "${BASH_SOURCE[0]%/*}/issue-labels"
+
+# Succeeds if the word is one of the other words: is_one_of <word> [<other word>...]
+is_one_of() {
+  local word=$1 other
+  shift
+  for other in "$@"; do
+    if [[ $other == "$word" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Prints labels in backticks, joined as in a sentence, such as "`bug`, `feature` and `research`": in_backticks <label>...
+in_backticks() {
+  local text="\`$1\`"
+  shift
+  while (($# > 0)); do
+    if (($# == 1)); then
+      text+=" and \`$1\`"
+    else
+      text+=", \`$1\`"
+    fi
+    shift
+  done
+  printf '%s' "$text"
+}
+
+# Succeeds if a permission from GitHub's permission API lets a person write to the repository: can_write <permission>
+# The API reports the Maintain role as write, and the Triage role as read.
+can_write() {
+  [[ $1 == admin || $1 == write ]]
+}
+
+# Prints a Markdown list of the reasons why the definition of ready doesn't allow ready on the issue,
+# or nothing if it allows it. The list speaks to the person who added ready:
+# reasons_against_ready <author> <author's permission> <permission of the person who added ready> [<label>...]
+reasons_against_ready() {
+  local author=$1 author_permission=$2 labeler_permission=$3 label
+  local -a types=() statuses=()
+  shift 3
+  for label in "$@"; do
+    if is_one_of "$label" "${type_labels[@]}"; then
+      types+=("$label")
+    elif is_one_of "$label" "${status_labels[@]}"; then
+      statuses+=("$label")
+    fi
+  done
+
+  if ! can_write "$author_permission"; then
+    echo "- The issue's author, @$author, doesn't have write access to this repository."
+  fi
+  if ! can_write "$labeler_permission"; then
+    echo "- You don't have write access to this repository."
+  fi
+  if ((${#statuses[@]} == 1)); then
+    echo "- The issue has the status label $(in_backticks "${statuses[@]}"), and it must have none."
+  elif ((${#statuses[@]} > 1)); then
+    echo "- The issue has the status labels $(in_backticks "${statuses[@]}"), and it must have none."
+  fi
+  local one_type
+  one_type="it must have exactly one of $(in_backticks "${type_labels[@]}")"
+  if ((${#types[@]} == 0)); then
+    echo "- The issue has no type label, and $one_type."
+  elif ((${#types[@]} > 1)); then
+    echo "- The issue has the type labels $(in_backticks "${types[@]}"), and $one_type."
+  fi
+}
+
+issue_number=${ISSUE_NUMBER:?Set ISSUE_NUMBER to the number of the issue that got the ready label.}
+labeled_by=${LABELED_BY:?Set LABELED_BY to the login of the person who added the ready label.}
+
+# The labels come from gh, not from the event, because a command that adds ready and removes a status label
+# changes them one after the other, and the event holds the labels from before the removal.
+labels_text=$(gh issue view "$issue_number" --json labels --jq '.labels[].name')
+labels=()
+while IFS= read -r label; do
+  if [[ -n $label ]]; then
+    labels+=("$label")
+  fi
+done <<<"$labels_text"
+if ! is_one_of ready ${labels[@]+"${labels[@]}"}; then
+  exit 0
+fi
+
+author=$(gh issue view "$issue_number" --json author --jq .author.login)
+author_permission=$(gh api "repos/{owner}/{repo}/collaborators/$author/permission" --jq .permission)
+labeler_permission=$(gh api "repos/{owner}/{repo}/collaborators/$labeled_by/permission" --jq .permission)
+reasons=$(reasons_against_ready "$author" "$author_permission" "$labeler_permission" "${labels[@]}")
+if [[ -z $reasons ]]; then
+  exit 0
+fi
+
+repository_url=$(gh repo view --json url --jq .url)
+gh issue edit "$issue_number" --remove-label ready
+gh issue comment "$issue_number" --body "@$labeled_by, I removed \`ready\` from this issue, because the [definition of ready]($repository_url/blob/main/docs/planning.md#definition-of-ready) doesn't allow it:
+
+$reasons"

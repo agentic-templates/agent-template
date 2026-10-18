@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Tests scripts/script-tests-needed, with paths on standard input and with --branch in a small repository.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+script=$PWD/scripts/script-tests-needed
+
+base=$(mktemp -d)
+trap 'rm -rf "$base"' EXIT
+
+case_count=0
+failed_cases=0
+
+# Checks the script's exit code: expect_status <description> <exit code> <command>...
+expect_status() {
+  local description=$1 expected=$2 status=0
+  shift 2
+  "$@" >/dev/null 2>&1 || status=$?
+  case_count=$((case_count + 1))
+  if [[ $status != "$expected" ]]; then
+    echo "error: $description, scripts/script-tests-needed must exit with code $expected, but it exited with code $status." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Runs the script on paths given as arguments, one to a line on its standard input: with_paths [<path>...]
+with_paths() {
+  if (($# == 0)); then
+    "$script" </dev/null
+  else
+    printf '%s\n' "$@" | "$script"
+  fi
+}
+
+expect_status "When the change touches only text" 1 with_paths README.md AGENTS.md docs/code.md LICENSE
+expect_status "When the change touches no file" 1 with_paths
+expect_status "When the change touches a script" 0 with_paths docs/code.md scripts/check
+expect_status "When the change touches a hook" 0 with_paths scripts/hooks/before-tool
+expect_status "When the change touches a workflow" 0 with_paths .github/workflows/ci.yml
+expect_status "When the change touches the Claude Code settings" 0 with_paths .claude/settings.json
+expect_status "When the change touches the Codex hooks" 0 with_paths .codex/hooks.json
+expect_status "When a file's name only starts like a folder" 1 with_paths scripts.md docs/scripts/notes.md
+expect_status "When the argument isn't --branch" 2 "$script" --all
+
+# A repository whose origin/main has one commit, with a branch checked out from it: new_repository
+new_repository() {
+  repo=$(mktemp -d "$base/repo.XXXXXX")
+  git -C "$repo" init --quiet --initial-branch=main
+  mkdir -p "$repo/docs" "$repo/scripts"
+  echo text >"$repo/docs/page.md"
+  echo script >"$repo/scripts/tool"
+  git -C "$repo" add --all
+  git -C "$repo" -c user.name=test -c user.email=test@example.com commit --quiet -m "chore: start"
+  git -C "$repo" update-ref refs/remotes/origin/main HEAD
+  git -C "$repo" switch --quiet --create 12-change
+}
+
+# Runs the script with --branch in the repository.
+on_branch() {
+  (cd "$repo" && "$script" --branch)
+}
+
+new_repository
+expect_status "When the branch changes nothing" 1 on_branch
+
+new_repository
+echo more >>"$repo/docs/page.md"
+git -C "$repo" -c user.name=test -c user.email=test@example.com commit --quiet -am "docs: more"
+expect_status "When the branch commits a change to the docs" 1 on_branch
+
+new_repository
+echo more >>"$repo/scripts/tool"
+git -C "$repo" -c user.name=test -c user.email=test@example.com commit --quiet -am "fix: more"
+expect_status "When the branch commits a change to a script" 0 on_branch
+
+new_repository
+echo more >>"$repo/scripts/tool"
+expect_status "When a change to a script isn't committed" 0 on_branch
+
+new_repository
+echo new >"$repo/scripts/new"
+expect_status "When a new script isn't added to git" 0 on_branch
+
+new_repository
+git -C "$repo" mv scripts/tool docs/tool.md
+expect_status "When the branch moves a script out of scripts/" 0 on_branch
+
+new_repository
+git -C "$repo" update-ref -d refs/remotes/origin/main
+expect_status "When the repository has no origin/main" 0 on_branch
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/script-tests-needed.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/script-tests-needed.test passed. Cases: $case_count."

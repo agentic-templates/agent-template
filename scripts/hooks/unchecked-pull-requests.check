@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Blocks opening a pull request with gh pr create, or its alias gh pr new, until scripts/check has passed on the
+# pull request's files, because a pull request that fails in CI costs a round trip.
+# scripts/check records the tree of the files it passed on, as check-passed.bash describes. This check compares that
+# record with the tree of HEAD, or of the branch that --head names. It allows the command when it has nothing to
+# compare: outside a git repository, before the first commit, and when this repository has no branch of that name.
+# shellcheck source=scripts/hooks/helpers.bash
+source "${BASH_SOURCE[0]%/*}/helpers.bash"
+# shellcheck source=scripts/hooks/check-passed.bash
+source "${BASH_SOURCE[0]%/*}/check-passed.bash"
+
+not_checked="Blocked: scripts/check hasn't passed on these files. Run it, fix what it reports, and open the pull request again."
+not_committed="Blocked: scripts/check passed on the files on disk, but some of their changes aren't committed. Commit them first, and then run gh pr create in a command of its own."
+
+check_gh_pr_create() {
+  local branch head_tree pull_request_tree record passed_tree disk_tree
+  if ! opens_pull_request; then
+    return 0
+  fi
+  # --head can name the branch as <user>:<branch>.
+  branch=${pr_head#*:}
+
+  # Cursor doesn't send the folder the agent works in, so for Cursor the hook's own folder counts.
+  cd -- "${cwd:-.}" || return 0
+  head_tree=$(git rev-parse --verify --quiet 'HEAD^{tree}') || return 0
+  pull_request_tree=$head_tree
+  if [[ -n $branch ]]; then
+    pull_request_tree=$(git rev-parse --verify --quiet "refs/heads/$branch^{tree}") || return 0
+  fi
+
+  record=$(pass_record_path)
+  if [[ ! -f $record ]]; then
+    block "$not_checked"
+  fi
+  passed_tree=$(< "$record")
+  if [[ $passed_tree == "$pull_request_tree" ]]; then
+    return 0
+  fi
+  # A pass on changes that aren't committed yet, as when one command commits and then opens the pull request.
+  # git's warnings, such as about line endings, would end up in the message, so they're left out.
+  if [[ $passed_tree != "$head_tree" ]] && disk_tree=$(tree_on_disk 2>/dev/null) && [[ $passed_tree == "$disk_tree" ]]; then
+    block "$not_committed"
+  fi
+  block "$not_checked"
+}
+
+check_simple_command() {
+  drop_command_prefixes "$@"
+  move_gh_repository_flags
+  if ((${#command_words[@]} == 0)); then
+    return 0
+  fi
+  check_gh_pr_create
+}
+
+read_input
+if [[ $tool_name == Bash ]]; then
+  for_each_simple_command check_simple_command "$shell_command"
+fi

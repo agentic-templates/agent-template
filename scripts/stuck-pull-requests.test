@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+# Tests scripts/stuck-pull-requests with a stand-in for gh.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/testing-required-checks.bash
+source scripts/testing-required-checks.bash
+unrequired_check=$(fixture_check_name lint)
+
+case_count=0
+failed_cases=0
+
+base=$(mktemp -d)
+trap 'rm -rf "$base"' EXIT
+mkdir -p "$base/bin"
+
+# A stand-in for gh, first on the PATH. With fail in place of an answer, it fails, as gh does without the network.
+# - It answers the command in scripts/open-pull-requests that lists the open pull requests with TEST_PULL_REQUESTS, as
+#   that script's --jq filter prints them.
+# - It writes each gh pr merge command to TEST_GH_CALLS, one to a line, and fails the one that matches
+#   TEST_FAILING_MERGE.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+# Prints an answer, or fails as gh does without the network: answer <answer, or fail>
+answer() {
+  if [[ $1 == fail ]]; then
+    echo "error connecting to api.github.com" >&2
+    exit 1
+  fi
+  if [[ -n $1 ]]; then
+    printf '%s\n' "$1"
+  fi
+  exit 0
+}
+
+if [[ $1 == api && $2 == graphql ]]; then
+  answer "$TEST_PULL_REQUESTS"
+fi
+if [[ $1 == pr && $2 == merge ]]; then
+  echo "$*" >>"$TEST_GH_CALLS"
+  if [[ $* == "$TEST_FAILING_MERGE" ]]; then
+    echo "HTTP 502: Bad Gateway" >&2
+    exit 1
+  fi
+  exit 0
+fi
+echo "The stand-in for gh doesn't answer: gh $*" >&2
+exit 1
+STAND_IN
+chmod +x "$base/bin/gh"
+
+tab=$'\t'
+# The lines that the --jq filter in scripts/open-pull-requests prints for an open pull request:
+# pull_request <number> <from a fork> <author> <in the merge queue> <merge state> [<when auto-merge was turned on>]
+pull_request() {
+  printf '%s\n' "pull-request$tab$1$tab$2$tab$3$tab$4$tab$5$tab${6:-}"
+  project_check_runs "$1"
+}
+# check_run <pull request> <ID> <name> [<conclusion>]
+check_run() {
+  printf '%s\n' "check$tab$1$tab$2$tab$3$tab${4:-}"
+}
+# removal <pull request> <time> [<reason>]
+removal() {
+  printf '%s\n' "removal$tab$1$tab$2$tab${3:-}"
+}
+# closes <pull request> <issue> [<in this repository> <state> <has the ready label>]. Without the last three, the issue
+# is an open ready issue in this repository.
+closes() {
+  printf '%s\n' "closes$tab$1$tab$2$tab${3:-true}$tab${4:-OPEN}$tab${5:-true}"
+}
+# The checks of a pull request, both passed: passed_checks <pull request>
+passed_checks() {
+  check_run "$1" 101 check SUCCESS
+  check_run "$1" 102 title SUCCESS
+}
+
+auto_merge=2026-05-04T09:00:00Z
+removed_at=2026-05-04T09:10:00Z
+later=2026-05-04T09:20:00Z
+
+# Runs scripts/stuck-pull-requests, and sets status, output and merges, the gh pr merge commands that it ran:
+# run_stuck_pull_requests <open pull requests, or fail> [<NAME=value>...]
+# Each NAME=value sets one of the stand-in's other TEST_ variables, which are empty otherwise.
+run_stuck_pull_requests() {
+  local pull_requests=$1
+  shift
+  status=0
+  : >"$base/calls"
+  output=$(env TEST_FAILING_MERGE="" "$@" \
+    TEST_PULL_REQUESTS="$pull_requests" TEST_GH_CALLS="$base/calls" PATH="$base/bin:$PATH" \
+    scripts/stuck-pull-requests 2>&1) || status=$?
+  merges=$(<"$base/calls")
+}
+
+# Checks the script's exit code, output and gh pr merge commands:
+# expect_result <description> <exit code> <output> <gh pr merge commands, one to a line>
+expect_result() {
+  local description=$1 expected_status=$2 expected_output=$3 expected_merges=$4
+  case_count=$((case_count + 1))
+  if [[ $status != "$expected_status" || $output != "$expected_output" || $merges != "$expected_merges" ]]; then
+    echo "error: $description, scripts/stuck-pull-requests must exit with code $expected_status, print \"$expected_output\" and run \"$expected_merges\", but it exited with code $status, printed \"$output\" and ran \"$merges\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+run_stuck_pull_requests ""
+expect_result "When no pull request is open" 0 "" ""
+
+pull_requests=$(
+  pull_request 12 false octocat false DIRTY $auto_merge
+  closes 12 30
+  pull_request 13 false octocat false BLOCKED $auto_merge
+  closes 13 31
+  check_run 13 101 check SUCCESS
+  check_run 13 102 title FAILURE
+  pull_request 14 false octocat false BLOCKED $auto_merge
+  closes 14 32
+  check_run 14 101 check CANCELLED
+  check_run 14 102 title TIMED_OUT
+  pull_request 15 false octocat false DIRTY $auto_merge
+  closes 15 33
+  closes 15 34
+  check_run 15 101 check FAILURE
+)
+expected="Pull request 12 closes issue #30. It's DIRTY.
+Pull request 13 closes issue #31. The check \"title\" failed.
+Pull request 14 closes issue #32. The checks \"check\" and \"title\" failed.
+Pull request 15 closes issues #33 and #34. It's DIRTY. The check \"check\" failed."
+run_stuck_pull_requests "$pull_requests"
+expect_result "When pull requests of ready issues are DIRTY or failed checks" 0 "$expected" ""
+
+pull_requests=$(
+  pull_request 12 false octocat false UNSTABLE $auto_merge
+  closes 12 30
+  check_run 12 103 check SUCCESS
+  check_run 12 102 title SUCCESS
+  check_run 12 101 check FAILURE
+  check_run 12 104 "$unrequired_check" FAILURE
+  pull_request 13 false octocat false BLOCKED $auto_merge
+  closes 13 31
+  check_run 13 101 check
+)
+run_stuck_pull_requests "$pull_requests"
+expect_result "When a failed check passed when it ran again, a check that main doesn't require failed, and a check runs" 0 "" ""
+
+pull_requests=$(
+  pull_request 12 false octocat false BLOCKED
+  closes 12 30
+  removal 12 $removed_at merge_conflict
+  pull_request 13 false octocat false BLOCKED
+  closes 13 31
+  removal 13 2026-05-04T08:00:00Z merge_conflict
+  removal 13 $removed_at
+  pull_request 14 false octocat false BLOCKED $later
+  closes 14 32
+  removal 14 $removed_at merge_conflict
+  pull_request 15 false octocat true BLOCKED
+  closes 15 33
+  removal 15 $removed_at merge_conflict
+  pull_request 16 false octocat false BLOCKED $later
+  closes 16 34
+  removal 16 $removed_at merge_conflict
+  check_run 16 101 check FAILURE
+  pull_request 17 false octocat false BLOCKED $auto_merge
+  closes 17 35
+  removal 17 $removed_at merge_conflict
+)
+expected="Pull request 12 closes issue #30. The merge queue removed it 1 time, with the reason merge_conflict, and it isn't back in the queue.
+Pull request 13 closes issue #31. The merge queue removed it 2 times, with the reasons merge_conflict and unknown, and it isn't back in the queue.
+Pull request 16 closes issue #34. The check \"check\" failed. The merge queue removed it 1 time, with the reason merge_conflict.
+Pull request 17 closes issue #35. The merge queue removed it 1 time, with the reason merge_conflict, and it isn't back in the queue."
+run_stuck_pull_requests "$pull_requests"
+expect_result "When the merge queue removed pull requests of ready issues, and some are back in the queue or have auto-merge on again" \
+  0 "$expected" ""
+
+pull_requests=$(
+  pull_request 12 false octocat false BLOCKED $auto_merge
+  closes 12 30
+  check_run 12 101 check NEUTRAL
+  check_run 12 102 title SKIPPED
+  check_run 12 103 "$unrequired_check" FAILURE
+  pull_request 16 false octocat false BLOCKED $auto_merge
+  closes 16 34
+  passed_checks 16
+  pull_request 13 false octocat false BLOCKED $auto_merge
+  closes 13 31
+  check_run 13 101 check NEUTRAL
+  check_run 13 102 title
+  pull_request 14 false octocat true BLOCKED
+  closes 14 32
+  passed_checks 14
+  pull_request 15 false octocat false BLOCKED $auto_merge
+  closes 15 33
+  check_run 15 101 check SUCCESS
+)
+run_stuck_pull_requests "$pull_requests"
+expected="Pull request 12 closes issue #30. It's BLOCKED outside the merge queue, and all its checks passed.
+Pull request 16 closes issue #34. It's BLOCKED outside the merge queue, and all its checks passed."
+expect_result "When pull requests of ready issues are BLOCKED inside and outside the queue, with checks that passed or didn't" \
+  0 "$expected" ""
+
+pull_requests=$(
+  pull_request 12 false octocat false DIRTY $auto_merge
+  closes 12 30 true CLOSED true
+  pull_request 13 false octocat false DIRTY $auto_merge
+  closes 13 31 true OPEN false
+  pull_request 14 false octocat false DIRTY $auto_merge
+  closes 14 32 false OPEN true
+  pull_request 15 false octocat false DIRTY $auto_merge
+  pull_request 16 true octocat false DIRTY $auto_merge
+  closes 16 33
+  pull_request 17 false octocat false UNKNOWN
+  closes 17 34
+  removal 17 $removed_at merge_conflict
+  pull_request 18 false octocat false DIRTY
+  closes 18 35
+)
+run_stuck_pull_requests "$pull_requests"
+expect_result "When pull requests close no open issue in this repository, close one without ready, come from a fork, are UNKNOWN or have no auto-merge" \
+  0 "Pull request 13 closes issue #31. It's DIRTY." ""
+
+pull_requests=$(
+  pull_request 50 false app/dependabot false DIRTY $auto_merge
+  pull_request 51 false app/dependabot false BLOCKED $auto_merge
+  check_run 51 101 check FAILURE
+  pull_request 52 false app/dependabot false BLOCKED $auto_merge
+  passed_checks 52
+  pull_request 53 false app/dependabot true CLEAN
+  passed_checks 53
+  pull_request 54 false app/dependabot false CLEAN
+  removal 54 $removed_at merge_conflict
+  pull_request 55 false app/dependabot false DIRTY $later
+  removal 55 $removed_at merge_conflict
+  pull_request 56 false dependabot false DIRTY $auto_merge
+  pull_request 57 true app/dependabot false DIRTY $auto_merge
+)
+expected="Turned off auto-merge on pull request 50 of Dependabot's. It's DIRTY.
+Turned off auto-merge on pull request 51 of Dependabot's. The check \"check\" failed.
+Pull request 54 is Dependabot's. The merge queue removed it 1 time, with the reason merge_conflict, and it isn't back in the queue.
+Turned off auto-merge on pull request 55 of Dependabot's. It's DIRTY. The merge queue removed it 1 time, with the reason merge_conflict."
+run_stuck_pull_requests "$pull_requests"
+expect_result "When pull requests of Dependabot's are DIRTY, failed checks, passed them, are in the queue or were removed from it" \
+  0 "$expected" "pr merge 50 --disable-auto"$'\n'"pr merge 51 --disable-auto"$'\n'"pr merge 55 --disable-auto"
+
+pull_requests=$(
+  pull_request 50 false app/dependabot false DIRTY $auto_merge
+  pull_request 51 false app/dependabot false DIRTY $auto_merge
+)
+run_stuck_pull_requests "$pull_requests" TEST_FAILING_MERGE="pr merge 50 --disable-auto"
+expect_result "When gh can't turn off auto-merge" 1 \
+  "error: can't turn off auto-merge on pull request 50 of Dependabot's, because gh failed: HTTP 502: Bad Gateway" \
+  "pr merge 50 --disable-auto"
+
+run_stuck_pull_requests fail
+expect_result "When gh can't list the open pull requests" 1 \
+  "error: can't list the open pull requests, because gh failed: error connecting to api.github.com" ""
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/stuck-pull-requests.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/stuck-pull-requests.test passed. Cases: $case_count."

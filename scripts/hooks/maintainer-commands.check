@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+# Blocks the commands that wait for a maintainer:
+# - running scripts/configure-github again on a repository whose settings were applied, because a build run
+#   can merge a change to the script that nobody read. The repository is the one that the script would change.
+# - checking out, fetching or merging a pull request from a fork, because a checkout brings in the pull
+#   request's hook scripts and AGENTS.md, and only a maintainer decides to put a fork's code on main
+# - merging a pull request while the rules for main no longer require a check that scripts/configure-github
+#   requires there, because the merge could skip that check
+# - changing a code scanning or Dependabot alert, such as dismissing it, because only a maintainer decides
+#   that an alert is wrong
+# For the first three, it asks gh about the repository, and allows the command when gh fails, such as without a network.
+# shellcheck source=scripts/hooks/helpers.bash
+source "${BASH_SOURCE[0]%/*}/helpers.bash"
+
+# The flags that take a value, as gh pr checkout --help and gh pr merge --help list them.
+checkout_flags_with_value=" -b --branch --worktree -R --repo "
+merge_flags_with_value=" -A --author-email -b --body -F --body-file --match-head-commit -t --subject -R --repo "
+
+report="Go on with the other work, and list the command in your report for the maintainer, who runs it."
+alert_change="Blocked: only a maintainer dismisses or changes a code scanning or Dependabot alert. Fix the code that the alert points to. If you think the alert is wrong, tell the maintainer which alert and why."
+# The endpoint of a single alert, with or without a leading slash, a host or a query string.
+# The owner and the repository can be one word, such as $repo.
+single_alert='(^|/)repos/.+/(code-scanning|dependabot)/alerts/[^/?]+(\?|$)'
+
+# Blocks a checkout or fetch of a fork's pull request: block_checkout <pull request> [--repo <repository>]
+block_checkout() {
+  block "Blocked: pull request $1 comes from a fork. Read it with gh pr diff $* instead, because a checkout brings in its hook scripts and its AGENTS.md."
+}
+
+# Succeeds if a repository's settings were applied before, because scripts/configure-github creates a ruleset
+# named main: settings_applied_before <owner/repository>
+settings_applied_before() {
+  local rulesets
+  rulesets=$(gh api "repos/$1/rulesets?includes_parents=false" 2>/dev/null) || return 1
+  jq -e 'any(.[]; .name == "main")' >/dev/null <<<"$rulesets"
+}
+
+# Prints the repository that scripts/configure-github would change, which the script gets from gh repo view.
+# The hook asks gh the same way: in the folder that the script runs in, and with GH_REPO if the command sets it
+# for the script: script_repository <folder> [<value of GH_REPO>]
+script_repository() {
+  local answer
+  if (($# == 2)); then
+    answer=$(cd -- "$1" 2>/dev/null && GH_REPO=$2 gh repo view --json nameWithOwner 2>/dev/null) || return 1
+  else
+    answer=$(cd -- "$1" 2>/dev/null && gh repo view --json nameWithOwner 2>/dev/null) || return 1
+  fi
+  jq -r .nameWithOwner <<<"$answer"
+}
+
+# Changes script_folder as a cd command would, or empties it when the hook can't tell the folder, such as when
+# the target doesn't exist yet or has a $ or a backtick.
+follow_cd() {
+  local target
+  if [[ ${command_words[0]} != cd ]]; then
+    return 0
+  fi
+  target=${command_words[1]:-}
+  if ((${#command_words[@]} != 2)) || [[ $target == -* || $target == *[\$\`]* ]]; then
+    script_folder=""
+    return 0
+  fi
+  # The command's words come as written, so ~ is matched before the shell expands it.
+  # shellcheck disable=SC2088
+  case $target in
+    "~") target=$HOME ;;
+    "~/"*) target=$HOME/${target#"~/"} ;;
+  esac
+  if [[ -n $script_folder ]]; then
+    script_folder=$(CDPATH='' cd -- "$script_folder" 2>/dev/null && CDPATH='' cd -- "$target" 2>/dev/null && pwd) || script_folder=""
+  fi
+}
+
+# Succeeds if a pull request comes from a fork: is_from_fork [<pull request>] [--repo <repository>]
+# Without a pull request, gh asks about the current branch's.
+is_from_fork() {
+  local answer
+  answer=$(gh pr view "$@" --json isCrossRepository 2>/dev/null) || return 1
+  [[ $(jq -r .isCrossRepository <<<"$answer") == true ]]
+}
+
+# Blocks a merge while the rules for main no longer require a check that scripts/configure-github requires there,
+# which scripts/check-main-rules finds: block_if_main_lacks_checks [--repo <repository>]
+# Without a repository, the script asks about this checkout's.
+block_if_main_lacks_checks() {
+  local problem status=0
+  # The subshells drop the trap, which would otherwise turn every exit code of the script into 1.
+  if (($# == 2)); then
+    problem=$(trap - ERR && GH_REPO=$2 "${BASH_SOURCE[0]%/*}/../check-main-rules" 2>&1 >/dev/null) || status=$?
+  else
+    problem=$(trap - ERR && "${BASH_SOURCE[0]%/*}/../check-main-rules" 2>&1 >/dev/null) || status=$?
+  fi
+  # Any other code means that the script can't tell, such as when gh fails.
+  if ((status == 1)); then
+    block "Blocked: ${problem#error: } Go on with the other work, and list this in your report for the maintainer."
+  fi
+}
+
+# Blocks a run of scripts/configure-github on a repository whose settings were applied before:
+# check_configure_github [<sudo, env or NAME=value word before the command's name>]...
+check_configure_github() {
+  local word repository sets_gh_repo=false gh_repo=""
+  local -a words=("${command_words[@]}")
+  # bash or sh, with any flags, can run the script too.
+  if [[ ${words[0]##*/} == bash || ${words[0]##*/} == sh ]]; then
+    words=("${words[@]:1}")
+    while ((${#words[@]} > 0)) && [[ ${words[0]} == -* ]]; do
+      words=("${words[@]:1}")
+    done
+  fi
+  if ((${#words[@]} == 0)); then
+    return 0
+  fi
+  if [[ ${words[0]} != scripts/configure-github && ${words[0]} != */scripts/configure-github ]]; then
+    return 0
+  fi
+  for word in "$@"; do
+    if [[ $word == GH_REPO=* ]]; then
+      sets_gh_repo=true
+      gh_repo=${word#GH_REPO=}
+    fi
+  done
+  if [[ -z $script_folder || $gh_repo == *[\$\`]* ]]; then
+    block "Blocked: can't tell which repository scripts/configure-github would change. Clone the repository first. Then run cd <folder> && scripts/configure-github as a command of its own, with the folder written out."
+  fi
+  if $sets_gh_repo; then
+    repository=$(script_repository "$script_folder" "$gh_repo") || return 0
+  else
+    repository=$(script_repository "$script_folder") || return 0
+  fi
+  if settings_applied_before "$repository"; then
+    block "Blocked: this repository's settings were applied before, so a maintainer with admin access runs scripts/configure-github again. $report"
+  fi
+}
+
+check_gh_pr() {
+  local subcommand flags_with_value argument="" i word disables_auto_merge=""
+  local -a repository=() view=()
+  if [[ ${command_words[0]##*/} != gh || ${command_words[1]:-} != pr ]]; then
+    return 0
+  fi
+  subcommand=${command_words[2]:-}
+  case $subcommand in
+    checkout | co) flags_with_value=$checkout_flags_with_value ;;
+    merge) flags_with_value=$merge_flags_with_value ;;
+    *) return 0 ;;
+  esac
+
+  # The pull request is the first word that isn't a flag or a flag's value.
+  for ((i = 3; i < ${#command_words[@]}; i++)); do
+    word=${command_words[i]}
+    case $word in
+      -R | --repo)
+        repository=(--repo "${command_words[i + 1]:-}")
+        i=$((i + 1))
+        ;;
+      --repo=*) repository=(--repo "${word#--repo=}") ;;
+      --disable-auto) disables_auto_merge=yes ;;
+      -*=*) ;;
+      -*)
+        if [[ $flags_with_value == *" $word "* ]]; then
+          i=$((i + 1))
+        fi
+        ;;
+      *)
+        if [[ -z $argument ]]; then
+          argument=$word
+        fi
+        ;;
+    esac
+  done
+
+  if [[ -n $argument ]]; then
+    view=("$argument")
+  elif [[ $subcommand != merge ]]; then
+    # Without a pull request, gh pr checkout asks the person to pick one.
+    return 0
+  fi
+  if ((${#repository[@]} > 0)); then
+    view+=("${repository[@]}")
+  fi
+  if is_from_fork ${view[@]+"${view[@]}"}; then
+    if [[ $subcommand != merge ]]; then
+      block_checkout "${view[@]}"
+    elif [[ -n $argument ]]; then
+      block "Blocked: pull request $argument comes from a fork, so a maintainer merges it. $report"
+    else
+      block "Blocked: this branch's pull request comes from a fork, so a maintainer merges it. $report"
+    fi
+  fi
+  # Turning auto-merge off merges nothing.
+  if [[ $subcommand == merge && -z $disables_auto_merge ]]; then
+    block_if_main_lacks_checks ${repository[@]+"${repository[@]}"}
+  fi
+}
+
+check_git_fetch() {
+  local i=1 number pull_ref='^\+?(refs/)?pull/([0-9]+)/(head|merge)(:.*)?$'
+  if [[ ${command_words[0]##*/} != git ]]; then
+    return 0
+  fi
+  while [[ ${command_words[i]:-} == -C ]]; do
+    i=$((i + 2))
+  done
+  if [[ ${command_words[i]:-} != fetch && ${command_words[i]:-} != pull ]]; then
+    return 0
+  fi
+  for ((i = i + 1; i < ${#command_words[@]}; i++)); do
+    if [[ ${command_words[i]} =~ $pull_ref ]]; then
+      number=${BASH_REMATCH[2]}
+      if is_from_fork "$number"; then
+        block_checkout "$number"
+      fi
+    fi
+  done
+}
+
+check_gh_api() {
+  local method="" sends_body=false i flag
+  if [[ ${command_words[0]##*/} != gh || ${command_words[1]:-} != api ]]; then
+    return 0
+  fi
+
+  # gh api's argument is the endpoint.
+  read_arguments 2 "$api_flags_with_value"
+  for ((i = 0; i < ${#flags[@]}; i++)); do
+    flag=${flags[i]}
+    case $flag in
+      -X | --method) method=${flag_values[i]} ;;
+      --method=*) method=${flag#--method=} ;;
+      -X*)
+        method=${flag#-X}
+        method=${method#=}
+        ;;
+      -f* | -F* | --raw-field | --raw-field=* | --field | --field=* | --input | --input=*) sends_body=true ;;
+    esac
+  done
+
+  # Without a method, gh api sends POST if the command adds a field or an input file, and GET otherwise.
+  if [[ -z $method ]]; then
+    method=GET
+    if $sends_body; then
+      method=POST
+    fi
+  fi
+  if [[ $argument =~ $single_alert && $method != [Gg][Ee][Tt] ]]; then
+    block "$alert_change"
+  fi
+  # The query can come from a here-document or from another command through a pipe,
+  # which aren't words of this command, so the whole command is searched.
+  if [[ $argument == graphql && $shell_command == *dismissRepositoryVulnerabilityAlert* ]]; then
+    block "$alert_change"
+  fi
+}
+
+check_simple_command() {
+  local prefix_count
+  drop_command_prefixes "$@"
+  move_gh_repository_flags
+  if ((${#command_words[@]} == 0)); then
+    return 0
+  fi
+  # The words that drop_command_prefixes dropped, such as GH_REPO=<repository>
+  prefix_count=$(($# - ${#command_words[@]}))
+  follow_cd
+  check_configure_github "${@:1:prefix_count}"
+  check_gh_pr
+  check_git_fetch
+  check_gh_api
+}
+
+read_input
+# The folder that scripts/configure-github would run in, which follow_cd changes, or empty when the hook can't tell.
+# Cursor doesn't send the folder the agent works in, so for Cursor the hook's own folder counts.
+script_folder=${cwd:-$PWD}
+if [[ $tool_name == Bash ]]; then
+  for_each_simple_command check_simple_command "$shell_command"
+fi

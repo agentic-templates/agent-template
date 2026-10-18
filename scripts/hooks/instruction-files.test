@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Tests scripts/hooks/instruction-files.check through scripts/hooks/before-tool, with a sample input from each tool.
+set -euo pipefail
+# shellcheck source=scripts/hooks/testing.bash
+source "${BASH_SOURCE[0]%/*}/testing.bash"
+every_tool=yes
+
+# The hook checks the paths against the repository it runs in, which is this one.
+root=$(cd "$hooks_folder/../.." && pwd -P)
+test_cwd=$root
+reason="makes a tool skip AGENTS.md. Put its rules into AGENTS.md or a guide in docs/ instead."
+
+# Prints a Codex patch that adds a file: patch_adding <path>
+patch_adding() {
+  printf '*** Begin Patch\n*** Add File: %s\n+Rules\n*** End Patch\n' "$1"
+}
+
+# A write to a file that makes a tool skip AGENTS.md, in each tool's file-writing tool
+for path in CLAUDE.md docs/CLAUDE.md claude.md .cursorrules; do
+  expect_block Write "$root/$path" "Blocked: $path $reason"
+  expect_block Edit "$root/$path" "Blocked: $path $reason"
+  expect_block apply_patch "$(patch_adding "$path")" "Blocked: $path $reason"
+done
+
+# A Codex patch that moves a file to such a name, or adds one among other files
+expect_block apply_patch $'*** Begin Patch\n*** Update File: notes.md\n*** Move to: CLAUDE.md\n@@\n-Notes\n+Rules\n*** End Patch\n' \
+  "Blocked: CLAUDE.md $reason"
+expect_block apply_patch $'*** Begin Patch\n*** Add File: README.md\n+Hello\n*** Update File: AGENTS.override.md\n@@\n-a\n+b\n*** End Patch\n' \
+  "Blocked: AGENTS.override.md $reason"
+
+# Paths that differ only by .. or a symlink
+expect_block Write "$root/docs/../CLAUDE.md" "Blocked: CLAUDE.md $reason"
+link_folder=$(mktemp -d)
+trap 'rm -rf "$link_folder"' EXIT
+ln -s "$root" "$link_folder/repository"
+expect_block Write "$link_folder/repository/docs/CLAUDE.md" "Blocked: docs/CLAUDE.md $reason"
+
+# A relative path in a patch is taken from the folder the agent works in.
+test_cwd=$root/docs
+expect_block apply_patch "$(patch_adding ../CLAUDE.md)" "Blocked: CLAUDE.md $reason"
+test_cwd=$root
+
+# Files that don't hide AGENTS.md, a file outside the repository, and deleting such a file
+expect_allow Write "$root/README.md"
+expect_allow Edit "$root/README.md"
+expect_allow Write "$root/docs/AGENT.md"
+expect_allow apply_patch "$(patch_adding docs/AGENT.md)"
+expect_allow Write "$test_home/CLAUDE.md"
+expect_allow apply_patch "$(patch_adding "$test_home/CLAUDE.md")"
+expect_allow apply_patch $'*** Begin Patch\n*** Delete File: CLAUDE.md\n*** End Patch\n'
+
+finish_tests

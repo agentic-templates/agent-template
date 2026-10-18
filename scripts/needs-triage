@@ -1,0 +1,9 @@
+# shellcheck shell=bash
+# The message for an issue with needs-triage, on which no agent starts work, because no maintainer has accepted it
+# yet. The check of gh issue develop in scripts/hooks/forbidden-commands.check and scripts/start-issue print it.
+
+# Prints the message, without a word such as "error:" before it:
+# needs_triage_message <issue> <the words that name the issue to gh issue edit, such as 12 or 12 --repo owner/repo>
+needs_triage_message() {
+  echo "issue $1 has needs-triage, so no maintainer has accepted it yet. If a maintainer asked you to work on it, remove the label with gh issue edit $2 --remove-label needs-triage, and run the command again. Otherwise, leave the issue for the maintainer to triage."
+}

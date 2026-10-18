@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# Tests scripts/hooks/maintainer-commands.check through scripts/hooks/before-tool.
+set -euo pipefail
+# shellcheck source=scripts/hooks/testing.bash
+source "${BASH_SOURCE[0]%/*}/testing.bash"
+# shellcheck source=scripts/testing-required-checks.bash
+source "${hooks_folder%/hooks}/testing-required-checks.bash"
+
+# The folders that the cases run scripts/configure-github in. The hook runs in the agent's checkout of jtmpl/project,
+# and the home folder holds a clone of jtmpl/other.
+folders=$(CDPATH='' cd -- "$(mktemp -d)" && pwd -P)
+test_home=$folders/home
+test_cwd=$folders/project
+other_clone=$test_home/test-repositories/other
+mkdir -p "$test_cwd" "$other_clone"
+# Cursor sends no folder, so its hook runs in the test's own folder.
+cd "$test_cwd"
+
+# A stand-in for gh, first on the PATH, so that the cases ask nothing of GitHub.
+# It answers gh repo view by GH_REPO when it's set, so that the cases show that the hook passes GH_REPO on as the
+# script would, although gh 2.102 itself ignores GH_REPO there. Otherwise it answers by the folder it runs in:
+# jtmpl/project in TEST_CHECKOUT, jtmpl/other in TEST_OTHER_CLONE, and a failure anywhere else, as outside a clone.
+# TEST_RULESETS says what it reports for the rulesets of jtmpl/project: main, another, none or fail.
+# TEST_OTHER_RULESETS says the same for jtmpl/other. It fails for the rulesets of any other repository.
+# TEST_MAIN_RULES lists the checks that the rules for main require, separated by spaces, or says fail.
+# For the repository jtmpl/other in GH_REPO, TEST_OTHER_MAIN_RULES lists them instead.
+# TEST_PULL_REQUEST says what it reports for pull request 7, or the current branch's: fork, same or fail.
+# It fails for any other pull request, as gh does for one that doesn't exist, and records each call in TEST_GH_CALLS.
+stand_in=$(mktemp -d)
+trap 'rm -rf "$stand_in" "$folders"' EXIT
+cat >"$stand_in/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TEST_GH_CALLS"
+if [[ $1 == repo && $2 == view ]]; then
+  repository=${GH_REPO:-}
+  if [[ -z $repository ]]; then
+    case $(pwd -P) in
+      "$TEST_CHECKOUT" | "$TEST_CHECKOUT"/*) repository=jtmpl/project ;;
+      "$TEST_OTHER_CLONE" | "$TEST_OTHER_CLONE"/*) repository=jtmpl/other ;;
+      *) exit 1 ;;
+    esac
+  fi
+  echo "{\"nameWithOwner\": \"$repository\"}"
+elif [[ $1 == api && $2 == "repos/{owner}/{repo}/rules/branches/main" ]]; then
+  rules=$TEST_MAIN_RULES
+  if [[ ${GH_REPO:-} == jtmpl/other ]]; then
+    rules=$TEST_OTHER_MAIN_RULES
+  fi
+  if [[ $rules == fail ]]; then
+    exit 1
+  fi
+  for check in $rules; do
+    echo "$check"
+  done
+  printf '%s\n' "$TEST_PROJECT_CHECKS"
+elif [[ $1 == api ]]; then
+  case $2 in
+    "repos/jtmpl/project/rulesets?includes_parents=false") rulesets=$TEST_RULESETS ;;
+    "repos/jtmpl/other/rulesets?includes_parents=false") rulesets=$TEST_OTHER_RULESETS ;;
+    *) exit 1 ;;
+  esac
+  case $rulesets in
+    main) echo '[{"id": 1, "name": "main", "target": "branch"}]' ;;
+    another) echo '[{"id": 2, "name": "tags", "target": "tag"}]' ;;
+    none) echo '[]' ;;
+    *) exit 1 ;;
+  esac
+elif [[ $1 == pr && $2 == view ]]; then
+  if [[ $3 != -* && $3 != 7 ]]; then
+    exit 1
+  fi
+  case $TEST_PULL_REQUEST in
+    fork) echo '{"isCrossRepository": true}' ;;
+    same) echo '{"isCrossRepository": false}' ;;
+    *) exit 1 ;;
+  esac
+else
+  exit 1
+fi
+STAND_IN
+chmod +x "$stand_in/gh"
+PATH=$stand_in:$PATH
+# The rules for main require every check that scripts/configure-github requires, unless a case says otherwise.
+export TEST_GH_CALLS=$stand_in/calls TEST_RULESETS TEST_OTHER_RULESETS TEST_PULL_REQUEST TEST_MAIN_RULES="check title" TEST_OTHER_MAIN_RULES="check title"
+export TEST_CHECKOUT=$test_cwd TEST_OTHER_CLONE=$other_clone
+unset GH_REPO
+
+# Repeat the affected hook cases with downstream requirements without repeating unrelated maintainer commands.
+test_main_rules() {
+  TEST_RULESETS=main TEST_OTHER_RULESETS=none
+  # A merge while the rules for main no longer require a check that scripts/configure-github requires there
+  TEST_PULL_REQUEST=same
+  report_this="Go on with the other work, and list this in your report for the maintainer."
+  no_check="Blocked: main no longer requires the check job, so a pull request can merge without passing it. A maintainer with admin access restores it by running scripts/configure-github. $report_this"
+  no_title="Blocked: main no longer requires the title job, so a pull request can merge without passing it. A maintainer with admin access restores it by running scripts/configure-github. $report_this"
+  no_rules="Blocked: main no longer requires the check and title jobs, so a pull request can merge without passing them. A maintainer with admin access restores them by running scripts/configure-github. $report_this"
+  merges=('gh pr merge 7 --squash' 'gh pr merge --auto --squash' 'gh pr merge 7 --admin --merge' 'gh pr merge --body "x" 7')
+  TEST_MAIN_RULES="title CodeQL"
+  for command in "${merges[@]}"; do
+    expect_block Bash "$command" "$no_check"
+  done
+  TEST_MAIN_RULES="check"
+  expect_block Bash 'gh pr merge 7 --squash' "$no_title"
+  TEST_MAIN_RULES=""
+  expect_block Bash 'gh pr merge 7 --squash' "$no_rules"
+  expect_allow Bash 'gh pr merge 7 --disable-auto'
+  expect_allow Bash 'gh pr merge --disable-auto'
+  for TEST_MAIN_RULES in "CodeQL check title" fail; do
+    for command in "${merges[@]}"; do
+      expect_allow Bash "$command"
+    done
+  done
+
+  # The rules for main of the repository that -R names
+  TEST_MAIN_RULES="check title"
+  TEST_OTHER_MAIN_RULES="check"
+  expect_block Bash 'gh pr merge -R jtmpl/other 7 --squash' "$no_title"
+  expect_block Bash 'gh pr merge --repo=jtmpl/other --auto --squash' "$no_title"
+  expect_repository_flags 2 "$no_title" pr merge '7 --squash'
+  expect_repository_flags 0 "" pr merge '7 --disable-auto'
+
+  expect_allow Bash 'gh pr merge 7 --squash'
+  TEST_MAIN_RULES=""
+  TEST_OTHER_MAIN_RULES="check title"
+  expect_allow Bash 'gh pr merge --repo jtmpl/other 7 --squash'
+  expect_repository_flags 0 "" pr merge '7 --squash'
+
+  TEST_MAIN_RULES="check title"
+}
+
+second_run="Blocked: this repository's settings were applied before, so a maintainer with admin access runs scripts/configure-github again. Go on with the other work, and list the command in your report for the maintainer, who runs it."
+merge_reason="comes from a fork, so a maintainer merges it. Go on with the other work, and list the command in your report for the maintainer, who runs it."
+checkout_reason="Read it with gh pr diff 7 instead, because a checkout brings in its hook scripts and its AGENTS.md."
+
+runs_of_the_script=(scripts/configure-github ./scripts/configure-github "bash scripts/configure-github" "env GH_DEBUG=1 scripts/configure-github")
+
+# A second run of scripts/configure-github, once the settings were applied
+TEST_RULESETS=main
+for command in "${runs_of_the_script[@]}"; do
+  expect_block Bash "$command" "$second_run"
+done
+for TEST_RULESETS in another none fail; do
+  for command in "${runs_of_the_script[@]}"; do
+    expect_allow Bash "$command"
+  done
+done
+for TEST_RULESETS in main none fail; do
+  expect_allow Bash 'cat scripts/configure-github'
+  expect_allow Bash 'shellcheck scripts/configure-github'
+done
+
+# A run of scripts/configure-github on another repository, whose settings count instead of those of the repository
+# that the hook runs in
+runs_on_the_other=(
+  "cd '$other_clone' && scripts/configure-github"
+  "cd '${other_clone%/*}' && cd ${other_clone##*/} && scripts/configure-github"
+  "cd ~/test-repositories/other && scripts/configure-github"
+  "cd ~ && cd test-repositories/other && scripts/configure-github"
+  "cd ../home/test-repositories/other && bash scripts/configure-github"
+  "GH_REPO=jtmpl/other scripts/configure-github"
+  "env GH_REPO=jtmpl/other scripts/configure-github"
+)
+TEST_RULESETS=main TEST_OTHER_RULESETS=none
+for command in "${runs_on_the_other[@]}"; do
+  expect_allow Bash "$command"
+done
+TEST_RULESETS=none TEST_OTHER_RULESETS=main
+for command in "${runs_on_the_other[@]}"; do
+  expect_block Bash "$command" "$second_run"
+done
+# Only a cd before the script changes the folder that the script runs in.
+TEST_RULESETS=main TEST_OTHER_RULESETS=none
+expect_block Bash "scripts/configure-github; cd '$other_clone'" "$second_run"
+# gh can't name the repository of a folder that isn't a clone.
+expect_allow Bash "cd '$folders' && scripts/configure-github"
+
+# A run of scripts/configure-github in a folder that the hook can't tell
+cannot_tell="Blocked: can't tell which repository scripts/configure-github would change. Clone the repository first. Then run cd <folder> && scripts/configure-github as a command of its own, with the folder written out."
+new_clone=$test_home/test-repositories/new
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so $ and the backticks stay as written.
+for rulesets in "main none" "none main"; do
+  read -r TEST_RULESETS TEST_OTHER_RULESETS <<<"$rulesets"
+  expect_block Bash 'GH_REPO=$repo scripts/configure-github' "$cannot_tell"
+  expect_block Bash 'GH_REPO="`cat repository.txt`" scripts/configure-github' "$cannot_tell"
+  expect_block Bash "gh repo clone jtmpl/other '$new_clone' && cd '$new_clone' && scripts/configure-github" "$cannot_tell"
+  expect_block Bash 'cd "$TMPDIR/other" && scripts/configure-github' "$cannot_tell"
+  expect_block Bash 'cd "`cat folder.txt`" && scripts/configure-github' "$cannot_tell"
+  expect_block Bash 'cd && scripts/configure-github' "$cannot_tell"
+  expect_block Bash "cd -P '$other_clone' && scripts/configure-github" "$cannot_tell"
+done
+
+# Checking out, fetching or merging a pull request from a fork
+TEST_PULL_REQUEST=fork
+expect_block Bash 'gh pr checkout 7' "Blocked: pull request 7 comes from a fork. $checkout_reason"
+expect_block Bash 'gh pr co 7' "Blocked: pull request 7 comes from a fork. $checkout_reason"
+expect_block Bash 'gh pr checkout --branch=pr-7 7' "Blocked: pull request 7 comes from a fork. $checkout_reason"
+expect_block Bash 'gh pr checkout -R jtmpl/other 7' \
+  "Blocked: pull request 7 comes from a fork. Read it with gh pr diff 7 --repo jtmpl/other instead, because a checkout brings in its hook scripts and its AGENTS.md."
+expect_block Bash 'gh pr merge 7 --squash' "Blocked: pull request 7 $merge_reason"
+expect_block Bash 'gh pr merge --body "x" 7' "Blocked: pull request 7 $merge_reason"
+expect_block Bash 'gh pr merge --squash' "Blocked: this branch's pull request $merge_reason"
+expect_block Bash 'git fetch origin pull/7/head:pr-7' "Blocked: pull request 7 comes from a fork. $checkout_reason"
+expect_block Bash 'git fetch origin +refs/pull/7/merge' "Blocked: pull request 7 comes from a fork. $checkout_reason"
+expect_block Bash 'git -C app pull origin pull/7/head' "Blocked: pull request 7 comes from a fork. $checkout_reason"
+
+for subcommand in checkout co; do
+  expect_repository_flags 2 "Blocked: pull request 7 comes from a fork. Read it with gh pr diff 7 --repo jtmpl/other instead, because a checkout brings in its hook scripts and its AGENTS.md." pr "$subcommand" '7'
+done
+expect_repository_flags 2 "Blocked: pull request 7 $merge_reason" pr merge '7 --squash'
+expect_repository_flags 2 "Blocked: this branch's pull request $merge_reason" pr merge '--squash'
+for repository in '-R jtmpl/other' '--repo jtmpl/other' '--repo=jtmpl/other'; do
+  for command in "gh pr $repository checkout 7" "gh pr checkout $repository 7"; do
+    : >"$TEST_GH_CALLS"
+    run_hook "$(sample_input claude-code Bash "$command")"
+    case_count=$((case_count + 1))
+    gh_calls=$(grep -v -x -e --version "$TEST_GH_CALLS" || true)
+    if [[ $gh_calls != "pr view 7 --repo jtmpl/other --json isCrossRepository" ]]; then
+      echo "error: for $command, expected the lookup of pull request 7 in jtmpl/other, but got: $gh_calls" >&2
+      failed_cases=$((failed_cases + 1))
+    fi
+  done
+done
+
+# The pull request that -R names is the one that gh is asked about.
+: >"$TEST_GH_CALLS"
+run_hook "$(sample_input claude-code Bash 'gh pr checkout -R jtmpl/other 7')"
+case_count=$((case_count + 1))
+# forbidden-commands.check asks gh for its version before each gh command, so the case leaves that call out.
+gh_calls=$(grep -v -x -e --version "$TEST_GH_CALLS" || true)
+if [[ $gh_calls != "pr view 7 --repo jtmpl/other --json isCrossRepository" ]]; then
+  echo "error: for gh pr checkout -R jtmpl/other 7, the hook must ask gh about pull request 7 in jtmpl/other, but it called: $gh_calls" >&2
+  failed_cases=$((failed_cases + 1))
+fi
+
+for TEST_PULL_REQUEST in same fail; do
+  for command in 'gh pr checkout 7' 'gh pr co 7' 'gh pr merge 7 --squash' 'gh pr merge --squash' 'gh pr merge --body "x" 7' \
+    'gh pr checkout -R jtmpl/other 7' 'git fetch origin pull/7/head:pr-7' 'git fetch origin +refs/pull/7/merge'; do
+    expect_allow Bash "$command"
+  done
+done
+
+test_main_rules
+
+# Commands that only read a pull request, a checkout that asks the person to pick one, and a fetch of no one pull request
+TEST_PULL_REQUEST=fork
+expect_allow Bash 'gh pr diff 7'
+expect_allow Bash 'gh pr view 7'
+expect_allow Bash 'gh pr checkout'
+expect_allow Bash "git fetch origin 'refs/pull/*/head'"
+
+# Changing a code scanning or Dependabot alert, with any method other than GET.
+# gh api sends POST when the command adds a field or an input file and names no method.
+alert_change="Blocked: only a maintainer dismisses or changes a code scanning or Dependabot alert. Fix the code that the alert points to. If you think the alert is wrong, tell the maintainer which alert and why."
+dismissal_query='mutation { dismissRepositoryVulnerabilityAlert(input: {repositoryVulnerabilityAlertId: "RVA_1", dismissReason: INACCURATE}) { clientMutationId } }'
+dismissal_from_standard_input=$(
+  cat <<'COMMAND'
+gh api graphql --input - <<'JSON'
+{"query": "mutation { dismissRepositoryVulnerabilityAlert(input: {repositoryVulnerabilityAlertId: \"RVA_1\", dismissReason: INACCURATE}) { clientMutationId } }"}
+JSON
+COMMAND
+)
+# shellcheck disable=SC2016 # The command is the text that the agent sends, so $repo and $alert stay as written.
+for command in \
+  'gh api --method PATCH repos/{owner}/{repo}/code-scanning/alerts/12 -f state=dismissed -f dismissed_reason="false positive"' \
+  'gh api --method PATCH repos/{owner}/{repo}/dependabot/alerts/3 -f state=dismissed -f dismissed_reason=tolerable_risk' \
+  'gh api -X PATCH -H "Accept: application/vnd.github+json" /repos/jtmpl/app/code-scanning/alerts/12 -f state=open' \
+  'gh api --method=patch "https://api.github.com/repos/jtmpl/app/dependabot/alerts/3?state=dismissed&dismissed_reason=no_bandwidth"' \
+  'gh api -XPATCH "repos/$repo/code-scanning/alerts/$alert?state=dismissed"' \
+  'gh api repos/{owner}/{repo}/code-scanning/alerts/12 -fstate=dismissed' \
+  'gh api --field state=dismissed repos/{owner}/{repo}/dependabot/alerts/3' \
+  'gh api repos/{owner}/{repo}/dependabot/alerts/3 --input=dismissal.json' \
+  "gh api graphql -f query='$dismissal_query'" \
+  "$dismissal_from_standard_input"; do
+  expect_block Bash "$command" "$alert_change"
+done
+
+# Commands that read alerts, such as the ones that docs/releasing.md and docs/building.md give, and a request for a fix
+# of an alert
+high_alerts=$(
+  cat <<'COMMAND'
+gh api --paginate "repos/{owner}/{repo}/code-scanning/alerts?state=open" \
+  --jq '.[] | select(.rule.security_severity_level == "high" or .rule.security_severity_level == "critical")'
+COMMAND
+)
+for command in \
+  "$high_alerts" \
+  'gh api --paginate "repos/{owner}/{repo}/code-scanning/alerts?state=open"' \
+  'gh api "repos/{owner}/{repo}/dependabot/alerts?state=open&severity=high,critical"' \
+  'gh api repos/{owner}/{repo}/code-scanning/alerts/12' \
+  'gh api --method GET repos/{owner}/{repo}/dependabot/alerts/3' \
+  'gh api -X=get repos/{owner}/{repo}/code-scanning/alerts/12 -f ref=refs/heads/main' \
+  "gh api graphql -f query='{ repository(owner: \"jtmpl\", name: \"app\") { vulnerabilityAlerts(first: 10) { nodes { number } } } }'" \
+  'gh api --method POST repos/{owner}/{repo}/code-scanning/alerts/12/autofix'; do
+  expect_allow Bash "$command"
+done
+
+finish_tests

@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# Prints the facts for the report at the end of a build run, in step 6 of "Build the ready issues" in
+# docs/building.md. It prints each fact under a line that names it, one item to a line, or none:
+# - the pull requests merged into main since the time that scripts/start-build-run recorded in this checkout, each
+#   with the issues in this repository that it closes
+# - the open issues with needs-decision
+# - the open ready issues, each with every reason that scripts/take-next-issue skips it: each status label, no type
+#   label or more than one, an assignee, open sub-issues, each open blocking issue, and the state that
+#   scripts/pull-request-state prints when it isn't none or left behind
+# - the open code scanning alerts, each with its security severity, or with its severity when it has none
+# - the open pull requests of Dependabot's into main, each with whether auto-merge is on, and whether it's in the merge
+#   queue, is DIRTY, has a failed check or was ever removed from the merge queue
+# - whether the latest run of .github/workflows/ci.yml on main, for a push, passed, failed or is still running. A run
+#   that finished with any conclusion but success counts as failed, such as a cancelled or timed-out run.
+# It reads the merged pull requests from GitHub's API instead of its search, which can lag behind a merge. When it
+# can't get a fact, it prints an error that says which, prints the other facts, and exits with code 1. It asks gh
+# about the repository of this checkout, or the one in GH_REPO.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/open-pull-requests
+source scripts/open-pull-requests
+# shellcheck source=scripts/ready-issues
+source scripts/ready-issues
+
+# Each function below prints the items of a fact, one to a line. When it can't get the fact, it prints an error and
+# fails.
+
+# Prints each pull request merged into main since a time, with the issues in this repository that it closes:
+# merged_pull_requests <time, in UTC, as in 2026-05-04T09:30:00Z>
+merged_pull_requests() {
+  local since=$1 query jq_filter merged kind number merged_at issue is_in_this_repository issues count
+  query=$(cat <<'GRAPHQL'
+query($owner: String!, $repo: String!, $endCursor: String) {
+  repository(owner: $owner, name: $repo) {
+    nameWithOwner
+    pullRequests(states: MERGED, baseRefName: "main", first: 100, after: $endCursor) {
+      nodes {
+        number mergedAt
+        closingIssuesReferences(first: 10) { nodes { number repository { nameWithOwner } } }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+GRAPHQL
+  )
+  # Each line holds one fact, as fields separated by tabs. The first field says what the line holds:
+  # - pull-request <number> <when it merged>
+  # - closes <pull request> <issue> <in this repository>
+  # shellcheck disable=SC2016 # $this_repository and $number are jq variables, which jq expands.
+  jq_filter='.data.repository.nameWithOwner as $this_repository
+    | .data.repository.pullRequests.nodes[]
+    | .number as $number
+    | (["pull-request", $number, .mergedAt] | @tsv),
+      (.closingIssuesReferences.nodes[]
+        | ["closes", $number, .number, (.repository.nameWithOwner == $this_repository)] | @tsv)'
+  if ! merged=$(gh api graphql --paginate -F owner='{owner}' -F repo='{repo}' -f query="$query" --jq "$jq_filter" 2>&1); then
+    echo "error: can't list the pull requests merged into main, because gh failed: $merged" >&2
+    return 1
+  fi
+  while IFS=$'\t' read -r kind number merged_at; do
+    # The times compare as text, because both are in UTC, in the same form.
+    if [[ $kind != pull-request || $merged_at < $since ]]; then
+      continue
+    fi
+    issues=""
+    count=0
+    while IFS=$'\t' read -r issue is_in_this_repository; do
+      if [[ $is_in_this_repository == true ]]; then
+        issues+="#$issue"$'\n'
+        count=$((count + 1))
+      fi
+    done <<<"$({ grep -- $'^closes\t'"$number"$'\t' <<<"$merged" || true; } | cut -f 3-)"
+    # An item doesn't put "closes" before the issue, because the lead may copy the report into a pull request, and
+    # GitHub closes each issue named that way in a pull request when it merges.
+    if ((count == 0)); then
+      echo "#$number: no issue"
+    elif ((count == 1)); then
+      echo "#$number: issue $(in_words "$issues")"
+    else
+      echo "#$number: issues $(in_words "$issues")"
+    fi
+  done <<<"$merged"
+}
+
+# Prints each open issue with needs-decision, lowest first: decision_issues
+decision_issues() {
+  local issues issue
+  if ! issues=$(gh issue list --label needs-decision --limit 200 --json number --jq '.[].number' 2>&1); then
+    echo "error: can't list the issues with needs-decision, because gh failed: $issues" >&2
+    return 1
+  fi
+  while IFS= read -r issue; do
+    if [[ -n $issue ]]; then
+      echo "#$issue"
+    fi
+  done <<<"$(sort -n <<<"$issues")"
+}
+
+# Prints each open ready issue, lowest first, with each reason that scripts/take-next-issue skips it:
+# ready_issues_and_reasons
+ready_issues_and_reasons() {
+  local issue reasons state
+  # read_ready_issues prints its own error.
+  read_ready_issues || return 1
+  for issue in $(ready_issue_numbers); do
+    reasons=$(reasons_not_to_start "$issue")
+    # scripts/pull-request-state prints its own error.
+    if ! state=$(scripts/pull-request-state "$issue"); then
+      echo "error: can't say what the open ready issues wait for, because of the error above." >&2
+      return 1
+    fi
+    if ! can_start_with_pull_request_state "$state"; then
+      reasons+=$'\n'"scripts/pull-request-state prints $state"
+    fi
+    if [[ -n $(in_words "$reasons") ]]; then
+      echo "#$issue: $(in_words "$reasons")."
+    else
+      echo "#$issue: nothing."
+    fi
+  done
+}
+
+# Prints each open code scanning alert with its severity: code_scanning_alerts
+code_scanning_alerts() {
+  local alerts number severity
+  if ! alerts=$(gh api --paginate "repos/{owner}/{repo}/code-scanning/alerts?state=open" --jq '.[] | [.number, (.rule.security_severity_level // .rule.severity)] | @tsv' 2>&1); then
+    echo "error: can't list the open code scanning alerts, because gh failed: $alerts" >&2
+    return 1
+  fi
+  while IFS=$'\t' read -r number severity; do
+    if [[ -n $number ]]; then
+      echo "#$number: $severity"
+    fi
+  done <<<"$alerts"
+}
+
+# Prints each open pull request of Dependabot's into main, with whether auto-merge is on, and whether it's in the
+# merge queue, is DIRTY, has a failed check or was ever removed from the merge queue: dependabot_pull_requests
+dependabot_pull_requests() {
+  local kind number author is_in_queue merge_state auto_merge_since states failed
+  # read_open_pull_requests prints its own error.
+  read_open_pull_requests || return 1
+  while IFS=$'\t' read -r kind number _ author is_in_queue merge_state auto_merge_since; do
+    if [[ $kind != pull-request ]] || ! is_by_dependabot "$author"; then
+      continue
+    fi
+    # One state to a line.
+    if [[ -n $auto_merge_since ]]; then
+      states=$'auto-merge is on\n'
+    else
+      states=$'auto-merge is off\n'
+    fi
+    if [[ $is_in_queue == true ]]; then
+      states+=$'it\'s in the merge queue\n'
+    fi
+    if [[ $merge_state == DIRTY ]]; then
+      states+=$'it\'s DIRTY\n'
+    fi
+    failed=$(failed_checks_in_words "$number")
+    if [[ -n $failed ]]; then
+      states+="the $failed failed"$'\n'
+    fi
+    if [[ -n $(facts removal "$number") ]]; then
+      states+=$'the merge queue removed it\n'
+    fi
+    echo "#$number: $(in_words "$states")."
+  done <<<"$pull_requests"
+}
+
+# Prints whether the latest run of .github/workflows/ci.yml on main passed, failed or is still running, or nothing if
+# it never ran there: latest_ci_run
+latest_ci_run() {
+  local run status conclusion
+  if ! run=$(gh run list --workflow ci.yml --branch main --event push --limit 1 --json status,conclusion --jq '.[] | [.status, .conclusion] | @tsv' 2>&1); then
+    echo "error: can't read the latest run of .github/workflows/ci.yml on main, because gh failed: $run" >&2
+    return 1
+  fi
+  if [[ -z $run ]]; then
+    return 0
+  fi
+  IFS=$'\t' read -r status conclusion <<<"$run"
+  if [[ $status != completed ]]; then
+    echo "still running"
+  elif [[ $conclusion == success ]]; then
+    echo passed
+  else
+    echo failed
+  fi
+}
+
+is_fact_missing=""
+
+# Prints a fact under a line that names it, with the items that a function prints, or none if it prints none. When
+# the function fails, it prints nothing, because the function prints its own error: print_fact <line> <function>
+# [<argument>...]
+print_fact() {
+  local line=$1 items
+  shift
+  if ! items=$("$@"); then
+    is_fact_missing=yes
+    return 0
+  fi
+  printf '%s\n%s\n' "$line" "${items:-none}"
+}
+
+time_pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+if ! record=$(git rev-parse --git-path build-run-start 2>&1); then
+  echo "error: can't list the pull requests merged since the build run started, because git can't find the git folder in which scripts/start-build-run records the time: $record" >&2
+  is_fact_missing=yes
+elif ! build_run_start=$(cat "$record" 2>/dev/null) || [[ ! $build_run_start =~ $time_pattern ]]; then
+  echo "error: can't list the pull requests merged since the build run started, because $record doesn't hold a time such as 2026-05-04T09:30:00Z. scripts/start-build-run records the time there when a build run starts in this checkout." >&2
+  is_fact_missing=yes
+else
+  print_fact "Pull requests merged into main since $build_run_start, with the issues that each one closed:" \
+    merged_pull_requests "$build_run_start"
+fi
+print_fact "Open issues with needs-decision:" decision_issues
+print_fact "Open ready issues, and what each one waits for:" ready_issues_and_reasons
+print_fact "Open code scanning alerts:" code_scanning_alerts
+print_fact "Open pull requests of Dependabot's into main:" dependabot_pull_requests
+print_fact "The latest run of .github/workflows/ci.yml on main:" latest_ci_run
+
+if [[ -n $is_fact_missing ]]; then
+  exit 1
+fi

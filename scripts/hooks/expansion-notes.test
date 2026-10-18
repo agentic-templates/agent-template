@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Tests expansion notes through the checks' JSON input, without evaluating the command text.
+set -euo pipefail
+# shellcheck source=scripts/hooks/testing.bash
+source "${BASH_SOURCE[0]%/*}/testing.bash"
+
+folder=$(mktemp -d)
+trap 'rm -rf "$folder"' EXIT
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
+export GIT_CEILING_DIRECTORIES=$folder
+mkdir "$folder/bin"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$folder/bin/gh"
+chmod +x "$folder/bin/gh"
+export PATH=$folder/bin:$PATH
+git init --quiet --initial-branch=main "$folder/project"
+test_cwd=$folder/project
+cd "$test_cwd"
+git commit --quiet --allow-empty -m 'chore: start the project'
+git update-ref refs/remotes/origin/main HEAD
+git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+
+# Every command is already blocked. A note must describe only the text that this check reads.
+expect_note() {
+  local check=$1 command=$2 expected=$3 status=0 output actual=no
+  output=$(run_check "$check" "$(sample_input claude-code Bash "$command")" 2>&1) || status=$?
+  if [[ $output == *"without running \$( ) or filling in variables." ]]; then
+    actual=yes
+  fi
+  case_count=$((case_count + 1))
+  if [[ $status != 2 || $actual != "$expected" ]]; then
+    echo "error: $check must block [$command] with expansion note $expected, but status was $status and note was $actual: $output" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# shellcheck disable=SC2016 # These are shell words to inspect, never commands to run.
+active_words=('"bad; $folder"' '"bad; ${folder}"' '"bad; $1"' '"bad; $?"' '"bad; $(printf text)"' '"bad; `printf text`"' '"bad; $((1 + 1))"' "'bad; '\"\$folder\"")
+# shellcheck disable=SC2016
+literal_words=("'bad; \$folder'" '"bad; \$folder"' '"bad; \`text\`"' '"bad; $"' '"bad; plain"' "\"bad; \"'\$folder'")
+for word in "${active_words[@]}" "${literal_words[@]}"; do
+  expected=no
+  for active in "${active_words[@]}"; do
+    if [[ $word == "$active" ]]; then expected=yes; fi
+  done
+  body_flags=('--body ')
+  title_flags=('--title ')
+  if [[ $word == "${active_words[0]}" || $word == "${literal_words[0]}" ]]; then
+    body_flags+=('-b ' '--body=')
+    title_flags+=('-t ' '--title=')
+  fi
+  for flag in "${body_flags[@]}"; do
+    expect_note posted-text "gh issue comment 7 $flag$word" "$expected"
+    expect_note issues-and-labels "gh issue create --label bug $flag$word" "$expected"
+    expect_note pull-request-rules "gh pr create --title bad $flag$word" "$expected"
+  done
+  for flag in "${title_flags[@]}"; do
+    expect_note posted-text "gh issue edit 7 $flag$word" "$expected"
+    expect_note pull-request-rules "gh pr create --body '' $flag$word" "$expected"
+  done
+  if [[ $word == "${active_words[0]}" || $word == "${literal_words[0]}" ]]; then
+    for command in 'gh issue close 7' 'gh issue reopen 7' 'gh pr close 7' 'gh pr reopen 7'; do
+      for flag in '--comment ' '-c ' '--comment='; do
+        expect_note posted-text "$command $flag$word" "$expected"
+      done
+    done
+  fi
+  expect_note posted-text "gh pr comment 7 -b $word" "$expected"
+  expect_note posted-text "gh pr review 7 -b $word" "$expected"
+done
+
+# Quotes inside an unquoted here-document do not protect its expansions.
+# shellcheck disable=SC2016
+for text in 'bad; $folder' 'bad; "$folder"' "bad; '\$folder'" 'bad; `printf text`' 'bad; $((1 + 1))' 'bad; $(printf text)'; do
+  for delimiter in EOF "'EOF'" '"EOF"' '\EOF' "E'OF'" 'E\OF'; do
+    expected=no
+    if [[ $delimiter == EOF ]]; then expected=yes; fi
+    commands=('gh issue comment 7')
+    # Each check has a literal and active body. The shared reader covers the remaining delimiter forms.
+    if [[ $text == "bad; \$folder" ]]; then
+      commands+=('gh issue create --label bug' 'gh pr create --title bad')
+    fi
+    for command in "${commands[@]}"; do
+      case $command in
+        'gh issue comment'*) check=posted-text ;;
+        'gh issue create'*) check=issues-and-labels ;;
+        *) check=pull-request-rules ;;
+      esac
+      expect_note "$check" "$command --body-file - <<$delimiter
+$text
+EOF" "$expected"
+      expect_note "$check" "$command --body \"\$(cat <<$delimiter
+$text
+EOF
+)\"" "$expected"
+    done
+  done
+done
+# shellcheck disable=SC2016
+for text in 'bad; plain' 'bad; $' 'bad; \$folder' 'bad; \`text\`'; do
+  expect_note posted-text "gh issue comment 7 -F - <<EOF
+$text
+EOF" no
+  expect_note posted-text "gh issue comment 7 -F - <<-EOF
+	$text
+	EOF" no
+done
+# shellcheck disable=SC2016
+text='bad; $folder `text`'
+printf '%s\n' "$text" >body.txt
+expect_note posted-text 'gh issue comment 7 -F body.txt' no
+expect_note posted-text 'gh issue comment 7 -F - < body.txt' no
+expect_note issues-and-labels 'gh issue create --label bug -F body.txt' no
+expect_note pull-request-rules 'gh pr create --title bad -F body.txt' no
+# shellcheck disable=SC2016
+expect_note posted-text 'echo "$folder"; gh issue edit 7 --repo "$repo" --title "bad; plain"' no
+# shellcheck disable=SC2016
+expect_note posted-text 'env NAME="$folder" gh issue edit 7 --title "bad; plain" --body "$folder"' yes
+# shellcheck disable=SC2016
+expect_note posted-text 'gh issue edit 7 --title "$folder" --body "bad; plain"' yes
+# shellcheck disable=SC2016
+expect_note pull-request-rules 'gh pr create --title "feat: $folder" --body "plain"' yes
+# shellcheck disable=SC2016
+expect_note pull-request-rules 'echo "$folder"; gh pr create --label "$label" --title bad --body plain' no
+expect_note issues-and-labels 'gh issue create --label bug --body ""' no
+expect_note pull-request-rules 'gh pr create --title "" --body ""' no
+# Repository flags before the subcommand keep each checked field's expansion note.
+for repository in '-R other/project' '--repo other/project' '--repo=other/project'; do
+  for word in "${active_words[0]}" "${literal_words[0]}"; do
+    expected=no
+    if [[ $word == "${active_words[0]}" ]]; then expected=yes; fi
+    expect_note posted-text "gh issue $repository edit 7 --title=$word" "$expected"
+    expect_note posted-text "gh issue $repository comment 7 -b $word" "$expected"
+    expect_note issues-and-labels "gh issue $repository create --label bug --body=$word" "$expected"
+    expect_note pull-request-rules "gh pr $repository create --title=$word --body ''" "$expected"
+    expect_note pull-request-rules "gh pr $repository create --title bad -b $word" "$expected"
+  done
+done
+# A heredoc-shaped word stays literal when its transport is single-quoted, even beside active text.
+for command in 'gh issue comment 7' 'gh issue create --label bug' 'gh pr create --title bad'; do
+  case $command in
+    'gh issue comment'*) check=posted-text ;;
+    'gh issue create'*) check=issues-and-labels ;;
+    *) check=pull-request-rules ;;
+  esac
+  # shellcheck disable=SC2016 # The prefix is inspected, not evaluated.
+  for prefix in "" '"$prefix"'; do
+    expect_note "$check" "$command --body $prefix'\$(cat <<EOF
+bad; \$folder
+EOF
+)'" no
+  done
+done
+finish_tests

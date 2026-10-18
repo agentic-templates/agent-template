@@ -1,0 +1,406 @@
+#!/usr/bin/env bash
+# Tests scripts/clear-worktrees on copies of it in repositories that the test makes, with a stand-in for gh.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+case_count=0
+failed_cases=0
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+# git looks for no repository above the temporary folder, reads none of the person's settings,
+# and commits as a stand-in person.
+export GIT_CEILING_DIRECTORIES=$base
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com
+export GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
+mkdir "$base/bin"
+
+# A stand-in for gh, first on the PATH. It answers only the commands that the script must run. It lists the ready
+# issues in TEST_READY_ISSUES, or fails with fail, as gh does without the network. It lists each issue's branches from
+# the lines of TEST_ISSUE_BRANCHES, which hold an issue and a branch, and says that each branch in
+# TEST_OPEN_PULL_REQUESTS has an open pull request.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+if [[ $* == "issue list --label ready --limit 200 --json number --jq .[].number" ]]; then
+  if [[ $TEST_READY_ISSUES == fail ]]; then
+    echo "error connecting to api.github.com" >&2
+    exit 1
+  fi
+  for issue in $TEST_READY_ISSUES; do
+    echo "$issue"
+  done
+  exit 0
+fi
+if [[ $1 == issue && $2 == develop && $3 == --list && $# == 4 ]]; then
+  while read -r issue branch; do
+    if [[ $issue == "$4" ]]; then
+      printf '%s\thttps://github.com/owner/repo/tree/%s\n' "$branch" "$branch"
+    fi
+  done <<<"$TEST_ISSUE_BRANCHES"
+  exit 0
+fi
+if [[ $1 == pr && $2 == list && $3 == --head && "${*:5}" == "--state open --json number --jq length" ]]; then
+  count=0
+  for branch in $TEST_OPEN_PULL_REQUESTS; do
+    if [[ $branch == "$4" ]]; then
+      count=1
+    fi
+  done
+  echo "$count"
+  exit 0
+fi
+echo "The stand-in for gh doesn't answer: gh $*" >&2
+exit 1
+STAND_IN
+chmod +x "$base/bin/gh"
+
+save_subject="chore: save the unfinished work of a stopped session"
+issue_branches=$'12 12-fix-totals\n13 13-export-csv'
+
+# Makes a repository for a case, and sets case_dir to its folder and start to its first commit. The folder holds
+# origin.git, the repository on GitHub, and main, the repository's main folder, with main checked out. GitHub has the
+# branches of issues 12 and 13, as gh issue develop makes them, and main has them too: new_case
+new_case() {
+  case_dir=$(mktemp -d "$base/case.XXXXXX")
+  git init --quiet --bare "$case_dir/origin.git"
+  git init --quiet --initial-branch=main "$case_dir/main"
+  mkdir "$case_dir/main/scripts"
+  cp scripts/clear-worktrees "$case_dir/main/scripts/clear-worktrees"
+  printf 'January: 120\n' >"$case_dir/main/totals.txt"
+  git -C "$case_dir/main" add --all
+  git -C "$case_dir/main" commit --quiet -m "feat: total the expenses"
+  git -C "$case_dir/main" remote add origin "$case_dir/origin.git"
+  git -C "$case_dir/main" push --quiet origin main main:12-fix-totals main:13-export-csv
+  git -C "$case_dir/main" fetch --quiet origin
+  git -C "$case_dir/main" branch --quiet --track 12-fix-totals origin/12-fix-totals
+  git -C "$case_dir/main" branch --quiet --track 13-export-csv origin/13-export-csv
+  start=$(git -C "$case_dir/main" rev-parse HEAD)
+}
+
+# Adds a worktree in the case's folder with a branch checked out: add_worktree <name> <branch>
+add_worktree() {
+  git -C "$case_dir/main" worktree add --quiet "$case_dir/$1" "$2"
+}
+
+# Adds a commit to GitHub's copy of a branch, from a clone of its own: push_to_github <branch> <line>
+push_to_github() {
+  local clone
+  clone=$(mktemp -d "$base/clone.XXXXXX")
+  git clone --quiet --branch "$1" "$case_dir/origin.git" "$clone"
+  printf '%s\n' "$2" >>"$clone/totals.txt"
+  git -C "$clone" commit --quiet -am "feat: add a line"
+  git -C "$clone" push --quiet origin "$1"
+}
+
+# Runs the copy of scripts/clear-worktrees in a folder, with the arguments after the first three, and sets status and
+# output: run_clear_worktrees <folder> [<branches with an open pull request>] [<ready issues, or fail>] [<argument>...]
+run_clear_worktrees() {
+  status=0
+  output=$(TEST_READY_ISSUES=${3:-12 13} TEST_ISSUE_BRANCHES=$issue_branches TEST_OPEN_PULL_REQUESTS=${2:-} \
+    PATH=$base/bin:$PATH "$1/scripts/clear-worktrees" "${@:4}" 2>&1) || status=$?
+}
+
+# Starts a case: begin_case <description>
+begin_case() {
+  description=$1
+  case_count=$((case_count + 1))
+  is_case_failed=""
+}
+
+# Prints an error for the case: report <what's wrong>
+report() {
+  echo "error: $description, $1" >&2
+  if [[ -z $is_case_failed ]]; then
+    failed_cases=$((failed_cases + 1))
+    is_case_failed=yes
+  fi
+}
+
+# Checks the script's exit code and output: expect_result <exit code> <output>
+expect_result() {
+  if [[ $status != "$1" || $output != "$2" ]]; then
+    report "scripts/clear-worktrees must exit with code $1 and print \"$2\", but it exited with code $status and printed \"$output\"."
+  fi
+}
+
+# Checks a value: expect_equal <what the value is> <value> <expected value>
+expect_equal() {
+  if [[ $2 != "$3" ]]; then
+    report "$1 must be \"$3\", but it's \"$2\"."
+  fi
+}
+
+# Prints the subject of the last commit on a branch: last_subject <branch>
+last_subject() {
+  git -C "$case_dir/main" log -1 --format=%s "refs/heads/$1"
+}
+
+# Prints the commit that a branch points to, in the main folder: local_commit <branch>
+local_commit() {
+  git -C "$case_dir/main" rev-parse "refs/heads/$1"
+}
+
+# Prints the commit that a branch points to on GitHub: github_commit <branch>
+github_commit() {
+  git -C "$case_dir/origin.git" rev-parse "refs/heads/$1"
+}
+
+# Prints yes if a folder exists, and no if it doesn't: exists <path>
+exists() {
+  if [[ -e $1 ]]; then
+    echo yes
+  else
+    echo no
+  fi
+}
+
+# Prints the branch that a folder has checked out, or detached: checked_out <path>
+checked_out() {
+  git -C "$1" symbolic-ref --quiet --short HEAD || echo detached
+}
+
+begin_case "When a worktree has no changes and nothing to push"
+new_case
+add_worktree agent-1 12-fix-totals
+run_clear_worktrees "$case_dir/main"
+expect_result 0 "Removed $case_dir/agent-1, which held the branch of issue #12."
+expect_equal "whether the worktree exists" "$(exists "$case_dir/agent-1")" no
+expect_equal "the branch" "$(local_commit 12-fix-totals)" "$start"
+expect_equal "the branch on GitHub" "$(github_commit 12-fix-totals)" "$start"
+
+begin_case "When a worktree has changed and untracked files, and its branch has no open pull request"
+new_case
+add_worktree agent-1 12-fix-totals
+printf 'February: 80\n' >>"$case_dir/agent-1/totals.txt"
+mkdir "$case_dir/agent-1/notes"
+printf 'Round to whole cents.\n' >"$case_dir/agent-1/notes/rounding.txt"
+run_clear_worktrees "$case_dir/main"
+expect_result 0 "Removed $case_dir/agent-1, which held the branch of issue #12."
+expect_equal "whether the worktree exists" "$(exists "$case_dir/agent-1")" no
+expect_equal "the subject of the branch's last commit" "$(last_subject 12-fix-totals)" "$save_subject"
+expect_equal "the files that the last commit changes" \
+  "$(git -C "$case_dir/main" diff --name-only 12-fix-totals~1 12-fix-totals)" $'notes/rounding.txt\ntotals.txt'
+expect_equal "the branch's parent commit" "$(git -C "$case_dir/main" rev-parse 12-fix-totals~1)" "$start"
+expect_equal "the branch on GitHub" "$(github_commit 12-fix-totals)" "$(local_commit 12-fix-totals)"
+
+begin_case "When a worktree has changed files, and its branch has an open pull request"
+new_case
+add_worktree agent-1 12-fix-totals
+printf 'February: 80\n' >>"$case_dir/agent-1/totals.txt"
+run_clear_worktrees "$case_dir/main" 12-fix-totals
+expect_result 0 "Removed $case_dir/agent-1, which held the branch of issue #12."
+expect_equal "whether the worktree exists" "$(exists "$case_dir/agent-1")" no
+expect_equal "the subject of the branch's last commit" "$(last_subject 12-fix-totals)" "$save_subject"
+expect_equal "the branch on GitHub" "$(github_commit 12-fix-totals)" "$start"
+
+begin_case "When a worktree has commits that the branch on GitHub lacks, no changes and no open pull request"
+new_case
+add_worktree agent-1 12-fix-totals
+printf 'February: 80\n' >>"$case_dir/agent-1/totals.txt"
+git -C "$case_dir/agent-1" commit --quiet -am "feat: total February"
+run_clear_worktrees "$case_dir/main"
+expect_result 0 "Removed $case_dir/agent-1, which held the branch of issue #12."
+expect_equal "whether the worktree exists" "$(exists "$case_dir/agent-1")" no
+expect_equal "the subject of the branch's last commit" "$(last_subject 12-fix-totals)" "feat: total February"
+expect_equal "the branch on GitHub" "$(github_commit 12-fix-totals)" "$(local_commit 12-fix-totals)"
+
+begin_case "When a worktree has an untracked file named deploy-key.pem"
+new_case
+add_worktree agent-1 12-fix-totals
+printf 'February: 80\n' >>"$case_dir/agent-1/totals.txt"
+printf 'not a real key\n' >"$case_dir/agent-1/deploy-key.pem"
+run_clear_worktrees "$case_dir/main"
+expect_result 0 "Left $case_dir/agent-1, which holds the branch of issue #12, because it has untracked files whose names suggest a secret: deploy-key.pem"
+expect_equal "whether the file exists" "$(exists "$case_dir/agent-1/deploy-key.pem")" yes
+expect_equal "the changes in the worktree" "$(git -C "$case_dir/agent-1" status --porcelain)" $' M totals.txt\n?? deploy-key.pem'
+expect_equal "the branch" "$(local_commit 12-fix-totals)" "$start"
+
+begin_case "When worktrees are locked, with a reason and without one"
+new_case
+add_worktree agent-1 12-fix-totals
+git -C "$case_dir/main" worktree lock --reason "claude agent agent-1 (pid 20928)" "$case_dir/agent-1"
+add_worktree agent-2 13-export-csv
+git -C "$case_dir/main" worktree lock "$case_dir/agent-2"
+printf 'February: 80\n' >>"$case_dir/agent-1/totals.txt"
+run_clear_worktrees "$case_dir/main"
+expect_result 0 "Left $case_dir/agent-1, which holds the branch of issue #12, because it's locked, and the lock gives this reason: claude agent agent-1 (pid 20928)"$'\n'"Left $case_dir/agent-2, which holds the branch of issue #13, because it's locked, and the lock gives no reason."
+expect_equal "the changes in the locked worktree" "$(git -C "$case_dir/agent-1" status --porcelain)" " M totals.txt"
+expect_equal "whether the worktree without a reason exists" "$(exists "$case_dir/agent-2")" yes
+
+begin_case "When a worktree is in the middle of a rebase of the branch"
+new_case
+add_worktree agent-1 12-fix-totals
+printf 'January: 125\n' >"$case_dir/agent-1/totals.txt"
+git -C "$case_dir/agent-1" commit --quiet -am "fix: correct January"
+printf 'January: 130\n' >"$case_dir/main/totals.txt"
+git -C "$case_dir/main" commit --quiet -am "fix: count the late receipts"
+git -C "$case_dir/agent-1" rebase main >/dev/null 2>&1 || true
+run_clear_worktrees "$case_dir/main"
+expect_result 0 "Left $case_dir/agent-1, which holds the branch of issue #12, because it's in the middle of a rebase."
+expect_equal "whether the rebase goes on" "$(exists "$(git -C "$case_dir/agent-1" rev-parse --absolute-git-dir)/rebase-merge")" yes
+
+begin_case "When a worktree is in the middle of a merge"
+new_case
+add_worktree agent-1 12-fix-totals
+printf 'January: 125\n' >"$case_dir/agent-1/totals.txt"
+git -C "$case_dir/agent-1" commit --quiet -am "fix: correct January"
+printf 'January: 130\n' >"$case_dir/main/totals.txt"
+git -C "$case_dir/main" commit --quiet -am "fix: count the late receipts"
+git -C "$case_dir/agent-1" merge main >/dev/null 2>&1 || true
+run_clear_worktrees "$case_dir/main"
+expect_result 0 "Left $case_dir/agent-1, which holds the branch of issue #12, because it's in the middle of a merge."
+expect_equal "whether the merge goes on" "$(exists "$(git -C "$case_dir/agent-1" rev-parse --absolute-git-dir)/MERGE_HEAD")" yes
+
+begin_case "When the folder it runs in has changes, and its branch has no open pull request"
+new_case
+add_worktree agent-1 12-fix-totals
+printf 'February: 80\n' >>"$case_dir/agent-1/totals.txt"
+push_to_github main "March: 95"
+run_clear_worktrees "$case_dir/agent-1"
+expect_result 0 "Switched $case_dir/agent-1, the folder that scripts/clear-worktrees runs in, from the branch of issue #12 to origin/main."
+expect_equal "the folder's checked-out branch" "$(checked_out "$case_dir/agent-1")" detached
+expect_equal "the folder's commit" "$(git -C "$case_dir/agent-1" rev-parse HEAD)" "$(github_commit main)"
+expect_equal "the subject of the branch's last commit" "$(last_subject 12-fix-totals)" "$save_subject"
+expect_equal "the branch on GitHub" "$(github_commit 12-fix-totals)" "$(local_commit 12-fix-totals)"
+
+begin_case "When the folder it runs in is in the middle of a merge"
+new_case
+add_worktree agent-1 12-fix-totals
+printf 'January: 125\n' >"$case_dir/agent-1/totals.txt"
+git -C "$case_dir/agent-1" commit --quiet -am "fix: correct January"
+fixed=$(local_commit 12-fix-totals)
+printf 'January: 130\n' >"$case_dir/main/totals.txt"
+git -C "$case_dir/main" commit --quiet -am "fix: count the late receipts"
+git -C "$case_dir/agent-1" merge main >/dev/null 2>&1 || true
+run_clear_worktrees "$case_dir/agent-1"
+expect_result 0 "Switched $case_dir/agent-1, the folder that scripts/clear-worktrees runs in, from the branch of issue #12 to origin/main."
+expect_equal "whether the merge goes on" "$(exists "$(git -C "$case_dir/agent-1" rev-parse --absolute-git-dir)/MERGE_HEAD")" no
+expect_equal "the folder's commit" "$(git -C "$case_dir/agent-1" rev-parse HEAD)" "$start"
+expect_equal "the branch" "$(local_commit 12-fix-totals)" "$fixed"
+expect_equal "the branch on GitHub" "$(github_commit 12-fix-totals)" "$fixed"
+
+begin_case "When the repository's main folder holds the branch, and it runs in a worktree"
+new_case
+git -C "$case_dir/main" switch --quiet 12-fix-totals
+git -C "$case_dir/main" worktree add --quiet --detach "$case_dir/lead" main
+printf 'February: 80\n' >>"$case_dir/main/totals.txt"
+run_clear_worktrees "$case_dir/lead"
+expect_result 0 "Left $case_dir/main, which holds the branch of issue #12, because it's the repository's main folder."
+expect_equal "the main folder's checked-out branch" "$(checked_out "$case_dir/main")" 12-fix-totals
+expect_equal "the changes in the main folder" "$(git -C "$case_dir/main" status --porcelain)" " M totals.txt"
+
+begin_case "When a worktree holds a branch that no ready issue has"
+new_case
+git -C "$case_dir/main" branch --quiet experiment
+add_worktree agent-1 experiment
+printf 'February: 80\n' >>"$case_dir/agent-1/totals.txt"
+run_clear_worktrees "$case_dir/main"
+expect_result 0 ""
+expect_equal "the changes in the worktree" "$(git -C "$case_dir/agent-1" status --porcelain)" " M totals.txt"
+
+begin_case "When gh can't list the ready issues"
+new_case
+add_worktree agent-1 12-fix-totals
+run_clear_worktrees "$case_dir/main" "" fail
+expect_result 1 "error: can't list the ready issues, because gh failed: error connecting to api.github.com"
+expect_equal "whether the worktree exists" "$(exists "$case_dir/agent-1")" yes
+
+begin_case "When the folder it runs in can't be freed"
+new_case
+add_worktree agent-1 12-fix-totals
+printf 'not a real key\n' >"$case_dir/agent-1/credentials.json"
+run_clear_worktrees "$case_dir/agent-1"
+expect_result 1 "error: can't free $case_dir/agent-1, the folder that scripts/clear-worktrees runs in, which holds the branch of issue #12, because it has untracked files whose names suggest a secret: credentials.json"$'\n'"Save the work in that folder by hand, and switch it to another branch. Then run scripts/clear-worktrees again."
+expect_equal "the folder's checked-out branch" "$(checked_out "$case_dir/agent-1")" 12-fix-totals
+
+begin_case "When the folder it runs in is locked, and in the middle of a merge"
+new_case
+add_worktree agent-1 12-fix-totals
+printf 'January: 125\n' >"$case_dir/agent-1/totals.txt"
+git -C "$case_dir/agent-1" commit --quiet -am "fix: correct January"
+printf 'January: 130\n' >"$case_dir/main/totals.txt"
+git -C "$case_dir/main" commit --quiet -am "fix: count the late receipts"
+git -C "$case_dir/agent-1" merge main >/dev/null 2>&1 || true
+git -C "$case_dir/main" worktree lock --reason "claude agent agent-1 (pid 20928)" "$case_dir/agent-1"
+run_clear_worktrees "$case_dir/agent-1"
+expect_result 1 "error: can't free $case_dir/agent-1, the folder that scripts/clear-worktrees runs in, which holds the branch of issue #12, because it's locked, and the lock gives this reason: claude agent agent-1 (pid 20928)"$'\n'"Save the work in that folder by hand, and switch it to another branch. Then run scripts/clear-worktrees again."
+expect_equal "whether the merge goes on" "$(exists "$(git -C "$case_dir/agent-1" rev-parse --absolute-git-dir)/MERGE_HEAD")" yes
+
+begin_case "When git refuses to push the branch"
+new_case
+add_worktree agent-1 12-fix-totals
+printf 'February: 80\n' >>"$case_dir/agent-1/totals.txt"
+push_to_github 12-fix-totals "March: 95"
+run_clear_worktrees "$case_dir/main"
+expect_equal "the start of the output" "${output%%: *}" "Left $case_dir/agent-1, which holds the branch of issue #12, because git refused to push the branch"
+expect_equal "the exit code" "$status" 0
+expect_equal "whether the worktree exists" "$(exists "$case_dir/agent-1")" yes
+expect_equal "the subject of the branch's last commit" "$(last_subject 12-fix-totals)" "$save_subject"
+
+begin_case "When it gets an issue, and worktrees hold the branches of that issue and of another ready issue"
+new_case
+add_worktree agent-1 12-fix-totals
+printf 'February: 80\n' >>"$case_dir/agent-1/totals.txt"
+add_worktree agent-2 13-export-csv
+printf 'March: 95\n' >>"$case_dir/agent-2/totals.txt"
+run_clear_worktrees "$case_dir/main" "" "12 13" 12
+expect_result 0 "Removed $case_dir/agent-1, which held the branch of issue #12."
+expect_equal "whether the worktree of issue #12 exists" "$(exists "$case_dir/agent-1")" no
+expect_equal "the subject of the last commit on the branch of issue #12" "$(last_subject 12-fix-totals)" "$save_subject"
+expect_equal "the branch of issue #12 on GitHub" "$(github_commit 12-fix-totals)" "$(local_commit 12-fix-totals)"
+expect_equal "the changes in the worktree of issue #13" "$(git -C "$case_dir/agent-2" status --porcelain)" " M totals.txt"
+expect_equal "the branch of issue #13" "$(local_commit 13-export-csv)" "$start"
+
+begin_case "When it gets an issue that no longer has ready, and a worktree holds the issue's branch"
+new_case
+add_worktree agent-1 12-fix-totals
+run_clear_worktrees "$case_dir/main" "" 13 12
+expect_result 0 "Removed $case_dir/agent-1, which held the branch of issue #12."
+expect_equal "whether the worktree exists" "$(exists "$case_dir/agent-1")" no
+
+begin_case "When it gets an issue, and a locked worktree holds the issue's branch"
+new_case
+add_worktree agent-1 12-fix-totals
+git -C "$case_dir/main" worktree lock --reason "claude agent agent-1 (pid 20928)" "$case_dir/agent-1"
+printf 'February: 80\n' >>"$case_dir/agent-1/totals.txt"
+run_clear_worktrees "$case_dir/main" "" "12 13" 12
+expect_result 0 "Removed $case_dir/agent-1, which held the branch of issue #12."
+expect_equal "whether the worktree exists" "$(exists "$case_dir/agent-1")" no
+expect_equal "the subject of the branch's last commit" "$(last_subject 12-fix-totals)" "$save_subject"
+expect_equal "the branch on GitHub" "$(github_commit 12-fix-totals)" "$(local_commit 12-fix-totals)"
+
+begin_case "When it gets an issue, and no worktree holds the issue's branch"
+new_case
+run_clear_worktrees "$case_dir/main" "" "12 13" 12
+expect_result 0 ""
+
+begin_case "When it gets an issue, and it has to leave the worktree that holds the issue's branch"
+new_case
+add_worktree agent-1 12-fix-totals
+printf 'February: 80\n' >>"$case_dir/agent-1/totals.txt"
+printf 'not a real key\n' >"$case_dir/agent-1/deploy-key.pem"
+run_clear_worktrees "$case_dir/main" "" "12 13" 12
+expect_result 1 "Left $case_dir/agent-1, which holds the branch of issue #12, because it has untracked files whose names suggest a secret: deploy-key.pem"
+expect_equal "the changes in the worktree" "$(git -C "$case_dir/agent-1" status --porcelain)" $' M totals.txt\n?? deploy-key.pem'
+expect_equal "the branch" "$(local_commit 12-fix-totals)" "$start"
+
+begin_case "When it gets two arguments"
+new_case
+add_worktree agent-1 12-fix-totals
+run_clear_worktrees "$case_dir/main" "" "12 13" 12 13
+expect_result 1 "error: scripts/clear-worktrees takes at most one argument, the number of an issue, and it got 2."
+expect_equal "whether the worktree exists" "$(exists "$case_dir/agent-1")" yes
+
+begin_case "When it gets an argument that isn't the number of an issue"
+new_case
+add_worktree agent-1 12-fix-totals
+run_clear_worktrees "$case_dir/main" "" "12 13" "#12"
+expect_result 1 "error: scripts/clear-worktrees takes the number of an issue, such as 12, and it got \"#12\"."
+expect_equal "whether the worktree exists" "$(exists "$case_dir/agent-1")" yes
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/clear-worktrees.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/clear-worktrees.test passed. Cases: $case_count."

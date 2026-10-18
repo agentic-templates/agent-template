@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Tests scripts/check-main-rules on a copy of it and of the files it reads, with a stand-in for gh.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/testing-required-checks.bash
+source scripts/testing-required-checks.bash
+
+case_count=0
+failed_cases=0
+
+base=$(mktemp -d)
+trap 'rm -rf "$base"' EXIT
+copy=$base/repository
+mkdir -p "$copy/scripts" "$base/bin"
+cp -p scripts/check-main-rules scripts/required-checks scripts/configure-github "$copy/scripts/"
+
+# A stand-in for gh, first on the PATH, that answers the command that reads the rules for main.
+# It prints the checks in TEST_MAIN_RULES, which the rules require, one to a line. With TEST_MAIN_RULES=fail, it fails,
+# as gh does without the network.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+jq_filter='.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context'
+if [[ $# != 4 || $1 != api || $2 != "repos/{owner}/{repo}/rules/branches/main" || $3 != --jq || $4 != "$jq_filter" ]]; then
+  echo "The stand-in for gh doesn't answer: gh $*" >&2
+  exit 1
+fi
+if [[ $TEST_MAIN_RULES == fail ]]; then
+  echo "error connecting to api.github.com" >&2
+  exit 1
+fi
+for check in $TEST_MAIN_RULES; do
+  echo "$check"
+done
+printf '%s\n' "$TEST_PROJECT_CHECKS"
+STAND_IN
+chmod +x "$base/bin/gh"
+
+# Runs the copy of the script with the checks that the rules for main require, and sets status and errors:
+# run_check_main_rules <checks, separated by spaces, or fail>
+run_check_main_rules() {
+  status=0
+  errors=$(TEST_MAIN_RULES=$1 PATH=$base/bin:$PATH "$copy/scripts/check-main-rules" 2>&1) || status=$?
+}
+
+# Checks the script's exit code and errors: expect_result <description> <exit code> <errors>
+expect_result() {
+  local description=$1 expected_status=$2 expected_errors=$3
+  case_count=$((case_count + 1))
+  if [[ $status != "$expected_status" || $errors != "$expected_errors" ]]; then
+    echo "error: $description, scripts/check-main-rules must exit with code $expected_status and report \"$expected_errors\", but it exited with code $status and reported \"$errors\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+restore="A maintainer with admin access restores"
+
+run_check_main_rules "check title"
+expect_result "When main requires check and title" 0 ""
+run_check_main_rules "CodeQL title check"
+expect_result "When main requires check and title next to another check" 0 ""
+
+run_check_main_rules "title CodeQL"
+expect_result "When main doesn't require check" 1 \
+  "error: main no longer requires the check job, so a pull request can merge without passing it. $restore it by running scripts/configure-github."
+run_check_main_rules "check"
+expect_result "When main doesn't require title" 1 \
+  "error: main no longer requires the title job, so a pull request can merge without passing it. $restore it by running scripts/configure-github."
+run_check_main_rules ""
+expect_result "When main requires neither check nor title" 1 \
+  "error: main no longer requires the check and title jobs, so a pull request can merge without passing them. $restore them by running scripts/configure-github."
+run_check_main_rules fail
+expect_result "When gh fails" 2 "error: can't read the rules for main, because gh failed: error connecting to api.github.com"
+
+# The checks come from the ruleset in scripts/configure-github.
+configure_github=$(<"$copy/scripts/configure-github")
+title_check='{"context": "title", "integration_id": 15368}'
+third_check=$(fixture_check_name lint)
+title_and_lint_checks="$title_check, {\"context\": \"$third_check\", \"integration_id\": 15368}"
+printf '%s\n' "${configure_github/"$title_check"/$title_and_lint_checks}" >"$copy/scripts/configure-github"
+if ! grep -q "\"context\": \"$third_check\"" "$copy/scripts/configure-github"; then
+  echo "error: can't find the required check title in scripts/configure-github, so the cases for a third required check would test nothing. Change them to match the ruleset in scripts/configure-github." >&2
+  exit 1
+fi
+run_check_main_rules "check title"
+expect_result "When scripts/configure-github requires a third check that main doesn't" 1 \
+  "error: main no longer requires the $third_check job, so a pull request can merge without passing it. $restore it by running scripts/configure-github."
+run_check_main_rules ""
+expect_result "When main requires none of the three fixture checks" 1 \
+  "error: main no longer requires the check, title and $third_check jobs, so a pull request can merge without passing them. $restore them by running scripts/configure-github."
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/check-main-rules.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/check-main-rules.test passed. Cases: $case_count."

@@ -1,0 +1,2 @@
+# Check out text files with LF line endings on every system, because scripts with CRLF endings fail to run.
+* text=auto eol=lf

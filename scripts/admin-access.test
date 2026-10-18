@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Checks the admin gates through their callers, without reaching GitHub or fetching a repository.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+root=$PWD
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+mkdir "$base/bin"
+
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TEST_CALLS"
+printf '%s\n' "$GH_REPO $PWD" >>"$TEST_CONTEXT"
+case "$*" in
+  "repo view --json nameWithOwner --jq .nameWithOwner") printf '%s\n' "$GH_REPO" ;;
+  "repo view --json viewerPermission --jq .viewerPermission")
+    if [[ $TEST_QUERY_FAILS == yes ]]; then
+      echo "permission query failed" >&2
+      exit 23
+    fi
+    printf '%s\n' "$TEST_PERMISSION"
+    ;;
+  *) echo "unexpected later gh command" >&2; exit 47 ;;
+esac
+STAND_IN
+cat >"$base/bin/git" <<'STAND_IN'
+#!/usr/bin/env bash
+printf 'git %s\n' "$*" >>"$TEST_CALLS"
+echo "unexpected later git command" >&2
+exit 47
+STAND_IN
+chmod +x "$base/bin/gh" "$base/bin/git"
+
+case_count=0
+failed_cases=0
+repo=other-org/other-repository
+expected_calls=$'repo view --json nameWithOwner --jq .nameWithOwner\nrepo view --json viewerPermission --jq .viewerPermission'
+
+for caller in configure-github waiting-fixes create-private-fork; do
+  arguments=()
+  expected_directory=$root
+  case "$caller" in
+    configure-github)
+      action="changing the settings"
+      expected_directory=$(cd "$base" && pwd -P)
+      ;;
+    waiting-fixes) action="listing the security advisories" ;;
+    create-private-fork)
+      action="creating a private fork for a security advisory"
+      arguments=(GHSA-2c5x-3m4v-7q8r)
+      ;;
+  esac
+  for permission in MAINTAIN WRITE READ admin ""; do
+    for query_fails in no yes; do
+      : >"$base/calls"
+      : >"$base/context"
+      status=0
+      # Run outside the checkout to catch a helper source that depends on the caller's working directory.
+      (cd "$base" && GH_REPO=$repo TEST_PERMISSION=$permission TEST_QUERY_FAILS=$query_fails \
+        TEST_CALLS=$base/calls TEST_CONTEXT=$base/context PATH=$base/bin:$PATH \
+        "$root/scripts/$caller" ${arguments[@]+"${arguments[@]}"}) >"$base/stdout" 2>"$base/stderr" || status=$?
+      expected_status=1
+      expected_error="error: $action of $repo needs admin access, and you have $permission access. Ask a maintainer with admin access to run this script."
+      if [[ $query_fails == yes ]]; then
+        if [[ $caller == configure-github ]]; then
+          expected_status=23
+          expected_error="permission query failed"
+        else
+          expected_error="error: can't read your access to $repo, because gh failed: permission query failed"
+        fi
+      fi
+      printf '%s\n' "$expected_error" >"$base/expected-stderr"
+      expected_context="$repo $expected_directory"$'\n'"$repo $expected_directory"
+      case_count=$((case_count + 1))
+      if [[ $status != "$expected_status" || -s $base/stdout || $(<"$base/calls") != "$expected_calls" ||
+        $(<"$base/context") != "$expected_context" ]] || ! cmp -s "$base/stderr" "$base/expected-stderr"; then
+        echo "error: scripts/$caller with permission \"$permission\" and query failure $query_fails changed its rejection, command order, repository or working directory. Expected status $expected_status, got $status. Its stderr follows:" >&2
+        cat "$base/stderr" >&2
+        failed_cases=$((failed_cases + 1))
+      fi
+    done
+  done
+done
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of $case_count admin access cases failed." >&2
+  exit 1
+fi
+echo "scripts/admin-access.test passed. Cases: $case_count."

@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+# Tests scripts/start-issue on copies of it in repositories that the test makes, with a stand-in for gh.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+case_count=0
+failed_cases=0
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+# git looks for no repository above the temporary folder, reads none of the person's settings,
+# and commits as a stand-in person.
+export GIT_CEILING_DIRECTORIES=$base
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com
+export GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
+mkdir "$base/bin"
+
+# A stand-in for gh, first on the PATH. It writes each command to TEST_GH_CALLS, one to a line, and answers only the
+# commands that the script must run, for issue 12:
+# - It prints the labels in TEST_LABELS, one to a line, as the script's --jq filter prints them.
+# - It lists the branches in TEST_ISSUE_BRANCHES, as gh issue develop --list prints them.
+# - For gh issue develop 12 --checkout, it creates the branch TEST_NEW_BRANCH from main on origin, and checks it out,
+#   as gh does.
+# With fail in place of the labels, the branches or the new branch, that command fails, as gh does without the network.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+echo "$*" >>"$TEST_GH_CALLS"
+if [[ $* == "issue view 12 --json labels --jq .labels[].name" ]]; then
+  if [[ $TEST_LABELS == fail ]]; then
+    echo "error connecting to api.github.com" >&2
+    exit 1
+  fi
+  for label in $TEST_LABELS; do
+    echo "$label"
+  done
+  exit 0
+fi
+if [[ $* == "issue develop --list 12" ]]; then
+  if [[ $TEST_ISSUE_BRANCHES == fail ]]; then
+    echo "error connecting to api.github.com" >&2
+    exit 1
+  fi
+  for branch in $TEST_ISSUE_BRANCHES; do
+    printf '%s\thttps://github.com/owner/repo/tree/%s\n' "$branch" "$branch"
+  done
+  exit 0
+fi
+if [[ $* == "issue develop 12 --checkout" ]]; then
+  if [[ $TEST_NEW_BRANCH == fail ]]; then
+    echo "error connecting to api.github.com" >&2
+    exit 1
+  fi
+  git push --quiet origin "refs/remotes/origin/main:refs/heads/$TEST_NEW_BRANCH" &&
+    git fetch --quiet origin &&
+    git switch --quiet --create "$TEST_NEW_BRANCH" --track "refs/remotes/origin/$TEST_NEW_BRANCH" || exit 1
+  echo "github.com/owner/repo/tree/$TEST_NEW_BRANCH"
+  exit 0
+fi
+echo "The stand-in for gh doesn't answer: gh $*" >&2
+exit 1
+STAND_IN
+chmod +x "$base/bin/gh"
+
+needs_triage="error: issue 12 has needs-triage, so no maintainer has accepted it yet. If a maintainer asked you to work on it, remove the label with gh issue edit 12 --remove-label needs-triage, and run the command again. Otherwise, leave the issue for the maintainer to triage."
+
+# Makes a repository for a case, and sets case_dir to its folder and start to its first commit. The folder holds
+# origin.git, the repository on GitHub, and main, a clone of it with main checked out and copies of the scripts:
+# new_case
+new_case() {
+  case_dir=$(mktemp -d "$base/case.XXXXXX")
+  git init --quiet --bare --initial-branch=main "$case_dir/origin.git"
+  git init --quiet --initial-branch=main "$case_dir/main"
+  mkdir "$case_dir/main/scripts"
+  cp scripts/start-issue scripts/needs-triage "$case_dir/main/scripts/"
+  printf 'January: 120\n' >"$case_dir/main/totals.txt"
+  git -C "$case_dir/main" add --all
+  git -C "$case_dir/main" commit --quiet -m "feat: total the expenses"
+  git -C "$case_dir/main" remote add origin "$case_dir/origin.git"
+  git -C "$case_dir/main" push --quiet --set-upstream origin main
+  start=$(git -C "$case_dir/main" rev-parse HEAD)
+}
+
+# Adds a commit from the given time to a branch on GitHub, from a clone of its own. A branch that GitHub doesn't
+# have yet starts from main: push_to_github <branch> <time, as in 2026-05-04T09:30:00Z>
+push_to_github() {
+  local clone
+  clone=$(mktemp -d "$base/clone.XXXXXX")
+  git clone --quiet "$case_dir/origin.git" "$clone"
+  if git -C "$clone" rev-parse --verify --quiet "refs/remotes/origin/$1" >/dev/null; then
+    git -C "$clone" switch --quiet "$1"
+  else
+    git -C "$clone" switch --quiet --create "$1"
+  fi
+  printf '%s\n' "$2" >>"$clone/totals.txt"
+  GIT_COMMITTER_DATE=$2 git -C "$clone" commit --quiet -am "feat: add a line"
+  git -C "$clone" push --quiet origin "$1"
+}
+
+# Makes a local copy of a branch on GitHub in the main folder: fetch_branch <branch>
+fetch_branch() {
+  git -C "$case_dir/main" fetch --quiet origin
+  git -C "$case_dir/main" branch --quiet --track "$1" "refs/remotes/origin/$1"
+}
+
+# Runs the copy of scripts/start-issue in the main folder, with the arguments after the first three, or 12, and sets
+# status, output and calls, the gh commands it ran:
+# run_start_issue <labels, or fail> <branches that gh lists, or fail> <branch that gh creates, or fail> [<argument>...]
+run_start_issue() {
+  local labels=$1 branches=$2 new_branch=$3
+  shift 3
+  if (($# == 0)); then
+    set -- 12
+  fi
+  status=0
+  : >"$case_dir/calls"
+  output=$(TEST_LABELS=$labels TEST_ISSUE_BRANCHES=$branches TEST_NEW_BRANCH=$new_branch \
+    TEST_GH_CALLS=$case_dir/calls PATH=$base/bin:$PATH "$case_dir/main/scripts/start-issue" "$@" 2>&1) || status=$?
+  calls=$(<"$case_dir/calls")
+}
+
+# Starts a case: begin_case <description>
+begin_case() {
+  description=$1
+  case_count=$((case_count + 1))
+  is_case_failed=""
+}
+
+# Prints an error for the case: report <what's wrong>
+report() {
+  echo "error: $description, $1" >&2
+  if [[ -z $is_case_failed ]]; then
+    failed_cases=$((failed_cases + 1))
+    is_case_failed=yes
+  fi
+}
+
+# Checks the script's exit code and output: expect_result <exit code> <output>
+expect_result() {
+  if [[ $status != "$1" || $output != "$2" ]]; then
+    report "scripts/start-issue must exit with code $1 and print \"$2\", but it exited with code $status and printed \"$output\"."
+  fi
+}
+
+# Checks a value: expect_equal <what the value is> <value> <expected value>
+expect_equal() {
+  if [[ $2 != "$3" ]]; then
+    report "$1 must be \"$3\", but it's \"$2\"."
+  fi
+}
+
+# Prints the branch that the main folder has checked out, or detached.
+checked_out() {
+  git -C "$case_dir/main" symbolic-ref --quiet --short HEAD || echo detached
+}
+
+# Prints the commit that the main folder has checked out.
+head_commit() {
+  git -C "$case_dir/main" rev-parse HEAD
+}
+
+# Prints the commit that a branch points to in the main folder: local_commit <branch>
+local_commit() {
+  git -C "$case_dir/main" rev-parse "refs/heads/$1"
+}
+
+# Prints the commit that a branch points to on GitHub: github_commit <branch>
+github_commit() {
+  git -C "$case_dir/origin.git" rev-parse "refs/heads/$1"
+}
+
+begin_case "When the issue has a branch that the folder has no copy of"
+new_case
+push_to_github 12-fix-totals 2026-05-04T09:30:00Z
+run_start_issue feature 12-fix-totals fail
+expect_result 0 12-fix-totals
+expect_equal "the checked-out branch" "$(checked_out)" 12-fix-totals
+expect_equal "the checked-out commit" "$(head_commit)" "$(github_commit 12-fix-totals)"
+expect_equal "the branch's upstream" "$(git -C "$case_dir/main" rev-parse --abbrev-ref '12-fix-totals@{upstream}')" \
+  origin/12-fix-totals
+
+begin_case "When the issue has two branches, and the one that gh lists last has the newer commit"
+new_case
+push_to_github 12-fix-totals 2026-05-04T09:30:00Z
+push_to_github 12-round-totals 2026-05-04T10:30:00Z
+run_start_issue feature "12-fix-totals 12-round-totals" fail
+expect_result 0 12-round-totals
+expect_equal "the checked-out commit" "$(head_commit)" "$(github_commit 12-round-totals)"
+
+begin_case "When the issue has two branches, and the one that gh lists first has the newer commit"
+new_case
+push_to_github 12-round-totals 2026-05-04T09:30:00Z
+push_to_github 12-fix-totals 2026-05-04T10:30:00Z
+run_start_issue feature "12-fix-totals 12-round-totals" fail
+expect_result 0 12-fix-totals
+expect_equal "the checked-out commit" "$(head_commit)" "$(github_commit 12-fix-totals)"
+
+begin_case "When origin no longer has the branch with the newer commit, and the folder fetched it before"
+new_case
+push_to_github 12-fix-totals 2026-05-04T09:30:00Z
+push_to_github 12-round-totals 2026-05-04T10:30:00Z
+git -C "$case_dir/main" fetch --quiet origin
+git -C "$case_dir/origin.git" branch --quiet --delete --force 12-round-totals
+run_start_issue feature "12-fix-totals 12-round-totals" fail
+expect_result 0 12-fix-totals
+expect_equal "the checked-out commit" "$(head_commit)" "$(github_commit 12-fix-totals)"
+
+begin_case "When the local copy of the branch is behind origin"
+new_case
+push_to_github 12-fix-totals 2026-05-04T09:30:00Z
+fetch_branch 12-fix-totals
+push_to_github 12-fix-totals 2026-05-04T10:30:00Z
+run_start_issue feature 12-fix-totals fail
+expect_result 0 12-fix-totals
+expect_equal "the checked-out branch" "$(checked_out)" 12-fix-totals
+expect_equal "the branch" "$(local_commit 12-fix-totals)" "$(github_commit 12-fix-totals)"
+expect_equal "the checked-out commit" "$(head_commit)" "$(github_commit 12-fix-totals)"
+
+begin_case "When the folder has the branch checked out, and it's behind origin"
+new_case
+push_to_github 12-fix-totals 2026-05-04T09:30:00Z
+fetch_branch 12-fix-totals
+git -C "$case_dir/main" switch --quiet 12-fix-totals
+push_to_github 12-fix-totals 2026-05-04T10:30:00Z
+run_start_issue feature 12-fix-totals fail
+expect_result 0 12-fix-totals
+expect_equal "the checked-out commit" "$(head_commit)" "$(github_commit 12-fix-totals)"
+
+begin_case "When the folder has the branch checked out, and it's the same as on origin"
+new_case
+push_to_github 12-fix-totals 2026-05-04T09:30:00Z
+fetch_branch 12-fix-totals
+git -C "$case_dir/main" switch --quiet 12-fix-totals
+run_start_issue feature 12-fix-totals fail
+expect_result 0 12-fix-totals
+expect_equal "the checked-out commit" "$(head_commit)" "$(github_commit 12-fix-totals)"
+
+begin_case "When the local copy of the branch has a commit that origin doesn't have"
+new_case
+push_to_github 12-fix-totals 2026-05-04T09:30:00Z
+fetch_branch 12-fix-totals
+git -C "$case_dir/main" switch --quiet 12-fix-totals
+printf 'February: 80\n' >>"$case_dir/main/totals.txt"
+git -C "$case_dir/main" commit --quiet -am "feat: total February"
+committed=$(head_commit)
+git -C "$case_dir/main" switch --quiet main
+run_start_issue feature 12-fix-totals fail
+expect_result 1 "error: the local copy of the branch 12-fix-totals of issue #12 has commits that origin doesn't have. If the issue needs them, push them to origin. Otherwise, ask the maintainer what to do with them. Then run scripts/start-issue 12 again."
+expect_equal "the checked-out branch" "$(checked_out)" main
+expect_equal "the branch" "$(local_commit 12-fix-totals)" "$committed"
+
+begin_case "When another worktree has the branch checked out"
+new_case
+push_to_github 12-fix-totals 2026-05-04T09:30:00Z
+fetch_branch 12-fix-totals
+git -C "$case_dir/main" worktree add --quiet "$case_dir/agent-1" 12-fix-totals
+run_start_issue feature 12-fix-totals fail
+expect_result 1 "error: the worktree at $case_dir/agent-1 has the branch 12-fix-totals of issue #12 checked out, and git lets only one worktree check out a branch. Work on the issue in that worktree, or ask the maintainer whether another agent still works there."
+expect_equal "the checked-out branch" "$(checked_out)" main
+
+begin_case "When another worktree is in the middle of a rebase of the branch"
+new_case
+push_to_github 12-fix-totals 2026-05-04T09:30:00Z
+fetch_branch 12-fix-totals
+git -C "$case_dir/main" worktree add --quiet "$case_dir/agent-1" 12-fix-totals
+git -C "$case_dir/agent-1" rebase --quiet --force-rebase --exec false main >/dev/null 2>&1 || true
+run_start_issue feature 12-fix-totals fail
+expect_equal "the start of the output" "${output%%: fatal*}" \
+  "error: can't check out the branch 12-fix-totals of issue #12, because git failed"
+expect_equal "the exit code" "$status" 1
+expect_equal "the checked-out branch" "$(checked_out)" main
+
+begin_case "When the folder has a changed file"
+new_case
+push_to_github 12-fix-totals 2026-05-04T09:30:00Z
+printf 'February: 80\n' >>"$case_dir/main/totals.txt"
+run_start_issue feature 12-fix-totals fail
+expect_result 1 "error: $case_dir/main has changes that aren't committed, and scripts/start-issue would take them to the branch of issue #12. Commit them to the branch they belong to, and run scripts/start-issue 12 again."
+expect_equal "the checked-out branch" "$(checked_out)" main
+
+begin_case "When the folder has an untracked file"
+new_case
+push_to_github 12-fix-totals 2026-05-04T09:30:00Z
+printf 'Round to whole cents.\n' >"$case_dir/main/rounding.txt"
+run_start_issue feature 12-fix-totals fail
+expect_result 1 "error: $case_dir/main has changes that aren't committed, and scripts/start-issue would take them to the branch of issue #12. Commit them to the branch they belong to, and run scripts/start-issue 12 again."
+expect_equal "the checked-out branch" "$(checked_out)" main
+
+begin_case "When gh lists no branch"
+new_case
+run_start_issue feature "" 12-fix-totals
+expect_result 0 12-fix-totals
+expect_equal "the gh commands" "$calls" \
+  $'issue view 12 --json labels --jq .labels[].name\nissue develop --list 12\nissue develop 12 --checkout'
+expect_equal "the checked-out branch" "$(checked_out)" 12-fix-totals
+expect_equal "the checked-out commit" "$(head_commit)" "$start"
+
+begin_case "When gh lists only a branch that origin no longer has"
+new_case
+push_to_github 12-fix-totals 2026-05-04T09:30:00Z
+git -C "$case_dir/main" fetch --quiet origin
+git -C "$case_dir/origin.git" branch --quiet --delete --force 12-fix-totals
+run_start_issue feature 12-fix-totals 12-round-totals
+expect_result 0 12-round-totals
+expect_equal "the checked-out branch" "$(checked_out)" 12-round-totals
+
+begin_case "When the issue has needs-triage"
+new_case
+push_to_github 12-fix-totals 2026-05-04T09:30:00Z
+run_start_issue "feature needs-triage" 12-fix-totals 12-round-totals
+expect_result 1 "$needs_triage"
+expect_equal "the gh commands" "$calls" "issue view 12 --json labels --jq .labels[].name"
+expect_equal "the checked-out branch" "$(checked_out)" main
+
+begin_case "When gh can't read the issue's labels"
+new_case
+push_to_github 12-fix-totals 2026-05-04T09:30:00Z
+run_start_issue fail 12-fix-totals fail
+expect_result 0 12-fix-totals
+expect_equal "the checked-out branch" "$(checked_out)" 12-fix-totals
+
+begin_case "When git can't fetch origin"
+new_case
+push_to_github 12-fix-totals 2026-05-04T09:30:00Z
+git -C "$case_dir/main" remote set-url origin "$case_dir/missing.git"
+run_start_issue feature 12-fix-totals fail
+expect_equal "the start of the output" "${output%%: fatal*}" "error: can't fetch origin, because git failed"
+expect_equal "the exit code" "$status" 1
+expect_equal "the checked-out branch" "$(checked_out)" main
+
+begin_case "When gh can't list the issue's branches"
+new_case
+run_start_issue feature fail 12-fix-totals
+expect_result 1 "error: can't list the branches of issue #12, because gh failed: error connecting to api.github.com"
+expect_equal "the checked-out branch" "$(checked_out)" main
+
+begin_case "When gh can't create a branch"
+new_case
+run_start_issue feature "" fail
+expect_result 1 "error: can't create a branch for issue #12, because gh failed: error connecting to api.github.com"
+expect_equal "the checked-out branch" "$(checked_out)" main
+
+begin_case "When it gets two arguments"
+new_case
+run_start_issue feature "" fail 12 13
+expect_result 1 "error: scripts/start-issue takes one argument, the number of an issue, and it got 2."
+
+begin_case "When it gets an argument that isn't the number of an issue"
+new_case
+run_start_issue feature "" fail "#12"
+expect_result 1 "error: scripts/start-issue takes the number of an issue, such as 12, and it got \"#12\"."
+expect_equal "the gh commands" "$calls" ""
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/start-issue.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/start-issue.test passed. Cases: $case_count."

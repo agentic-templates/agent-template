@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+# Tests scripts/hooks/issues-and-labels.check through scripts/hooks/before-tool.
+set -euo pipefail
+# shellcheck source=scripts/hooks/testing.bash
+source "${BASH_SOURCE[0]%/*}/testing.bash"
+
+# The agent works in a project in a temporary home folder. Cursor sends no folder, so its hook runs in the test's own
+# folder, which is the project too.
+folders=$(CDPATH='' cd -- "$(mktemp -d)" && pwd -P)
+test_home=$folders/home
+test_cwd=$test_home/project
+mkdir -p "$test_cwd"
+cd "$test_cwd"
+
+# A stand-in for gh, first on the PATH, so that the cases ask nothing of GitHub. It answers gh issue view <number>
+# with the file <number>.json in TEST_ISSUES, or in its folder jtmpl-other for --repo jtmpl/other, and fails for an
+# issue without a file, as gh does for one that doesn't exist. It records each call in TEST_GH_CALLS.
+stand_in=$(mktemp -d)
+trap 'rm -rf "$stand_in" "$folders"' EXIT
+cat >"$stand_in/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TEST_GH_CALLS"
+if [[ $1 != issue || $2 != view ]]; then
+  exit 1
+fi
+folder=$TEST_ISSUES
+if [[ ${4:-} == --repo ]]; then
+  folder=$TEST_ISSUES/${5//\//-}
+fi
+if [[ ! -f $folder/$3.json ]]; then
+  exit 1
+fi
+cat "$folder/$3.json"
+STAND_IN
+chmod +x "$stand_in/gh"
+PATH=$stand_in:$PATH
+export TEST_GH_CALLS=$stand_in/calls TEST_ISSUES=$stand_in/issues
+mkdir -p "$TEST_ISSUES/jtmpl-other"
+
+# Writes what gh reports for an issue: write_issue <number> <labels, separated by commas> <body> [<folder>]
+write_issue() {
+  jq -n --arg labels "$2" --arg body "$3" '{labels: ($labels | split(",") | map(select(. != "") | {name: .})), body: $body}' \
+    >"${4:-$TEST_ISSUES}/$1.json"
+}
+
+# Checks that the hook calls gh exactly as listed, one call to a line: expect_gh_calls <command> <calls>
+# forbidden-commands.check asks gh for its version before each gh command, so the check leaves that call out.
+expect_gh_calls() {
+  local gh_calls
+  : >"$TEST_GH_CALLS"
+  run_hook "$(sample_input claude-code Bash "$1")"
+  case_count=$((case_count + 1))
+  gh_calls=$(grep -v -x -e --version "$TEST_GH_CALLS" || true)
+  if [[ $gh_calls != "$2" ]]; then
+    echo "error: for $1, the hook must call gh as \"$2\", but it called: \"$gh_calls\"" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+change_body=$'## What should change\nThe app skips the expenses it already has.\n\n## Why\nPeople import the same file twice.\n\n## Done when\n- Importing a file twice adds each expense once.'
+research_body=$'## Question\nCan the bank export a CSV file?\n\n## What depends on the answer\nThe import of bank files.\n\n## Done when\nA comment answers the question.'
+bug_form_body=$'### What happened\nThe total is wrong.\n\n### What you expected\nThe right total.\n\n### Steps to reproduce\n1. Import a file.\n\n### Version and system\nv0.2.0 on macOS 26'
+
+type_label_rule="An issue has exactly one of the type labels bug, feature, maintenance and research, chosen by what changes for users, as \"Labels\" in AGENTS.md describes."
+heading_rule="An issue's body has the headings \"What should change\", \"Why\" and \"Done when\", and a research issue's body has \"Question\", \"What depends on the answer\" and \"Done when\" instead."
+give_the_body="Give the body with --body, or write it to a file and give the file with --body-file."
+not_research="lacks the headings \"What should change\" and \"Why\". $heading_rule Write each heading on a line of its own, such as ## What should change."
+not_change="lacks the headings \"Question\" and \"What depends on the answer\". $heading_rule Write each heading on a line of its own, such as ## Question."
+no_type="would have no type label. $type_label_rule"
+no_body="Blocked: the command gives no body, so this hook can't check the issue's headings. $give_the_body"
+no_stdin="Blocked: this hook can't read a body from standard input, other than from a here-document, so it can't check the issue's headings. $give_the_body"
+not_yet_written="doesn't exist yet or the command writes it. Write the file in a command of its own first, and give its path without variables."
+label_commands="Blocked: scripts/configure-github creates the project's labels, the ones that \"Labels\" in AGENTS.md names. To add, change or remove a label, change both files in a pull request, as docs/rules.md describes, and a maintainer runs the script after the merge."
+
+# Prints the message for a body that lacks headings: lacking <the body, in a sentence> <the missing headings, in prose>
+# <the first missing heading>
+lacking() {
+  echo "Blocked: $1 lacks the $2. $heading_rule Write each heading on a line of its own, such as ## $3."
+}
+
+# A new issue with one type label and the headings for its type
+for type in bug feature maintenance; do
+  expect_allow Bash "gh issue create --title 'Skip imported expenses' --label $type --body '$change_body'"
+done
+expect_allow Bash "gh issue create --title 'Bank files' --label research --body '$research_body'"
+expect_allow Bash "gh issue new --title 'Skip imported expenses' --label feature --body '$change_body'"
+expect_allow Bash "GH_DEBUG=1 gh issue create -t 'Skip imported expenses' -l feature -b '$change_body'"
+
+# The type labels of a new issue, which --label can list separated by commas, and which GitHub matches in any case
+expect_allow Bash "gh issue create --label needs-triage,feature --body '$change_body'"
+expect_allow Bash "gh issue create --label 'needs-triage, Feature' --body '$change_body'"
+expect_allow Bash "gh issue create --label=bug --label needs-triage --body '$change_body'"
+expect_block Bash "gh issue create --title 'Skip imported expenses' --body '$change_body'" \
+  "Blocked: the new issue $no_type Add it with --label <label>."
+expect_block Bash "gh issue create --label needs-triage --body '$change_body'" \
+  "Blocked: the new issue $no_type Add it with --label <label>."
+expect_block Bash "gh issue create --label bug,feature --body '$change_body'" \
+  "Blocked: the new issue would have the type labels bug and feature. $type_label_rule Keep one of them in --label."
+expect_block Bash "gh issue create -l research -l Bug -l feature --body '$research_body'" \
+  "Blocked: the new issue would have the type labels bug, feature and research. $type_label_rule Keep one of them in --label."
+
+# The headings of a new issue's body, which depend on whether the issue has research
+expect_block Bash "gh issue create --label feature --body '${change_body/"## Why"/Why}'" \
+  "$(lacking "the body of the new issue" 'heading "Why"' Why)"
+expect_block Bash "gh issue create --label feature --body '${change_body/"## Done when"/## Done}'" \
+  "$(lacking "the body of the new issue" 'heading "Done when"' "Done when")"
+expect_block Bash "gh issue create --label feature --body '${change_body/"## What should change"/## What changes}'" \
+  "$(lacking "the body of the new issue" 'heading "What should change"' "What should change")"
+expect_block Bash "gh issue create --label bug --body ''" \
+  "$(lacking "the body of the new issue" 'headings "What should change", "Why" and "Done when"' "What should change")"
+expect_block Bash "gh issue create --label research --body '$change_body'" "Blocked: the body of the new issue $not_change"
+expect_block Bash "gh issue create --label research --body '${research_body/"## What depends on the answer"/## What depends on it}'" \
+  "$(lacking "the body of the new issue" 'heading "What depends on the answer"' "What depends on the answer")"
+expect_block Bash "gh issue create --label maintenance --body '$research_body'" "Blocked: the body of the new issue $not_research"
+
+# Headings at any level, with up to 3 spaces before them, #s or spaces after them, and \r\n at each line's end
+expect_allow Bash "gh issue create --label feature --body '# What should change
+Skip them.
+   ### Why ###
+To save time.
+###### Done when
+- Done.'"
+expect_allow Bash "gh issue create --label feature --body '${change_body//$'\n'/$'\r\n'}'"
+# Lines that aren't headings: 7 #s, no space after the #s, and 4 spaces before them, which make a code block
+expect_block Bash "gh issue create --label feature --body '${change_body/"## Why"/####### Why}'" \
+  "$(lacking "the body of the new issue" 'heading "Why"' Why)"
+expect_block Bash "gh issue create --label feature --body '${change_body/"## Why"/##Why}'" \
+  "$(lacking "the body of the new issue" 'heading "Why"' Why)"
+expect_block Bash "gh issue create --label feature --body '${change_body/"## Why"/    ## Why}'" \
+  "$(lacking "the body of the new issue" 'heading "Why"' Why)"
+
+# A body in a here-document, inside $( ) or on standard input, with quotes in its text, and labels after it.
+# Its lines aren't commands, so the gh label command in it is text.
+expect_allow Bash "gh issue create --title 'Skip imported expenses' --body \"\$(cat <<'EOF'
+## What should change
+The app skips the expenses it already has, as \"Import a file\" in the README says it doesn't.
+
+## Why
+People import the same file twice, and they don't want to run gh label create for it.
+
+## Done when
+- Importing a file twice adds each expense once.
+EOF
+)\" --label feature"
+expect_block Bash "gh issue create --title 'Skip imported expenses' --body \"\$(cat <<EOF
+## What should change
+The app skips the expenses it already has, as \"Import a file\" says.
+
+## Done when
+- Importing a file twice adds each expense once.
+EOF
+)\" --label feature" "$(lacking "the body of the new issue" 'heading "Why"' Why)"
+expect_allow Bash "gh issue create --label research --body-file - <<'EOF'
+$research_body
+EOF"
+expect_block Bash "gh issue create --label feature --body-file - <<\"EOF\"
+$research_body
+EOF" "Blocked: the body of the new issue $not_research"
+# <<- removes the tabs at the start of each line, and <<< isn't a here-document.
+expect_allow Bash "cat <<<'Notes' && gh issue create --label feature -F - <<-END
+	${change_body//$'\n'/$'\n\t'}
+	END"
+# A here-document for another command, before the one for the body
+expect_allow Bash "cat >notes.txt <<'EOF'
+## Notes
+EOF
+gh issue create --label feature --body \"\$(cat <<'EOF'
+$change_body
+EOF
+)\""
+
+# A body in a file, which the hook reads before the command runs
+printf '%s\n' "$change_body" >"$test_cwd/body.md"
+printf '%s\n' "$research_body" >"$test_cwd/research.md"
+printf '%s\n' "$change_body" >"$test_home/body.md"
+expect_allow Bash "gh issue create --label feature --body-file body.md"
+expect_allow Bash "gh issue create --label feature --body-file=$test_cwd/body.md"
+expect_allow Bash "gh issue create --label feature -F ~/body.md"
+expect_allow Bash "gh issue create --label feature --body-file - < body.md"
+expect_block Bash "gh issue create --label feature --body-file research.md" "Blocked: the body of the new issue $not_research"
+expect_block Bash "gh issue create --label feature --body-file missing.md" \
+  "Blocked: this hook checks the body file before the command runs, and missing.md $not_yet_written"
+expect_block Bash "cat >body.md <<'EOF'
+$change_body
+EOF
+gh issue create --label feature --body-file body.md" \
+  "Blocked: this hook checks the body file before the command runs, and body.md $not_yet_written"
+expect_block Bash "printf '%s' notes > body.md && gh issue create --label feature --body-file - <body.md" \
+  "Blocked: this hook checks the body file before the command runs, and body.md $not_yet_written"
+
+# A body that the hook can't read
+expect_block Bash "gh issue create --title 'Skip imported expenses' --label feature" "$no_body"
+expect_block Bash "gh issue create --label feature --web" "$no_body"
+expect_block Bash "cat body.md | gh issue create --label feature --body-file -" "$no_stdin"
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so $ stays as written.
+expect_block Bash 'gh issue create --label feature --body "$(cat body.md)"' \
+  "$(lacking "the body of the new issue" 'headings "What should change", "Why" and "Done when"' "What should change") This hook reads the body as the command writes it, without running \$( ) or filling in variables."
+
+# Help, and commands that create no issue
+expect_allow Bash 'gh issue create --help'
+expect_allow Bash 'gh issue create -h'
+expect_allow Bash 'gh issue list --label bug'
+expect_allow Bash 'gh issue view 7'
+expect_allow Bash 'echo gh issue create'
+
+# Edits of these issues
+write_issue 7 feature,ready "$change_body"
+write_issue 8 research "$research_body"
+write_issue 9 bug,needs-triage "$bug_form_body"
+write_issue 10 needs-triage "$change_body"
+write_issue 11 bug,feature "$change_body"
+write_issue 12 feature "Notes"
+write_issue 7 bug "$change_body" "$TEST_ISSUES/jtmpl-other"
+
+# An edit that changes neither the labels nor the body, which the hook doesn't ask gh about
+expect_allow Bash 'gh issue edit 7 --add-assignee @me'
+expect_allow Bash 'gh issue edit 12 --remove-assignee @me --add-blocked-by 8'
+expect_allow Bash "gh issue edit 12 --title 'Skip imported expenses'"
+expect_gh_calls 'gh issue edit 12 --add-assignee @me' ""
+
+# The type labels after an edit, which adds labels before it removes them
+expect_allow Bash 'gh issue edit 7 --remove-label ready --add-label needs-decision'
+expect_allow Bash 'gh issue edit 7 --remove-label feature --add-label bug'
+expect_allow Bash 'gh issue edit 7 --add-label bug,needs-decision --remove-label Feature'
+expect_allow Bash 'gh issue edit 10 --remove-label needs-triage --add-label maintenance'
+expect_allow Bash 'gh issue edit 11 --remove-label bug'
+expect_allow Bash 'gh issue edit 7 --add-label feature --remove-label feature --add-label bug'
+expect_block Bash 'gh issue edit 7 --add-label bug' \
+  "Blocked: issue 7 would have the type labels bug and feature. $type_label_rule Remove the others with --remove-label <label>."
+expect_block Bash 'gh issue edit 7 --remove-label feature' "Blocked: issue 7 $no_type Add it with --add-label <label>."
+expect_block Bash 'gh issue edit 10 --add-label needs-decision' "Blocked: issue 10 $no_type Add it with --add-label <label>."
+expect_block Bash 'gh issue edit 11 --remove-label needs-decision' \
+  "Blocked: issue 11 would have the type labels bug and feature. $type_label_rule Remove the others with --remove-label <label>."
+expect_block Bash 'gh issue edit 7 11 --add-label needs-decision' \
+  "Blocked: issue 11 would have the type labels bug and feature. $type_label_rule Remove the others with --remove-label <label>."
+
+# Removing needs-triage from an issue that the bug form opened, which keeps its type label and its headings
+expect_allow Bash 'gh issue edit 9 --remove-label needs-triage'
+
+# A change of the type label, which needs the headings for the new type
+change_the_body=" Change the body in the same command, with --body or --body-file."
+expect_block Bash 'gh issue edit 9 --remove-label bug,needs-triage --add-label feature' \
+  "$(lacking "the body of issue 9" 'headings "What should change", "Why" and "Done when"' "What should change")$change_the_body"
+expect_allow Bash "gh issue edit 9 --remove-label bug,needs-triage --add-label feature --body '$change_body'"
+expect_block Bash 'gh issue edit 7 --remove-label feature --add-label research' "Blocked: the body of issue 7 $not_change$change_the_body"
+expect_allow Bash "gh issue edit 7 --remove-label feature --add-label research --body '$research_body'"
+expect_block Bash 'gh issue edit 8 --remove-label research --add-label feature' "Blocked: the body of issue 8 $not_research$change_the_body"
+expect_allow Bash 'gh issue edit 7 --remove-label feature --add-label maintenance'
+
+# A new body, which needs the headings for the issue's type
+expect_allow Bash "gh issue edit 7 --body '$change_body'"
+expect_allow Bash "gh issue edit 8 --body '$research_body'"
+expect_allow Bash "gh issue edit 10 --body '$change_body'"
+expect_allow Bash "gh issue edit 12 --body-file body.md"
+expect_allow Bash "gh issue edit 7 --body-file - <<'EOF'
+$change_body
+EOF"
+expect_block Bash "gh issue edit 7 --body 'Notes'" \
+  "$(lacking "the new body of issue 7" 'headings "What should change", "Why" and "Done when"' "What should change")"
+expect_block Bash "gh issue edit 8 --body '$change_body'" "Blocked: the new body of issue 8 $not_change"
+expect_block Bash "gh issue edit 7 --body-file research.md" "Blocked: the new body of issue 7 $not_research"
+expect_block Bash "gh issue edit 7 --body-file missing.md" \
+  "Blocked: this hook checks the body file before the command runs, and missing.md $not_yet_written"
+expect_block Bash "cat body.md | gh issue edit 7 --body-file -" "$no_stdin"
+
+# The issue in the repository that --repo names
+expect_block Bash 'gh issue edit -R jtmpl/other 7 --add-label feature' \
+  "Blocked: issue 7 would have the type labels bug and feature. $type_label_rule Remove the others with --remove-label <label>."
+expect_allow Bash 'gh issue edit --repo jtmpl/other 7 --add-label bug'
+expect_gh_calls 'gh issue edit -R jtmpl/other 7 --add-label bug' "issue view 7 --repo jtmpl/other --json labels,body"
+
+# An issue that gh can't report on, such as without a network, and help
+expect_allow Bash 'gh issue edit 99 --add-label bug'
+expect_allow Bash "gh issue edit 99 --body 'Notes'"
+expect_allow Bash 'gh issue edit --help'
+
+# Commands that change the labels, and commands that only read them
+expect_block Bash 'gh label create urgent --color ff0000' "$label_commands"
+expect_block Bash "gh label edit bug --description 'Something is broken'" "$label_commands"
+expect_block Bash 'gh label delete wontfix --yes' "$label_commands"
+expect_block Bash 'gh label create urgent --repo jtmpl/other' "$label_commands"
+expect_block Bash 'gh label clone jtmpl/other' "$label_commands"
+expect_block Bash 'gh label clone jtmpl/other --force --repo jtmpl/project' "$label_commands"
+expect_allow Bash 'gh label list'
+expect_allow Bash 'echo gh label create urgent'
+
+# Moving the repository flag keeps creation, edit, lookup and label checks.
+for subcommand in create new; do
+  expect_repository_flags 0 "" issue "$subcommand" "--label feature --body '$change_body'"
+  expect_repository_flags 2 "Blocked: the new issue $no_type Add it with --label <label>." issue "$subcommand" "--body '$change_body'"
+  expect_repository_flags 2 "$no_body" issue "$subcommand" '--label feature'
+  expect_repository_flags 0 "" issue "$subcommand" '--help'
+done
+expect_repository_flags 2 "Blocked: issue 7 would have the type labels bug and feature. $type_label_rule Remove the others with --remove-label <label>." issue edit '7 --add-label feature'
+expect_repository_flags 0 "" issue edit '7 --add-label bug'
+expect_repository_flags 2 "$(lacking "the new body of issue 7" 'headings "What should change", "Why" and "Done when"' "What should change")" issue edit "7 --body 'Notes'"
+expect_repository_flags 0 "" issue edit '7 --help'
+for repository in '-R jtmpl/other' '--repo jtmpl/other' '--repo=jtmpl/other'; do
+  expect_gh_calls "gh issue $repository edit 7 --add-label bug" "issue view 7 --repo jtmpl/other --json labels,body"
+  expect_gh_calls "gh issue edit $repository 7 --add-label bug" "issue view 7 --repo jtmpl/other --json labels,body"
+done
+for subcommand in create edit delete clone; do
+  expect_repository_flags 2 "$label_commands" label "$subcommand" 'urgent'
+done
+expect_repository_flags 0 "" label list ''
+
+finish_tests

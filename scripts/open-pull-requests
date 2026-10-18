@@ -1,0 +1,191 @@
+# shellcheck shell=bash
+# Functions that read the open pull requests into main and answer questions about them, for scripts/start-build-run,
+# scripts/stuck-pull-requests and scripts/build-run-report. A pull request's checks are the ones that the rules for
+# main require, which scripts/required-checks lists. They ask gh about the repository of this checkout, or the one in GH_REPO. Run them
+# from the repository's root.
+# shellcheck source=scripts/required-checks
+source scripts/required-checks
+
+# Sets pull_requests to the facts about the open pull requests into main, and required to the checks that the rules
+# for main require, one to a line. Prints an error and fails when gh fails: read_open_pull_requests
+# Each line of pull_requests holds one fact, as fields separated by tabs. The first field says what the line holds:
+# - pull-request <number> <from a fork> <author> <in the merge queue> <merge state> <when auto-merge was turned on>
+#   The last field is empty while auto-merge is off. An author that's an app starts with app/, as in app/dependabot.
+# - check <pull request> <ID> <name> <conclusion>, for each check run on the pull request's latest commit. A later run
+#   has a higher ID. The conclusion is empty until the run finishes.
+# - removal <pull request> <time> <reason>, for each time the merge queue removed the pull request
+# - closes <pull request> <issue> <in this repository> <state> <has the ready label>
+# A field that can be empty comes last, because read joins the tabs around an empty field.
+read_open_pull_requests() {
+  local query jq_filter
+  # A page holds 25 pull requests, because GitHub stops a query after 10 seconds, and a page of 100 pull requests
+  # with many checks each took longer.
+  query=$(cat <<'GRAPHQL'
+query($owner: String!, $repo: String!, $endCursor: String) {
+  repository(owner: $owner, name: $repo) {
+    nameWithOwner
+    pullRequests(states: OPEN, baseRefName: "main", first: 25, after: $endCursor) {
+      nodes {
+        number isCrossRepository isInMergeQueue mergeStateStatus
+        author { __typename login }
+        autoMergeRequest { enabledAt }
+        commits(last: 1) {
+          nodes {
+            commit {
+              statusCheckRollup { contexts(first: 100) { nodes { __typename ... on CheckRun { databaseId name conclusion } } } }
+            }
+          }
+        }
+        timelineItems(itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT], last: 100) {
+          nodes { ... on RemovedFromMergeQueueEvent { createdAt reason } }
+        }
+        closingIssuesReferences(first: 10) {
+          nodes { number state repository { nameWithOwner } labels(first: 100) { nodes { name } } }
+        }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+GRAPHQL
+  )
+  # GitHub names a deleted account ghost.
+  # shellcheck disable=SC2016 # $this_repository and $number are jq variables, which jq expands.
+  jq_filter='.data.repository.nameWithOwner as $this_repository
+    | .data.repository.pullRequests.nodes[]
+    | .number as $number
+    | (["pull-request", $number, .isCrossRepository,
+        ((if .author.__typename == "Bot" then "app/" else "" end) + (.author.login // "ghost")),
+        .isInMergeQueue, .mergeStateStatus, (.autoMergeRequest.enabledAt // "")] | @tsv),
+      (.commits.nodes[].commit.statusCheckRollup.contexts.nodes // [] | .[] | select(.__typename == "CheckRun")
+        | ["check", $number, .databaseId, .name, (.conclusion // "")] | @tsv),
+      (.timelineItems.nodes[] | ["removal", $number, .createdAt, (.reason // "")] | @tsv),
+      (.closingIssuesReferences.nodes[]
+        | ["closes", $number, .number, (.repository.nameWithOwner == $this_repository), .state,
+           any(.labels.nodes[]; .name == "ready")] | @tsv)'
+  if ! pull_requests=$(gh api graphql --paginate -F owner='{owner}' -F repo='{repo}' -f query="$query" --jq "$jq_filter" 2>&1); then
+    echo "error: can't list the open pull requests, because gh failed: $pull_requests" >&2
+    return 1
+  fi
+  required=$(required_checks)
+}
+
+# Succeeds if Dependabot opened a pull request: is_by_dependabot <author>
+is_by_dependabot() {
+  [[ $1 == app/dependabot ]]
+}
+
+# Prints the facts of one kind about a pull request, without the kind and the number: facts <kind> <pull request>
+# grep finds them, because a read loop in bash took more than 2 minutes on a repository with 448 open pull requests.
+facts() {
+  { grep -- "^$1"$'\t'"$2"$'\t' <<<"$pull_requests" || true; } | cut -f 3-
+}
+
+# Prints the conclusion of the latest run of a check on a pull request, or nothing if it hasn't finished or has no run:
+# latest_conclusion <pull request> <check>
+latest_conclusion() {
+  local id name conclusion latest_id=-1 latest=""
+  while IFS=$'\t' read -r id name conclusion; do
+    if [[ -n $id && $name == "$2" ]] && ((id > latest_id)); then
+      latest_id=$id
+      latest=$conclusion
+    fi
+  done <<<"$(facts check "$1")"
+  printf '%s\n' "$latest"
+}
+
+# Succeeds if a check's conclusion counts as passed. The rules for main count a skipped or neutral check as passed:
+# is_passed <conclusion>
+is_passed() {
+  case $1 in
+    SUCCESS | NEUTRAL | SKIPPED) return 0 ;;
+  esac
+  return 1
+}
+
+# Prints each check of a pull request whose latest run failed, such as with the conclusion FAILURE, CANCELLED or
+# TIMED_OUT: failed_checks <pull request>
+failed_checks() {
+  local check conclusion
+  while IFS= read -r check; do
+    if [[ -z $check ]]; then
+      continue
+    fi
+    conclusion=$(latest_conclusion "$1" "$check")
+    if [[ -n $conclusion ]] && ! is_passed "$conclusion"; then
+      printf '%s\n' "$check"
+    fi
+  done <<<"$required"
+}
+
+# Prints the checks of a pull request whose latest run failed, as in a sentence, such as check "title" or
+# checks "check" and "title", or nothing if none did: failed_checks_in_words <pull request>
+failed_checks_in_words() {
+  local check checks="" count=0
+  while IFS= read -r check; do
+    if [[ -n $check ]]; then
+      checks+="\"$check\""$'\n'
+      count=$((count + 1))
+    fi
+  done <<<"$(failed_checks "$1")"
+  if ((count == 1)); then
+    echo "check $(in_words "$checks")"
+  elif ((count > 1)); then
+    echo "checks $(in_words "$checks")"
+  fi
+}
+
+# Succeeds if the latest run of each check of a pull request passed: have_checks_passed <pull request>
+have_checks_passed() {
+  local check
+  while IFS= read -r check; do
+    if [[ -n $check ]] && ! is_passed "$(latest_conclusion "$1" "$check")"; then
+      return 1
+    fi
+  done <<<"$required"
+}
+
+# Succeeds if the merge queue removed a pull request, and the pull request isn't back in the queue, and auto-merge
+# wasn't turned on after the latest removal: is_out_of_queue <pull request> <in the merge queue>
+# <when auto-merge was turned on, or nothing>
+is_out_of_queue() {
+  local time latest=""
+  if [[ $2 == true ]]; then
+    return 1
+  fi
+  while IFS=$'\t' read -r time _; do
+    if [[ -n $time && $time > $latest ]]; then
+      latest=$time
+    fi
+  done <<<"$(facts removal "$1")"
+  [[ -n $latest && ! $3 > $latest ]]
+}
+
+# Prints each open issue in this repository that a pull request closes: open_issues_closed_by <pull request>
+open_issues_closed_by() {
+  local issue is_in_this_repository state
+  while IFS=$'\t' read -r issue is_in_this_repository state _; do
+    if [[ $is_in_this_repository == true && $state == OPEN ]]; then
+      printf '%s\n' "$issue"
+    fi
+  done <<<"$(facts closes "$1")"
+}
+
+# Prints the lines of a text joined as in a sentence, such as "a", "a and b" or "a, b and c": in_words <lines>
+in_words() {
+  local line text="" last=""
+  while IFS= read -r line; do
+    if [[ -z $line ]]; then
+      continue
+    fi
+    if [[ -n $last ]]; then
+      text+="${text:+, }$last"
+    fi
+    last=$line
+  done <<<"$1"
+  if [[ -n $text ]]; then
+    printf '%s and %s\n' "$text" "$last"
+  else
+    printf '%s\n' "$last"
+  fi
+}

@@ -1,0 +1,9 @@
+# shellcheck shell=bash
+# Stops without admin access: require_admin <permission> <repository> <action>
+require_admin() {
+  local permission=$1 repo=$2 action=$3
+  if [[ $permission != ADMIN ]]; then
+    echo "error: $action of $repo needs admin access, and you have $permission access. Ask a maintainer with admin access to run this script." >&2
+    exit 1
+  fi
+}

@@ -1,0 +1,10 @@
+# Secrets stay out of git. List each variable in .env.example instead.
+.env
+.env.*
+!.env.example
+
+# Personal Claude Code settings and worktrees
+.claude/settings.local.json
+.claude/worktrees/
+
+.DS_Store

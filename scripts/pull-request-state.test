@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# Tests scripts/pull-request-state with a stand-in for gh.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+case_count=0
+failed_cases=0
+
+base=$(mktemp -d)
+trap 'rm -rf "$base"' EXIT
+mkdir -p "$base/bin"
+
+# A stand-in for gh, first on the PATH. It answers the command that lists the pull requests of issue 12 with
+# TEST_PULL_REQUESTS, as the script's --jq filter prints them. With fail, it fails, as gh does without the network.
+# For any other issue, it fails as gh does for an issue that doesn't exist.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+if [[ $1 == api && $2 == graphql ]]; then
+  number=""
+  for argument in "$@"; do
+    if [[ $argument == number=* ]]; then
+      number=${argument#number=}
+    fi
+  done
+  if [[ $number != 12 ]]; then
+    echo "gh: Could not resolve to an Issue with the number of $number." >&2
+    exit 1
+  fi
+  if [[ $TEST_PULL_REQUESTS == fail ]]; then
+    echo "error connecting to api.github.com" >&2
+    exit 1
+  fi
+  if [[ -n $TEST_PULL_REQUESTS ]]; then
+    printf '%s\n' "$TEST_PULL_REQUESTS"
+  fi
+  exit 0
+fi
+echo "The stand-in for gh doesn't answer: gh $*" >&2
+exit 1
+STAND_IN
+chmod +x "$base/bin/gh"
+
+tab=$'\t'
+# One pull request that closes the issue, as the script's --jq filter prints it: pull_request <number> <state>
+# <from this repository> <draft> <auto-merge on> <in the merge queue> [<reasonCode of the last time auto-merge was
+# turned off>]
+pull_request() {
+  printf '%s\n' "$1$tab$2$tab$3$tab$4$tab$5$tab$6$tab${7:-}"
+}
+
+# Runs scripts/pull-request-state, and sets status and output: run_pull_request_state <pull requests, or fail>
+# [<arguments>]. Without arguments, it passes the issue 12.
+run_pull_request_state() {
+  local pull_requests=$1
+  shift
+  if (($# == 0)); then
+    set -- 12
+  fi
+  status=0
+  output=$(TEST_PULL_REQUESTS=$pull_requests PATH=$base/bin:$PATH scripts/pull-request-state "$@" 2>&1) || status=$?
+}
+
+# Checks the script's exit code and output: expect_result <description> <exit code> <output>
+expect_result() {
+  local description=$1 expected_status=$2 expected_output=$3
+  case_count=$((case_count + 1))
+  if [[ $status != "$expected_status" || $output != "$expected_output" ]]; then
+    echo "error: $description, scripts/pull-request-state must exit with code $expected_status and print \"$expected_output\", but it exited with code $status and printed \"$output\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+run_pull_request_state ""
+expect_result "When no pull request closes the issue" 0 "none"
+
+run_pull_request_state "$(pull_request 20 OPEN true false true false)"
+expect_result "When the pull request has auto-merge on" 0 "merging"
+
+run_pull_request_state "$(pull_request 20 OPEN true false false true)"
+expect_result "When the pull request is in the merge queue and has auto-merge off" 0 "merging"
+
+run_pull_request_state "$(pull_request 20 OPEN true false false true manually_disabled)"
+expect_result "When the pull request is in the merge queue after someone turned its auto-merge off" 0 "merging"
+
+run_pull_request_state "$(pull_request 20 OPEN true false true false manually_disabled)"
+expect_result "When someone turned auto-merge off and then on again" 0 "merging"
+
+run_pull_request_state "$(pull_request 20 OPEN true true false false)"
+expect_result "When the pull request is a draft" 0 "stopped"
+
+run_pull_request_state "$(pull_request 20 OPEN true false false false manually_disabled)"
+expect_result "When someone turned the pull request's auto-merge off" 0 "stopped"
+
+run_pull_request_state "$(pull_request 20 OPEN true false false false other_reason)"
+expect_result "When GitHub turned the pull request's auto-merge off with a reasonCode other than manually_disabled" 0 \
+  "left behind 20"
+
+run_pull_request_state "$(pull_request 20 OPEN true false false false)"
+expect_result "When the pull request never had auto-merge" 0 "left behind 20"
+
+pull_requests=$(
+  pull_request 20 OPEN true false false false
+  pull_request 21 OPEN true false false false other_reason
+)
+run_pull_request_state "$pull_requests"
+expect_result "When two pull requests are neither merging nor stopped" 0 "several"
+
+pull_requests=$(
+  pull_request 20 OPEN true false false false
+  pull_request 21 OPEN true true false false
+)
+run_pull_request_state "$pull_requests"
+expect_result "When one of two pull requests is a draft" 0 "stopped"
+
+pull_requests=$(
+  pull_request 20 OPEN true false false false manually_disabled
+  pull_request 21 OPEN true false true false
+)
+run_pull_request_state "$pull_requests"
+expect_result "When one of two pull requests is stopped and the other one is merging" 0 "merging"
+
+run_pull_request_state "$(pull_request 20 OPEN false false true false)"
+expect_result "When the only pull request is from a fork and has auto-merge on" 0 "none"
+
+pull_requests=$(
+  pull_request 20 OPEN false false true false
+  pull_request 21 OPEN false true false false
+  pull_request 22 OPEN true false false false
+)
+run_pull_request_state "$pull_requests"
+expect_result "When pull requests from forks are merging and stopped, and one from this repository never had auto-merge" \
+  0 "left behind 22"
+
+pull_requests=$(
+  pull_request 20 MERGED true false true false
+  pull_request 21 CLOSED true true false false
+  pull_request 22 OPEN true false false false
+)
+run_pull_request_state "$pull_requests"
+expect_result "When a merged and a closed pull request also close the issue" 0 "left behind 22"
+
+run_pull_request_state fail
+expect_result "When gh can't list the pull requests" 1 \
+  "error: can't list the pull requests of issue #12, because gh failed: error connecting to api.github.com"
+
+run_pull_request_state "" 13
+expect_result "When the issue doesn't exist" 1 \
+  "error: can't list the pull requests of issue #13, because gh failed: gh: Could not resolve to an Issue with the number of 13."
+
+run_pull_request_state "" 12 13
+expect_result "When it gets two arguments" 1 \
+  "error: scripts/pull-request-state takes one argument, the number of an issue, and it got 2."
+
+run_pull_request_state "" "#12"
+expect_result "When the issue's number starts with #" 1 \
+  "error: scripts/pull-request-state takes the number of an issue, such as 12, and it got \"#12\"."
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/pull-request-state.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/pull-request-state.test passed. Cases: $case_count."

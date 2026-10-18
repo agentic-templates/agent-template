@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Does step 2 of "Build the ready issues" in docs/building.md. It goes through each open pull request into main that
+# has auto-merge on, is in the merge queue or was removed from it. It leaves out pull requests from forks, and pull
+# requests in the merge state UNKNOWN, which GitHub hasn't worked out yet.
+# - It turns off auto-merge on each pull request of Dependabot's that has auto-merge on, isn't in the merge queue, and
+#   is DIRTY or has a failed check.
+# - It prints a line for each pull request that the lead of the build run acts on, with what's wrong:
+#   - one that closes an open issue in this repository and is DIRTY, has a failed check, or was removed from the merge
+#     queue and isn't back in it. A pull request counts as back in the queue too when auto-merge was turned on after
+#     the latest removal, because auto-merge adds it to the queue once its checks pass.
+#   - one that closes an open issue in this repository and is BLOCKED outside the merge queue after all its checks
+#     passed
+#   - one of Dependabot's that it turned off, or that the merge queue removed and that isn't back in it
+#   If the merge queue ever removed the pull request, the line says how many times, and each reason.
+# It stops with an error, and exits with code 1, when gh fails. It asks gh about the repository of this checkout,
+# or the one in GH_REPO.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/open-pull-requests
+source scripts/open-pull-requests
+
+# Prints a sentence about the times the merge queue removed a pull request, or nothing if it never did:
+# removals_in_words <pull request> <in the merge queue> <when auto-merge was turned on, or nothing>
+removals_in_words() {
+  local time reason count=0 reasons="" sentence
+  while IFS=$'\t' read -r time reason; do
+    if [[ -n $time ]]; then
+      count=$((count + 1))
+      reasons+=${reason:-unknown}$'\n'
+    fi
+  done <<<"$(facts removal "$1")"
+  if ((count == 0)); then
+    return 0
+  fi
+  if ((count == 1)); then
+    sentence="The merge queue removed it 1 time, with the reason $(in_words "$reasons")"
+  else
+    sentence="The merge queue removed it $count times, with the reasons $(in_words "$reasons")"
+  fi
+  if is_out_of_queue "$1" "$2" "$3"; then
+    sentence+=", and it isn't back in the queue"
+  fi
+  echo "$sentence."
+}
+
+# Prints the open issues in this repository that a pull request closes, as in a sentence, such as issue #12 or issues
+# #12 and #13, or nothing if it closes none: issues_in_words <pull request>
+issues_in_words() {
+  local issue issues="" count=0
+  while IFS= read -r issue; do
+    if [[ -n $issue ]]; then
+      issues+="#$issue"$'\n'
+      count=$((count + 1))
+    fi
+  done <<<"$(open_issues_closed_by "$1")"
+  if ((count == 1)); then
+    echo "issue $(in_words "$issues")"
+  elif ((count > 1)); then
+    echo "issues $(in_words "$issues")"
+  fi
+}
+
+# read_open_pull_requests prints its own error.
+read_open_pull_requests || exit 1
+
+while IFS=$'\t' read -r kind number is_from_fork author is_in_queue merge_state auto_merge_since; do
+  if [[ $kind != pull-request || $is_from_fork == true || $merge_state == UNKNOWN ]]; then
+    continue
+  fi
+  if [[ -z $auto_merge_since && $is_in_queue != true && -z $(facts removal "$number") ]]; then
+    continue
+  fi
+  problems=""
+  if [[ $merge_state == DIRTY ]]; then
+    problems+=" It's DIRTY."
+  fi
+  failed=$(failed_checks_in_words "$number")
+  if [[ -n $failed ]]; then
+    problems+=" The $failed failed."
+  fi
+  removed=$(removals_in_words "$number" "$is_in_queue" "$auto_merge_since")
+
+  if is_by_dependabot "$author"; then
+    if [[ -n $auto_merge_since && $is_in_queue != true && -n $problems ]]; then
+      if ! answer=$(gh pr merge "$number" --disable-auto 2>&1 </dev/null); then
+        echo "error: can't turn off auto-merge on pull request $number of Dependabot's, because gh failed: $answer" >&2
+        exit 1
+      fi
+      echo "Turned off auto-merge on pull request $number of Dependabot's.$problems${removed:+ $removed}"
+    elif is_out_of_queue "$number" "$is_in_queue" "$auto_merge_since"; then
+      echo "Pull request $number is Dependabot's. $removed"
+    fi
+    continue
+  fi
+
+  issues=$(issues_in_words "$number")
+  if [[ -z $issues ]]; then
+    continue
+  fi
+  if [[ $merge_state == BLOCKED && $is_in_queue != true ]] && have_checks_passed "$number"; then
+    problems+=" It's BLOCKED outside the merge queue, and all its checks passed."
+  fi
+  if [[ -n $problems ]] || is_out_of_queue "$number" "$is_in_queue" "$auto_merge_since"; then
+    echo "Pull request $number closes $issues.$problems${removed:+ $removed}"
+  fi
+done <<<"$pull_requests"

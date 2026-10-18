@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# Tests scripts/next-version on a copy of it in a repository whose commits each case writes, with a stand-in for gh.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+case_count=0
+failed_cases=0
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+repository=$base/repository
+# git looks for no repository above the temporary folder, reads none of the person's settings,
+# and commits as a stand-in person.
+export GIT_CEILING_DIRECTORIES=$base
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
+
+# A stand-in for gh, first on the PATH, that answers the command that lists the latest release.
+# It prints the tag in TEST_LATEST_RELEASE, or nothing when that's empty, and fails when it's "fail".
+mkdir "$base/bin"
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+if [[ "$*" != "release list --exclude-drafts --limit 1 --json tagName --jq .[].tagName" ]]; then
+  echo "The stand-in for gh doesn't answer: gh $*" >&2
+  exit 1
+fi
+if [[ $TEST_LATEST_RELEASE == fail ]]; then
+  echo "error connecting to api.github.com" >&2
+  exit 1
+fi
+if [[ -n $TEST_LATEST_RELEASE ]]; then
+  echo "$TEST_LATEST_RELEASE"
+fi
+STAND_IN
+chmod +x "$base/bin/gh"
+export TEST_LATEST_RELEASE=""
+
+# GitHub gives a squash merge of one of Dependabot's pull requests this author.
+dependabot="dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>"
+person="Ana <ana@example.com>"
+
+# Makes a new repository with no release, and a copy of the script and the files it reads in a first commit.
+new_repository() {
+  rm -rf "$repository"
+  mkdir -p "$repository/scripts"
+  cp -p scripts/next-version scripts/title-types scripts/check-title "$repository/scripts/"
+  git -C "$repository" init --quiet
+  git -C "$repository" add --all
+  git -C "$repository" commit --quiet --author "$person" -m "chore: start the project"
+  TEST_LATEST_RELEASE=""
+}
+
+# Adds a commit with each title, by the author: commit <author> <title>...
+commit() {
+  local author=$1 title
+  shift
+  for title in "$@"; do
+    git -C "$repository" commit --quiet --allow-empty --author "$author" -m "$title"
+  done
+}
+
+# Tags the latest commit, and makes the tag the latest release: release <tag>
+release() {
+  git -C "$repository" tag "$1"
+  TEST_LATEST_RELEASE=$1
+}
+
+latest_commit() {
+  git -C "$repository" rev-parse HEAD
+}
+
+# Runs the copy of the script, and sets status, output and errors: run_next_version [<argument>...]
+run_next_version() {
+  status=0
+  output=$(PATH=$base/bin:$PATH "$repository/scripts/next-version" "$@" 2>"$base/errors") || status=$?
+  errors=$(<"$base/errors")
+}
+
+# Checks that the script printed a version: expect_version <description> <version>
+expect_version() {
+  local description=$1 version=$2
+  case_count=$((case_count + 1))
+  if [[ $status != 0 || $output != "$version" || -n $errors ]]; then
+    echo "error: $description, scripts/next-version must print $version and exit with code 0, but it exited with code $status, printed \"$output\" and reported \"$errors\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks that the script printed nothing, and stopped with an error: expect_stop <description> <error>
+expect_stop() {
+  local description=$1 error=$2
+  case_count=$((case_count + 1))
+  if [[ $status != 1 || -n $output || $errors != "$error" ]]; then
+    echo "error: $description, scripts/next-version must report \"$error\" and exit with code 1, but it exited with code $status, printed \"$output\" and reported \"$errors\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# The first release
+new_repository
+commit "$person" "fix: round the totals"
+run_next_version "$(latest_commit)"
+expect_version "With no release and a fix" v0.1.0
+commit "$person" "feat!: rename the import command"
+run_next_version "$(latest_commit)"
+expect_version "With no release and a breaking change" v0.1.0
+
+# The titles since the latest release, and the version that follows. Commits before the release don't count.
+new_repository
+commit "$person" "feat!: drop the old export"
+release v0.3.1
+commit "$person" "fix: round the totals"
+run_next_version "$(latest_commit)"
+expect_version "After v0.3.1, with a fix" v0.3.2
+commit "$person" "feat: export a month as CSV"
+run_next_version "$(latest_commit)"
+expect_version "After v0.3.1, with a feature and a fix" v0.4.0
+
+new_repository
+release v0.3.1
+commit "$person" "feat!: rename the import command"
+run_next_version "$(latest_commit)"
+expect_version "After v0.3.1, with a breaking feature" v0.4.0
+
+new_repository
+release v1.2.3
+commit "$person" "fix(cli): round the totals"
+run_next_version "$(latest_commit)"
+expect_version "After v1.2.3, with a fix that has a scope" v1.2.4
+
+new_repository
+release v1.2.3
+commit "$person" "feat: export a month as CSV"
+run_next_version "$(latest_commit)"
+expect_version "After v1.2.3, with a feature" v1.3.0
+
+new_repository
+release v1.2.3
+commit "$person" "refactor!: drop the old import format" "feat: export a month as CSV" "fix: round the totals"
+run_next_version "$(latest_commit)"
+expect_version "After v1.2.3, with a breaking refactoring, a feature and a fix" v2.0.0
+
+# On main, a squash merge adds the pull request's number to the title.
+new_repository
+release v1.2.3
+commit "$person" "feat: export a month as CSV (#12)"
+run_next_version "$(latest_commit)"
+expect_version "After v1.2.3, with a feature and the pull request's number" v1.3.0
+commit "$person" "feat(cli)!: rename the import command (#13)"
+run_next_version "$(latest_commit)"
+expect_version "After v1.2.3, with a breaking feature that has a scope and the pull request's number" v2.0.0
+
+# A title that the title check would reject raises the patch version, whatever it holds.
+new_repository
+release v1.2.3
+commit "$person" "Update the README" "wip!: try a new import" "Feat: export a month as CSV" "feat:export a month as CSV" \
+  "feat:  export a month as CSV"
+run_next_version "$(latest_commit)"
+expect_version "After v1.2.3, with titles in other formats" v1.2.4
+
+# Dependabot's updates alone don't make a release.
+new_repository
+release v1.2.3
+commit "$dependabot" "build(deps): bump actions/checkout from 6.0.0 to 7.0.1"
+run_next_version "$(latest_commit)"
+expect_stop "After v1.2.3, with only Dependabot's updates" \
+  "error: every commit after the latest release, v1.2.3, up to $(latest_commit) is one of Dependabot's updates. Tell the maintainer, who decides whether to publish a release with only those."
+commit "$person" "fix: round the totals"
+commit "$dependabot" "build(deps): bump the github-actions group with 2 updates"
+run_next_version "$(latest_commit)"
+expect_version "After v1.2.3, with Dependabot's updates and a fix" v1.2.4
+
+new_repository
+commit "$person" "feat: export a month as CSV"
+release v1.2.3
+run_next_version "$(latest_commit)"
+expect_stop "Right after v1.2.3" \
+  "error: no commits come after the latest release, v1.2.3, up to $(latest_commit), so a new release would have nothing in it. Tell the maintainer."
+
+# Tags that aren't v<major>.<minor>.<patch>
+new_repository
+for tag in release-7 v1.2 1.2.3 v01.2.3 v1.2.3-rc.1; do
+  release "$tag"
+  commit "$person" "fix: round the totals"
+  run_next_version "$(latest_commit)"
+  expect_stop "After the release $tag" \
+    "error: the latest release's tag is $tag, and scripts/next-version needs a tag in the form v<major>.<minor>.<patch>, such as v1.2.3. Tell the maintainer."
+done
+
+# What the script can't read: the latest release's tag, the commit, the releases and its arguments
+new_repository
+commit "$person" "fix: round the totals"
+TEST_LATEST_RELEASE=v1.2.3
+run_next_version "$(latest_commit)"
+expect_stop "With a latest release whose tag this clone doesn't have" \
+  "error: this clone doesn't have the tag v1.2.3 of the latest release. Run git fetch --tags, and run scripts/next-version again."
+TEST_LATEST_RELEASE=fail
+run_next_version "$(latest_commit)"
+expect_stop "When gh fails" \
+  "error connecting to api.github.com"$'\n'"error: gh can't list the releases of this repository. Check the network and gh auth status, and run scripts/next-version again."
+TEST_LATEST_RELEASE=""
+run_next_version 0123456789abcdef0123456789abcdef01234567
+expect_stop "With a SHA that this clone doesn't have" \
+  "error: this clone has no commit 0123456789abcdef0123456789abcdef01234567. Run git fetch, and pass the SHA of the commit to release."
+run_next_version
+expect_stop "With no argument" \
+  "error: scripts/next-version takes one argument, the SHA of the commit to release, and it got 0. For example: scripts/next-version \"\$(git rev-parse origin/main)\""
+run_next_version "$(latest_commit)" main
+expect_stop "With two arguments" \
+  "error: scripts/next-version takes one argument, the SHA of the commit to release, and it got 2. For example: scripts/next-version \"\$(git rev-parse origin/main)\""
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/next-version.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/next-version.test passed. Cases: $case_count."

@@ -1,0 +1,393 @@
+#!/usr/bin/env bash
+# Tests scripts/build-run-report on a copy of it and the scripts it runs, in a repository that the test makes, with a
+# stand-in for gh.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+case_count=0
+failed_cases=0
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+# git looks for no repository above the temporary folder, and reads none of the person's settings.
+export GIT_CEILING_DIRECTORIES=$base
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+mkdir "$base/bin"
+
+# A stand-in for gh, first on the PATH. It answers only the commands that the scripts must run, each with the lines
+# that the command's --jq filter prints. With fail in place of an answer, it fails, as gh does without the network.
+# - It answers the command that lists the merged pull requests with TEST_MERGED_PULL_REQUESTS, the one that lists the
+#   open pull requests with TEST_OPEN_PULL_REQUESTS, the one that lists the issues with needs-decision with
+#   TEST_DECISION_ISSUES, the one that lists the ready issues with TEST_READY_ISSUES, the one that lists the open code
+#   scanning alerts with TEST_ALERTS, and the one that reads the latest CI run on main with TEST_CI_RUN.
+# - For scripts/pull-request-state, it gives issue 12 a pull request with auto-merge on, 13 a draft, 14 two that are
+#   neither, 15 one that's neither, and the others none. It fails for issue 17.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+# Prints an answer, or fails as gh does without the network: answer <answer, or fail>
+answer() {
+  if [[ $1 == fail ]]; then
+    echo "error connecting to api.github.com" >&2
+    exit 1
+  fi
+  if [[ -n $1 ]]; then
+    printf '%s\n' "$1"
+  fi
+  exit 0
+}
+
+tab=$'\t'
+case $* in
+  "issue list --label needs-decision --limit 200 --json number --jq .[].number") answer "$TEST_DECISION_ISSUES" ;;
+  "issue list --label ready --limit 200 --json number,labels,assignees,blockedBy,subIssuesSummary --jq "*)
+    answer "$TEST_READY_ISSUES"
+    ;;
+  "api --paginate repos/{owner}/{repo}/code-scanning/alerts?state=open --jq "*) answer "$TEST_ALERTS" ;;
+  "run list --workflow ci.yml --branch main --event push --limit 1 --json status,conclusion --jq "*)
+    answer "$TEST_CI_RUN"
+    ;;
+esac
+if [[ $1 == api && $2 == graphql ]]; then
+  issue=""
+  for argument in "$@"; do
+    case $argument in
+      number=*) issue=${argument#number=} ;;
+      query=*"states: MERGED"*) answer "$TEST_MERGED_PULL_REQUESTS" ;;
+    esac
+  done
+  # Without an issue, it's the command that lists the open pull requests.
+  if [[ -z $issue ]]; then
+    answer "$TEST_OPEN_PULL_REQUESTS"
+  fi
+  # The pull requests that close the issue, as the --jq filter in scripts/pull-request-state prints them.
+  case $issue in
+    12) answer "20${tab}OPEN${tab}true${tab}false${tab}true${tab}false" ;;
+    13) answer "21${tab}OPEN${tab}true${tab}true${tab}false${tab}false" ;;
+    14) answer "22${tab}OPEN${tab}true${tab}false${tab}false${tab}false"$'\n'"23${tab}OPEN${tab}true${tab}false${tab}false${tab}false" ;;
+    15) answer "24${tab}OPEN${tab}true${tab}false${tab}false${tab}false" ;;
+    17) answer fail ;;
+  esac
+  exit 0
+fi
+echo "The stand-in for gh doesn't answer: gh $*" >&2
+exit 1
+STAND_IN
+chmod +x "$base/bin/gh"
+
+tab=$'\t'
+# The lines that the --jq filter in scripts/build-run-report prints for a merged pull request:
+# merged_pull_request <number> <when it merged>
+merged_pull_request() {
+  printf '%s\n' "pull-request$tab$1$tab$2"
+}
+# closes <pull request> <issue> <in this repository>
+closes() {
+  printf '%s\n' "closes$tab$1$tab$2$tab$3"
+}
+
+# The lines that the --jq filter in scripts/ready-issues prints for a ready issue, with the labels it has besides ready:
+# ready_issue <number> <assignees> <sub-issues> <closed sub-issues> [<label>...]
+ready_issue() {
+  local number=$1 label
+  printf '%s\n' "issue$tab$number$tab$2$tab$3$tab$4"
+  shift 4
+  for label in ready "$@"; do
+    printf '%s\n' "label$tab$number$tab$label"
+  done
+}
+# blocked_by <issue> <state of the blocking issue> <blocking issue>
+blocked_by() {
+  printf '%s\n' "blocked-by$tab$1$tab$2$tab$3"
+}
+
+# The lines that the --jq filter in scripts/open-pull-requests prints for an open pull request:
+# open_pull_request <number> <from a fork> <author> <in the merge queue> <merge state> [<when auto-merge was turned on>]
+open_pull_request() {
+  printf '%s\n' "pull-request$tab$1$tab$2$tab$3$tab$4$tab$5$tab${6:-}"
+}
+# check_run <pull request> <ID> <name> [<conclusion>]
+check_run() {
+  printf '%s\n' "check$tab$1$tab$2$tab$3$tab${4:-}"
+}
+# removal <pull request> <time> <reason>
+removal() {
+  printf '%s\n' "removal$tab$1$tab$2$tab$3"
+}
+
+# Makes a repository with copies of scripts/build-run-report and the scripts it runs. Sets repo to its folder, record
+# to the file in which scripts/start-build-run records the time that the build run starts, and record_name to the
+# path of that file that git gives: new_repository
+new_repository() {
+  local script
+  repo=$(mktemp -d "$base/repo.XXXXXX")
+  git init --quiet --initial-branch=main "$repo"
+  mkdir "$repo/scripts"
+  for script in build-run-report open-pull-requests required-checks configure-github ready-issues issue-labels \
+    pull-request-state; do
+    cp "scripts/$script" "$repo/scripts/$script"
+  done
+  record_name=$(git -C "$repo" rev-parse --git-path build-run-start)
+  record="$repo/$record_name"
+}
+
+start=2026-05-04T09:00:00Z
+
+# Runs scripts/build-run-report in the repository, and sets status, output and errors, what it printed to standard
+# output and to standard error: run_report [<NAME=value>...]
+# Each NAME=value sets one of the stand-in's TEST_ variables, which are empty otherwise.
+run_report() {
+  status=0
+  output=$(env TEST_MERGED_PULL_REQUESTS="" TEST_OPEN_PULL_REQUESTS="" TEST_DECISION_ISSUES="" TEST_READY_ISSUES="" \
+    TEST_ALERTS="" TEST_CI_RUN="" "$@" PATH="$base/bin:$PATH" "$repo/scripts/build-run-report" 2>"$base/errors") ||
+    status=$?
+  errors=$(<"$base/errors")
+}
+
+# Starts a case, in which each fact that the case doesn't set is none: begin_case <description>
+begin_case() {
+  description=$1
+  case_count=$((case_count + 1))
+  is_case_failed=""
+  printf '%s\n' "$start" >"$record"
+  merged=none
+  decision_issues=none
+  ready_issues=none
+  alerts=none
+  dependabot_pull_requests=none
+  ci_run=none
+}
+
+# Prints an error for the case: report <what's wrong>
+report() {
+  echo "error: $description, $1" >&2
+  if [[ -z $is_case_failed ]]; then
+    failed_cases=$((failed_cases + 1))
+    is_case_failed=yes
+  fi
+}
+
+# Prints a fact under the line that names it, or nothing when the fact is "left out": fact <line> <items>
+fact() {
+  if [[ $2 != "left out" ]]; then
+    printf '%s\n%s\n' "$1" "$2"
+  fi
+}
+
+# Prints the facts that the case sets, as the script must print them: expected_facts
+expected_facts() {
+  fact "Pull requests merged into main since $start, with the issues that each one closed:" "$merged"
+  fact "Open issues with needs-decision:" "$decision_issues"
+  fact "Open ready issues, and what each one waits for:" "$ready_issues"
+  fact "Open code scanning alerts:" "$alerts"
+  fact "Open pull requests of Dependabot's into main:" "$dependabot_pull_requests"
+  fact "The latest run of .github/workflows/ci.yml on main:" "$ci_run"
+}
+
+# Checks the script's exit code, the facts it printed and its errors: expect_result <exit code> [<errors>]
+expect_result() {
+  local expected_output
+  expected_output=$(expected_facts)
+  if [[ $status != "$1" || $output != "$expected_output" || $errors != "${2:-}" ]]; then
+    report "scripts/build-run-report must exit with code $1, print \"$expected_output\" and print the errors \"${2:-}\", but it exited with code $status, printed \"$output\" and printed the errors \"$errors\"."
+  fi
+}
+
+new_repository
+
+begin_case "When every fact has no items"
+run_report
+expect_result 0
+
+begin_case "When pull requests merged before, at and after the time the build run started"
+merged_pull_requests=$(
+  merged_pull_request 40 2026-05-04T08:59:59Z
+  closes 40 10 true
+  merged_pull_request 41 2026-05-04T09:00:00Z
+  closes 41 11 true
+  merged_pull_request 42 2026-05-04T10:30:00Z
+  closes 42 12 true
+  closes 42 13 true
+  merged_pull_request 43 2026-05-05T08:00:00Z
+  merged_pull_request 44 2026-05-05T09:00:00Z
+  closes 44 14 false
+)
+run_report TEST_MERGED_PULL_REQUESTS="$merged_pull_requests"
+merged="#41: issue #11
+#42: issues #12 and #13
+#43: no issue
+#44: no issue"
+expect_result 0
+
+begin_case "When issues have needs-decision"
+run_report TEST_DECISION_ISSUES="31"$'\n'"27"
+decision_issues="#27
+#31"
+expect_result 0
+
+begin_case "When ready issues have status labels, type labels, assignees, sub-issues and blocking issues"
+ready_issue_facts=$(
+  ready_issue 30 0 0 0 feature needs-decision
+  ready_issue 31 0 0 0 feature needs-triage needs-breakdown
+  ready_issue 32 0 0 0
+  ready_issue 33 0 0 0 bug feature
+  ready_issue 34 1 0 0 feature
+  ready_issue 35 0 3 2 feature
+  ready_issue 36 0 3 3 feature
+  ready_issue 37 0 0 0 feature
+  blocked_by 37 OPEN 10
+  blocked_by 37 CLOSED 11
+  blocked_by 37 OPEN 12
+  ready_issue 38 2 2 0 research needs-decision
+  blocked_by 38 OPEN 10
+  ready_issue 39 0 0 0 maintenance
+)
+run_report TEST_READY_ISSUES="$ready_issue_facts"
+ready_issues="#30: it has needs-decision.
+#31: it has needs-triage and it has needs-breakdown.
+#32: it has no type label.
+#33: it has 2 type labels.
+#34: it's assigned.
+#35: it has open sub-issues.
+#36: nothing.
+#37: issue #10 blocks it and issue #12 blocks it.
+#38: it has needs-decision, it's assigned, it has open sub-issues and issue #10 blocks it.
+#39: nothing."
+expect_result 0
+
+begin_case "When scripts/pull-request-state prints merging, stopped, several, left behind or none for ready issues"
+ready_issue_facts=$(
+  ready_issue 16 0 0 0 feature
+  ready_issue 15 0 0 0 feature
+  ready_issue 14 0 0 0 feature
+  ready_issue 13 1 0 0 feature
+  ready_issue 12 1 0 0 feature
+)
+run_report TEST_READY_ISSUES="$ready_issue_facts"
+ready_issues="#12: it's assigned and scripts/pull-request-state prints merging.
+#13: it's assigned and scripts/pull-request-state prints stopped.
+#14: scripts/pull-request-state prints several.
+#15: nothing.
+#16: nothing."
+expect_result 0
+
+begin_case "When code scanning alerts are open"
+run_report TEST_ALERTS="7${tab}high"$'\n'"9${tab}warning"
+alerts="#7: high
+#9: warning"
+expect_result 0
+
+begin_case "When pull requests of Dependabot's are open with auto-merge, in the queue, DIRTY, with failed checks or removed"
+open_pull_requests=$(
+  open_pull_request 40 false app/dependabot false CLEAN 2026-05-04T09:10:00Z
+  open_pull_request 41 false app/dependabot false BLOCKED
+  check_run 41 101 check SUCCESS
+  check_run 41 102 title
+  open_pull_request 42 false app/dependabot true CLEAN
+  open_pull_request 43 false app/dependabot false DIRTY
+  check_run 43 103 check CANCELLED
+  check_run 43 104 title TIMED_OUT
+  removal 43 2026-05-04T09:20:00Z merge_conflict
+  open_pull_request 44 false app/dependabot false BLOCKED 2026-05-04T09:30:00Z
+  check_run 44 105 check FAILURE
+  check_run 44 106 check SUCCESS
+  check_run 44 107 title FAILURE
+  removal 44 2026-05-04T09:25:00Z ci_failure
+  open_pull_request 45 false dependabot false CLEAN
+  open_pull_request 46 false octocat false DIRTY 2026-05-04T09:10:00Z
+)
+run_report TEST_OPEN_PULL_REQUESTS="$open_pull_requests"
+dependabot_pull_requests="#40: auto-merge is on.
+#41: auto-merge is off.
+#42: auto-merge is off and it's in the merge queue.
+#43: auto-merge is off, it's DIRTY, the checks \"check\" and \"title\" failed and the merge queue removed it.
+#44: auto-merge is on, the check \"title\" failed and the merge queue removed it."
+expect_result 0
+
+for run in "completed${tab}success passed" "completed${tab}failure failed" "completed${tab}cancelled failed" \
+  "completed${tab}timed_out failed" "completed${tab}skipped failed" "in_progress${tab} still running" \
+  "queued${tab} still running"; do
+  begin_case "When the latest CI run on main has the status and conclusion \"${run%% *}\""
+  run_report TEST_CI_RUN="${run%% *}"
+  ci_run=${run#* }
+  expect_result 0
+done
+
+begin_case "When git can't find the git folder of the checkout"
+mv "$repo/.git" "$base/git-folder"
+git_error=$(git -C "$repo" rev-parse --git-path build-run-start 2>&1 || true)
+run_report TEST_DECISION_ISSUES=27
+mv "$base/git-folder" "$repo/.git"
+merged="left out"
+decision_issues="#27"
+expect_result 1 "error: can't list the pull requests merged since the build run started, because git can't find the git folder in which scripts/start-build-run records the time: $git_error"
+
+begin_case "When the git folder has no record of the time the build run started"
+rm "$record"
+run_report TEST_DECISION_ISSUES=27 TEST_MERGED_PULL_REQUESTS="$(merged_pull_request 41 2026-05-04T09:00:00Z)"
+merged="left out"
+decision_issues="#27"
+expect_result 1 "error: can't list the pull requests merged since the build run started, because $record_name doesn't hold a time such as 2026-05-04T09:30:00Z. scripts/start-build-run records the time there when a build run starts in this checkout."
+
+begin_case "When the record of the time the build run started holds something else"
+printf '%s\n' "2026-05-04 09:00" >"$record"
+run_report TEST_DECISION_ISSUES=27
+merged="left out"
+decision_issues="#27"
+expect_result 1 "error: can't list the pull requests merged since the build run started, because $record_name doesn't hold a time such as 2026-05-04T09:30:00Z. scripts/start-build-run records the time there when a build run starts in this checkout."
+
+begin_case "When gh can't list the merged pull requests"
+run_report TEST_MERGED_PULL_REQUESTS=fail TEST_DECISION_ISSUES=27
+merged="left out"
+decision_issues="#27"
+expect_result 1 "error: can't list the pull requests merged into main, because gh failed: error connecting to api.github.com"
+
+begin_case "When gh can't list the issues with needs-decision"
+run_report TEST_DECISION_ISSUES=fail TEST_ALERTS="7${tab}high"
+decision_issues="left out"
+alerts="#7: high"
+expect_result 1 "error: can't list the issues with needs-decision, because gh failed: error connecting to api.github.com"
+
+begin_case "When gh can't list the ready issues"
+run_report TEST_READY_ISSUES=fail TEST_DECISION_ISSUES=27
+ready_issues="left out"
+decision_issues="#27"
+expect_result 1 "error: can't list the ready issues, because gh failed: error connecting to api.github.com"
+
+begin_case "When scripts/pull-request-state fails for a ready issue"
+run_report TEST_READY_ISSUES="$(ready_issue 15 0 0 0 feature; ready_issue 17 0 0 0 feature)" TEST_DECISION_ISSUES=27
+ready_issues="left out"
+decision_issues="#27"
+expect_result 1 "error: can't list the pull requests of issue #17, because gh failed: error connecting to api.github.com
+error: can't say what the open ready issues wait for, because of the error above."
+
+begin_case "When gh can't list the open code scanning alerts"
+run_report TEST_ALERTS=fail TEST_DECISION_ISSUES=27
+alerts="left out"
+decision_issues="#27"
+expect_result 1 "error: can't list the open code scanning alerts, because gh failed: error connecting to api.github.com"
+
+begin_case "When gh can't list the open pull requests"
+run_report TEST_OPEN_PULL_REQUESTS=fail TEST_DECISION_ISSUES=27
+dependabot_pull_requests="left out"
+decision_issues="#27"
+expect_result 1 "error: can't list the open pull requests, because gh failed: error connecting to api.github.com"
+
+begin_case "When gh can't read the latest CI run on main"
+run_report TEST_CI_RUN=fail TEST_DECISION_ISSUES=27
+ci_run="left out"
+decision_issues="#27"
+expect_result 1 "error: can't read the latest run of .github/workflows/ci.yml on main, because gh failed: error connecting to api.github.com"
+
+begin_case "When gh can't get two of the facts"
+run_report TEST_ALERTS=fail TEST_CI_RUN=fail TEST_DECISION_ISSUES=27
+alerts="left out"
+ci_run="left out"
+decision_issues="#27"
+expect_result 1 "error: can't list the open code scanning alerts, because gh failed: error connecting to api.github.com
+error: can't read the latest run of .github/workflows/ci.yml on main, because gh failed: error connecting to api.github.com"
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/build-run-report.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/build-run-report.test passed. Cases: $case_count."

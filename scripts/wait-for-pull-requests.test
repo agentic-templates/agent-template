@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Tests scripts/wait-for-pull-requests with a stand-in for gh that gives a new answer each time the script reads.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/testing-required-checks.bash
+source scripts/testing-required-checks.bash
+
+case_count=0
+failed_cases=0
+
+base=$(mktemp -d)
+trap 'rm -rf "$base"' EXIT
+mkdir -p "$base/bin" "$base/answers"
+
+# A stand-in for gh, first on the PATH. It answers the command in scripts/open-pull-requests with the files
+# TEST_ANSWERS/1, 2 and so on, the next one each time, as that script's --jq filter prints them. It fails when the file
+# holds fail, as gh does without the network.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+if [[ $1 != api || $2 != graphql ]]; then
+  echo "The stand-in for gh doesn't answer: gh $*" >&2
+  exit 1
+fi
+count=$(($(cat "$TEST_ANSWERS/count" 2>/dev/null || echo 0) + 1))
+echo "$count" >"$TEST_ANSWERS/count"
+answer=$(cat "$TEST_ANSWERS/$count")
+if [[ $answer == fail ]]; then
+  echo "error connecting to api.github.com" >&2
+  exit 1
+fi
+if [[ -n $answer ]]; then
+  printf '%s\n' "$answer"
+fi
+STAND_IN
+chmod +x "$base/bin/gh"
+
+tab=$'\t'
+auto_merge=2026-05-04T09:00:00Z
+# The lines that the --jq filter in scripts/open-pull-requests prints for an open pull request, with its checks passed:
+# pull_request <number> <from a fork> <author> <in the merge queue> <merge state> [<when auto-merge was turned on>]
+pull_request() {
+  printf '%s\n' "pull-request$tab$1$tab$2$tab$3$tab$4$tab$5$tab${6:-}"
+  printf '%s\n' "check$tab$1${tab}101${tab}check${tab}SUCCESS" "check$tab$1${tab}102${tab}title${tab}SUCCESS"
+  project_check_runs "$1"
+}
+
+# Runs the script with the answers given, one to an argument, and sets status and output: run_wait <answer>...
+run_wait() {
+  local index=0 answer
+  rm -f "$base/answers/"*
+  for answer in "$@"; do
+    index=$((index + 1))
+    printf '%s\n' "$answer" >"$base/answers/$index"
+  done
+  status=0
+  output=$(TEST_ANSWERS="$base/answers" WAIT_SECONDS=0 WAIT_LIMIT_SECONDS=0 PATH="$base/bin:$PATH" \
+    scripts/wait-for-pull-requests 2>&1) || status=$?
+}
+
+expect_result() {
+  local description=$1 expected_status=$2 expected_output=$3
+  case_count=$((case_count + 1))
+  if [[ $status != "$expected_status" || $output != "$expected_output" ]]; then
+    echo "error: $description, scripts/wait-for-pull-requests must exit with code $expected_status and print \"$expected_output\", but it exited with code $status and printed \"$output\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+merging=$(pull_request 12 false octocat false BLOCKED $auto_merge)
+queued=$(pull_request 13 false octocat true BLOCKED)
+
+run_wait "$(pull_request 12 false octocat false CLEAN)"$'\n'"$(pull_request 50 false app/dependabot false BLOCKED $auto_merge)"$'\n'"$(pull_request 51 true octocat false BLOCKED $auto_merge)"
+expect_result "When no pull request has auto-merge on, apart from Dependabot's and a fork's" 0 "Nothing to wait for."
+
+run_wait "$merging"$'\n'"$queued" "$queued"
+expect_result "When a pull request merges" 0 "Pull request 12 merged or closed."
+
+run_wait "$merging" "$(pull_request 12 false octocat false DIRTY $auto_merge)"
+expect_result "When a pull request conflicts with main" 0 "Pull request 12 needs a fix."
+
+run_wait "$merging" "$(pull_request 12 false octocat false BLOCKED $auto_merge | sed 's/101\tcheck\tSUCCESS/101\tcheck\tFAILURE/')"
+expect_result "When a check fails" 0 "Pull request 12 needs a fix."
+
+run_wait "$queued" "$(pull_request 13 false octocat false BLOCKED)"
+expect_result "When a pull request leaves the merge queue" 0 "Pull request 13 needs a fix."
+
+run_wait "$merging"$'\n'"$queued" "$merging"$'\n'"$queued"
+expect_result "When nothing changes before the time is up" 0 "Still waiting for 12 13."
+
+run_wait fail
+expect_result "When gh fails" 1 "error: can't list the open pull requests, because gh failed: error connecting to api.github.com"
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/wait-for-pull-requests.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/wait-for-pull-requests.test passed. Cases: $case_count."

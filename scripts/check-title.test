@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Tests scripts/check-title on titles that follow the format of a commit subject, and on titles that don't.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+case_count=0
+failed_cases=0
+
+# Runs the script on a title, and sets status and output: run_check <title>
+run_check() {
+  status=0
+  output=$(TITLE=$1 scripts/check-title 2>&1) || status=$?
+}
+
+# Checks that the script passes a title: expect_pass <title>
+expect_pass() {
+  case_count=$((case_count + 1))
+  run_check "$1"
+  if [[ $status != 0 || -n $output ]]; then
+    echo "error: with the title \"$1\", scripts/check-title must pass and print nothing, but it exited with code $status and printed: $output" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks that the script fails on a title, with the error that names it: expect_fail <title>
+expect_fail() {
+  local expected="::error::The title \"$1\" doesn't follow the format \"<type>: <what changed>\". Edit the title to match. The types are feat, fix, docs, test, refactor, perf, build, ci, revert, chore."
+  case_count=$((case_count + 1))
+  run_check "$1"
+  if [[ $status != 1 || $output != "$expected" ]]; then
+    echo "error: with the title \"$1\", scripts/check-title must exit with code 1 and print: $expected" >&2
+    echo "It exited with code $status and printed: $output" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+for type in feat fix docs test refactor perf build ci revert chore; do
+  expect_pass "$type: skip the expenses that were already imported"
+done
+expect_pass "fix(cli): keep the total when the file is empty"
+expect_pass "feat!: rename the import command"
+expect_pass "build(deps)!: bump the parser to 2.0"
+
+expect_fail ""
+expect_fail "skip the expenses that were already imported"
+expect_fail "feature: skip the expenses that were already imported"
+expect_fail "Feat: skip the expenses that were already imported"
+expect_fail "feat:skip the expenses that were already imported"
+expect_fail "feat:  skip the expenses that were already imported"
+expect_fail "feat: "
+expect_fail "feat(): skip the expenses that were already imported"
+expect_fail " feat: skip the expenses that were already imported"
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/check-title.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/check-title.test passed. Cases: $case_count."

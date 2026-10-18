@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Takes the next ready issue that a build run can start: scripts/take-next-issue [<issue to skip>...]
+# It considers each ready issue that has exactly one type label, no status label, no assignee and no open sub-issues,
+# whose blocking issues are all closed, and for which scripts/pull-request-state prints none or left behind. It skips
+# the issues it's given. It assigns the lowest-numbered of them to the current account, and then checks that the issue
+# still has ready, because a maintainer may have asked another agent to work on it since the script listed the ready
+# issues. If it doesn't, the script removes the assignment and takes the next one.
+# It prints one line: the issue's number and the first of these kinds that fits it, or none when no issue fits.
+# - research: it has the research label.
+# - parent: it has sub-issues, which are all closed.
+# - left behind <pull request>: scripts/pull-request-state prints left behind for it.
+# - other: none of the above.
+# It stops with an error when gh fails. It asks gh about the repository of this checkout, or the one in GH_REPO.
+# Step 3 of "Build the ready issues" in docs/building.md runs it.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/ready-issues
+source scripts/ready-issues
+
+# Prints an error and stops: stop <message>
+stop() {
+  echo "error: $1" >&2
+  exit 1
+}
+
+for skipped_issue in "$@"; do
+  if [[ ! $skipped_issue =~ ^[1-9][0-9]*$ ]]; then
+    stop "scripts/take-next-issue takes the numbers of the issues to skip, such as 12, and it got \"$skipped_issue\"."
+  fi
+done
+
+# Prints, lowest first, the numbers of the issues that a build run can start, judged by everything but their pull
+# requests, leaving out the issues to skip: issues_to_consider [<issue to skip>...]
+issues_to_consider() {
+  local issue
+  while IFS= read -r issue; do
+    if [[ -n $issue ]] && ! is_one_of "$issue" "$@" && [[ -z $(reasons_not_to_start "$issue") ]]; then
+      printf '%s\n' "$issue"
+    fi
+  done <<<"$(ready_issue_numbers)"
+}
+
+# Prints an issue's kind: kind_of <issue> <what scripts/pull-request-state prints for it>
+kind_of() {
+  local issue=$1 pull_request_state=$2 labels sub_issues
+  labels=$(ready_issue_facts label "$issue")
+  if grep -qxF research <<<"$labels"; then
+    echo research
+    return 0
+  fi
+  sub_issues=$(ready_issue_facts issue "$issue" | cut -f 2)
+  if ((sub_issues > 0)); then
+    echo parent
+  elif [[ $pull_request_state == "left behind "* ]]; then
+    printf '%s\n' "$pull_request_state"
+  else
+    echo other
+  fi
+}
+
+# read_ready_issues prints its own error.
+read_ready_issues || exit 1
+
+for issue in $(issues_to_consider "$@"); do
+  # scripts/pull-request-state prints its own error.
+  if ! pull_request_state=$(scripts/pull-request-state "$issue"); then
+    exit 1
+  fi
+  if ! can_start_with_pull_request_state "$pull_request_state"; then
+    continue
+  fi
+  if ! answer=$(gh issue edit "$issue" --add-assignee @me 2>&1); then
+    stop "can't assign issue #$issue to you, because gh failed: $answer"
+  fi
+  if ! labels=$(gh issue view "$issue" --json labels --jq '.labels[].name' 2>&1); then
+    stop "assigned issue #$issue to you, but can't check that it still has ready, because gh failed: $labels. Remove your assignment with gh issue edit $issue --remove-assignee @me, and run scripts/take-next-issue again."
+  fi
+  if ! grep -qxF ready <<<"$labels"; then
+    if ! answer=$(gh issue edit "$issue" --remove-assignee @me 2>&1); then
+      stop "assigned issue #$issue to you, and it no longer has ready, but can't remove your assignment, because gh failed: $answer. Remove it with gh issue edit $issue --remove-assignee @me, and run scripts/take-next-issue again."
+    fi
+    continue
+  fi
+  echo "$issue $(kind_of "$issue" "$pull_request_state")"
+  exit 0
+done
+echo none

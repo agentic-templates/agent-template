@@ -1,0 +1,32 @@
+name: Report a bug
+description: Something doesn't work the way the docs say it should.
+labels: [bug, needs-triage]
+body:
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: What you did and what you saw. Paste any error message as text.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version and system
+      placeholder: v0.2.0 on macOS 26

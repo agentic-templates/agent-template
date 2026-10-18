@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Fails when GitHub's rules for main no longer require a check that scripts/configure-github requires there, such as
+# after someone removed it while debugging. A build run merges whatever those rules let through.
+# It asks gh about the repository of this checkout, or the one in GH_REPO. It exits with code 1 when a check is
+# missing, and with code 2 when it can't tell, such as when gh fails. A hook, a weekly workflow and
+# scripts/start-build-run run it.
+set -eEuo pipefail
+# Any other failure means that the script can't tell.
+trap 'exit 2' ERR
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/required-checks
+source scripts/required-checks
+
+# Prints the jobs as part of a sentence, such as "the check job" or "the check and title jobs": jobs_in_words <job>...
+jobs_in_words() {
+  local words="the $1"
+  shift
+  if (($# == 0)); then
+    echo "$words job"
+    return 0
+  fi
+  while (($# > 1)); do
+    words+=", $1"
+    shift
+  done
+  echo "$words and $1 jobs"
+}
+
+if ! required_by_rules=$(gh api "repos/{owner}/{repo}/rules/branches/main" \
+  --jq '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context' 2>&1); then
+  echo "error: can't read the rules for main, because gh failed: $required_by_rules" >&2
+  exit 2
+fi
+
+missing=()
+while IFS= read -r check; do
+  if ! grep -F -x -q -- "$check" <<<"$required_by_rules"; then
+    missing+=("$check")
+  fi
+done < <(required_checks)
+if ((${#missing[@]} == 0)); then
+  exit 0
+fi
+
+pronoun=them
+if ((${#missing[@]} == 1)); then
+  pronoun=it
+fi
+echo "error: main no longer requires $(jobs_in_words "${missing[@]}"), so a pull request can merge without passing $pronoun. A maintainer with admin access restores $pronoun by running scripts/configure-github." >&2
+exit 1

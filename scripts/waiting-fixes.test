@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+# Tests scripts/waiting-fixes on a copy of it in a clone whose origin and private forks are repositories in a temporary
+# folder, with a stand-in for gh.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+case_count=0
+failed_cases=0
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+origin=$base/origin.git
+work=$base/work
+clone=$base/clone
+forks=$base/github/octo-org
+# git looks for no repository above the temporary folder, reads none of the person's settings, and commits as a
+# stand-in person. It fetches each https://github.com/<owner>/<repository> from the folder github in the temporary
+# folder, which holds the private forks.
+export GIT_CEILING_DIRECTORIES=$base
+export GIT_CONFIG_GLOBAL=$base/gitconfig GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com
+export GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
+git config --global init.defaultBranch main
+git config --global url."$base/github/".insteadOf https://github.com/
+
+# A stand-in for gh, first on the PATH. It answers that the repository is octo-org/expenses, that the person has
+# TEST_PERMISSION access, and lists the advisories in the file TEST_ADVISORIES, as the script's --jq filter prints
+# them. It fails the command that starts with TEST_FAILING_CALL, as gh does without the network, and every command it
+# doesn't know.
+mkdir "$base/bin"
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+if [[ -n $TEST_FAILING_CALL && $* == "$TEST_FAILING_CALL"* ]]; then
+  echo "error connecting to api.github.com" >&2
+  exit 1
+fi
+case "$*" in
+  "repo view --json nameWithOwner --jq .nameWithOwner") echo octo-org/expenses ;;
+  "repo view --json viewerPermission --jq .viewerPermission") echo "$TEST_PERMISSION" ;;
+  "api --paginate repos/{owner}/{repo}/security-advisories --jq "*) cat "$TEST_ADVISORIES" ;;
+  *)
+    echo "The stand-in for gh doesn't answer: gh $*" >&2
+    exit 1
+    ;;
+esac
+STAND_IN
+chmod +x "$base/bin/gh"
+
+tab=$'\t'
+
+# Makes a new origin whose main holds expenses.txt, with ten lines, and tags that commit v1.0.0. Makes a work clone to
+# commit in, and the clone that the copy of the script runs in. The advisories are empty.
+new_repositories() {
+  rm -rf "$origin" "$work" "$clone" "$base/github"
+  mkdir -p "$forks"
+  git init --quiet --bare "$origin"
+  git init --quiet "$work"
+  git -C "$work" remote add origin "$origin"
+  printf 'line %s\n' 1 2 3 4 5 6 7 8 9 10 >"$work/expenses.txt"
+  git -C "$work" add expenses.txt
+  git -C "$work" commit --quiet -m "chore: start the project"
+  git -C "$work" tag v1.0.0
+  git -C "$work" push --quiet origin main v1.0.0
+  git clone --quiet "$origin" "$clone"
+  mkdir "$clone/scripts"
+  cp -p scripts/waiting-fixes scripts/admin-access "$clone/scripts/"
+  : >"$base/advisories"
+}
+
+# Makes a private fork in the folder that git fetches https://github.com/octo-org/<name> from, with a copy of origin's
+# branches, as GitHub makes it: new_fork <name>
+new_fork() {
+  git clone --quiet --bare "$origin" "$forks/$1"
+}
+
+# Commits a change to one line of expenses.txt in the work clone, on a branch that starts at a commit, or on the
+# branch that's checked out: change_line <line> <text> [<branch> <commit>]
+change_line() {
+  if (($# == 4)); then
+    git -C "$work" checkout --quiet -b "$3" "$4"
+  fi
+  awk -v line="$1" -v text="$2" 'NR == line { $0 = text } { print }' "$work/expenses.txt" >"$base/expenses.txt"
+  mv "$base/expenses.txt" "$work/expenses.txt"
+  git -C "$work" commit --quiet -am "fix: change line $1"
+}
+
+# Adds an advisory to the list, as the script's --jq filter prints it: add_advisory <GHSA ID> <state> [<fork>]
+add_advisory() {
+  printf '%s\n' "$1$tab$2$tab${3:-}" >>"$base/advisories"
+}
+
+# Runs the copy of the script, and sets status and output, which holds what it printed and its errors:
+# run_waiting_fixes [<argument>...]
+run_waiting_fixes() {
+  status=0
+  output=$(TEST_PERMISSION=${permission:-ADMIN} TEST_FAILING_CALL=${failing_call:-} TEST_ADVISORIES=$base/advisories \
+    PATH=$base/bin:$PATH "$clone/scripts/waiting-fixes" "$@" 2>&1) || status=$?
+}
+
+# Checks the script's exit code and output: expect_result <description> <exit code> <output>
+expect_result() {
+  local description=$1 expected_status=$2 expected_output=$3
+  case_count=$((case_count + 1))
+  if [[ $status != "$expected_status" || $output != "$expected_output" ]]; then
+    echo "error: $description, scripts/waiting-fixes must exit with code $expected_status and print \"$expected_output\", but it exited with code $status and printed \"$output\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks the script's exit code and output, where git's error stands between two parts of the output, because its
+# wording differs from one version of git to the next:
+# expect_result_around_error <description> <exit code> <output before git's error> <output after git's error>
+expect_result_around_error() {
+  local description=$1 expected_status=$2 before=$3 after=$4
+  case_count=$((case_count + 1))
+  if [[ $status != "$expected_status" || $output != "$before"?*"$after" ]]; then
+    echo "error: $description, scripts/waiting-fixes must exit with code $expected_status and print \"$before\", git's error and \"$after\", but it exited with code $status and printed \"$output\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+fork_1=expenses-ghsa-1111-1111-1111
+refs_1=refs/private-fork/GHSA-1111-1111-1111
+fork_2=expenses-ghsa-2222-2222-2222
+refs_2=refs/private-fork/GHSA-2222-2222-2222
+
+new_repositories
+run_waiting_fixes
+expect_result "When no advisory exists" 0 ""
+
+add_advisory GHSA-3333-3333-3333 published "octo-org/$fork_1"
+add_advisory GHSA-4444-4444-4444 closed
+add_advisory GHSA-5555-5555-5555 withdrawn
+run_waiting_fixes
+expect_result "When the advisories are published, closed or withdrawn" 0 ""
+
+# The fork holds a copy of main, a fix of line 2, and a fix of line 5 that main then changes too. Main gets its
+# change after the clone, so only a fetch of origin brings it in.
+new_repositories
+new_fork "$fork_1"
+change_line 2 "line 2 fixed" fix-totals v1.0.0
+git -C "$work" push --quiet "$forks/$fork_1" fix-totals
+change_line 5 "line 5 fixed" clash v1.0.0
+git -C "$work" push --quiet "$forks/$fork_1" clash
+git -C "$work" checkout --quiet main
+change_line 5 "line 5 changed on main"
+git -C "$work" push --quiet origin main
+add_advisory GHSA-1111-1111-1111 triage "octo-org/$fork_1"
+run_waiting_fixes
+expect_result "When a fork holds a copy of main, a fix and a fix that conflicts with main" 0 \
+  "GHSA-1111-1111-1111 (triage): private fork octo-org/$fork_1
+$refs_1/clash: can't tell, because merging it into origin/main conflicts
+$refs_1/fix-totals: holds a fix that origin/main doesn't have
+$refs_1/main: nothing waiting"
+
+# Main gets the fix of line 2 as a squash merge, which doesn't hold the fork's commits.
+change_line 2 "line 2 fixed"
+git -C "$work" push --quiet origin main
+run_waiting_fixes
+expect_result "When main has the fix as a squash merge" 0 \
+  "GHSA-1111-1111-1111 (triage): private fork octo-org/$fork_1
+$refs_1/clash: can't tell, because merging it into origin/main conflicts
+$refs_1/fix-totals: nothing waiting
+$refs_1/main: nothing waiting"
+run_waiting_fixes v1.0.0
+expect_result "When main has the fix, compared with a release before it" 0 \
+  "GHSA-1111-1111-1111 (triage): private fork octo-org/$fork_1
+$refs_1/clash: holds a fix that v1.0.0 doesn't have
+$refs_1/fix-totals: holds a fix that v1.0.0 doesn't have
+$refs_1/main: nothing waiting"
+
+git -C "$forks/$fork_1" branch --quiet -D clash
+run_waiting_fixes
+expect_result "When a branch was deleted from the fork since the last run" 0 \
+  "GHSA-1111-1111-1111 (triage): private fork octo-org/$fork_1
+$refs_1/fix-totals: nothing waiting
+$refs_1/main: nothing waiting"
+
+# A second fork has a branch with the same name as the first fork's, and git can't fetch a third fork.
+new_fork "$fork_2"
+change_line 7 "line 7 fixed" fix-totals-2 main
+git -C "$work" push --quiet "$forks/$fork_2" fix-totals-2:fix-totals
+: >"$base/advisories"
+add_advisory GHSA-6666-6666-6666 draft
+add_advisory GHSA-3333-3333-3333 published "octo-org/$fork_2"
+add_advisory GHSA-7777-7777-7777 draft octo-org/missing
+add_advisory GHSA-1111-1111-1111 triage "octo-org/$fork_1"
+add_advisory GHSA-2222-2222-2222 draft "octo-org/$fork_2"
+run_waiting_fixes
+expect_result_around_error "When an advisory has no fork, git can't fetch a fork, and two forks have a branch with the same name" 0 \
+  "GHSA-6666-6666-6666 (draft): no private fork
+GHSA-7777-7777-7777 (draft): private fork octo-org/missing: can't tell, because git can't fetch it: " \
+  "
+GHSA-1111-1111-1111 (triage): private fork octo-org/$fork_1
+$refs_1/fix-totals: nothing waiting
+$refs_1/main: nothing waiting
+GHSA-2222-2222-2222 (draft): private fork octo-org/$fork_2
+$refs_2/fix-totals: holds a fix that origin/main doesn't have
+$refs_2/main: nothing waiting"
+
+# A branch that shares no history with main
+git -C "$work" checkout --quiet --orphan unrelated
+git -C "$work" commit --quiet -m "chore: start another project"
+git -C "$work" push --quiet "$forks/$fork_2" unrelated
+: >"$base/advisories"
+add_advisory GHSA-2222-2222-2222 draft "octo-org/$fork_2"
+run_waiting_fixes
+expect_result_around_error "When git can't merge a branch" 1 \
+  "GHSA-2222-2222-2222 (draft): private fork octo-org/$fork_2
+$refs_2/fix-totals: holds a fix that origin/main doesn't have
+$refs_2/main: nothing waiting
+" \
+  "
+error: git can't merge $refs_2/unrelated into origin/main, and its error is above."
+
+new_repositories
+run_waiting_fixes v2.0.0
+expect_result "With a base that the clone doesn't have" 1 \
+  "error: this clone has no commit v2.0.0, even after git fetch origin. Pass a commit or a tag that origin has, such as the latest release's tag."
+run_waiting_fixes v1.0.0 origin/main
+expect_result "With two arguments" 1 \
+  "error: scripts/waiting-fixes takes at most one argument, the commit or tag to compare each fork's branches with, and it got 2. For example: scripts/waiting-fixes v1.2.3"
+
+permission=WRITE
+run_waiting_fixes
+expect_result "Without admin access" 1 \
+  "error: listing the security advisories of octo-org/expenses needs admin access, and you have WRITE access. Ask a maintainer with admin access to run this script."
+permission=ADMIN
+
+failing_call="repo view --json nameWithOwner"
+run_waiting_fixes
+expect_result "When gh can't read the repository's name" 1 \
+  "error: can't read the repository's name, because gh failed: error connecting to api.github.com"
+failing_call="repo view --json viewerPermission"
+run_waiting_fixes
+expect_result "When gh can't read the access" 1 \
+  "error: can't read your access to octo-org/expenses, because gh failed: error connecting to api.github.com"
+failing_call="api --paginate repos/{owner}/{repo}/security-advisories"
+run_waiting_fixes
+expect_result "When gh can't list the advisories" 1 \
+  "error: can't list the security advisories, because gh failed: error connecting to api.github.com"
+failing_call=""
+
+git -C "$clone" remote set-url origin "$base/missing.git"
+run_waiting_fixes
+expect_result_around_error "When git can't fetch origin" 1 "error: can't fetch origin, because git failed: " ""
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/waiting-fixes.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/waiting-fixes.test passed. Cases: $case_count."

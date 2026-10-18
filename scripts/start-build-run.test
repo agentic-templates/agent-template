@@ -1,0 +1,316 @@
+#!/usr/bin/env bash
+# Tests scripts/start-build-run on a copy of it and the scripts it runs, in a repository that the test makes, with a
+# stand-in for gh.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/testing-required-checks.bash
+source scripts/testing-required-checks.bash
+unrequired_check=$(fixture_check_name lint)
+
+case_count=0
+failed_cases=0
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+# git looks for no repository above the temporary folder, reads none of the person's settings,
+# and commits as a stand-in person.
+export GIT_CEILING_DIRECTORIES=$base
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com
+export GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
+mkdir "$base/bin"
+
+# A stand-in for gh, first on the PATH. It answers only the commands that the scripts must run. With fail in place of
+# an answer, it fails, as gh does without the network.
+# - It lists the ready issues assigned to the current account in TEST_ASSIGNED_ISSUES, and all the ready issues in
+#   TEST_READY_ISSUES.
+# - For scripts/pull-request-state, it gives issue 12 a pull request with auto-merge on, 13 a draft, 14 one that's
+#   neither, 15 none and 16 two that are neither. It fails for issue 17.
+# - It answers the command in scripts/check-main-rules with the checks in TEST_MAIN_RULES, one to a line, and the
+#   command that lists the open pull requests with TEST_PULL_REQUESTS, as the --jq filter in scripts/open-pull-requests
+#   prints them.
+# - It lists each issue's branches from the lines of TEST_ISSUE_BRANCHES, which hold an issue and a branch, and says
+#   that each branch has an open pull request, so that scripts/clear-worktrees pushes nothing.
+# - It writes each gh issue edit and gh pr merge command to TEST_GH_CALLS, one to a line, and fails the one that
+#   matches TEST_FAILING_CALL.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+# Prints an answer, or fails as gh does without the network: answer <answer, or fail>
+answer() {
+  if [[ $1 == fail ]]; then
+    echo "error connecting to api.github.com" >&2
+    exit 1
+  fi
+  for line in $1; do
+    echo "$line"
+  done
+  exit 0
+}
+
+tab=$'\t'
+case $* in
+  "issue list --label ready --assignee @me --limit 200 --json number --jq .[].number") answer "$TEST_ASSIGNED_ISSUES" ;;
+  "issue list --label ready --limit 200 --json number --jq .[].number") answer "$TEST_READY_ISSUES" ;;
+  "api repos/{owner}/{repo}/rules/branches/main --jq "*)
+    if [[ $TEST_MAIN_RULES == fail ]]; then
+      answer fail
+    fi
+    printf '%s\n' "$TEST_PROJECT_CHECKS"
+    answer "$TEST_MAIN_RULES"
+    ;;
+  "issue edit "*" --remove-assignee @me" | "pr merge "*)
+    echo "$*" >>"$TEST_GH_CALLS"
+    if [[ $* == "$TEST_FAILING_CALL" ]]; then
+      echo "HTTP 502: Bad Gateway" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  "pr list --head "*" --state open --json number --jq length") answer 1 ;;
+esac
+if [[ $1 == issue && $2 == develop && $3 == --list && $# == 4 ]]; then
+  while read -r issue branch; do
+    if [[ $issue == "$4" ]]; then
+      printf '%s\thttps://github.com/owner/repo/tree/%s\n' "$branch" "$branch"
+    fi
+  done <<<"$TEST_ISSUE_BRANCHES"
+  exit 0
+fi
+if [[ $1 == api && $2 == graphql ]]; then
+  issue=""
+  for argument in "$@"; do
+    if [[ $argument == number=* ]]; then
+      issue=${argument#number=}
+    fi
+  done
+  # Without an issue, it's the command that lists the open pull requests.
+  if [[ -z $issue ]]; then
+    if [[ $TEST_PULL_REQUESTS == fail ]]; then
+      answer fail
+    fi
+    if [[ -n $TEST_PULL_REQUESTS ]]; then
+      printf '%s\n' "$TEST_PULL_REQUESTS"
+    fi
+    exit 0
+  fi
+  # The pull requests that close the issue, as the --jq filter in scripts/pull-request-state prints them.
+  case $issue in
+    12) echo "20${tab}OPEN${tab}true${tab}false${tab}true${tab}false" ;;
+    13) echo "21${tab}OPEN${tab}true${tab}true${tab}false${tab}false" ;;
+    14) echo "22${tab}OPEN${tab}true${tab}false${tab}false${tab}false" ;;
+    16)
+      echo "23${tab}OPEN${tab}true${tab}false${tab}false${tab}false"
+      echo "24${tab}OPEN${tab}true${tab}false${tab}false${tab}false"
+      ;;
+    17) answer fail ;;
+  esac
+  exit 0
+fi
+echo "The stand-in for gh doesn't answer: gh $*" >&2
+exit 1
+STAND_IN
+chmod +x "$base/bin/gh"
+
+tab=$'\t'
+# The lines that the --jq filter in scripts/open-pull-requests prints for an open pull request:
+# pull_request <number> <from a fork> <author> <in the merge queue> <merge state> [<when auto-merge was turned on>]
+pull_request() {
+  printf '%s\n' "pull-request$tab$1$tab$2$tab$3$tab$4$tab$5$tab${6:-}"
+  project_check_runs "$1"
+}
+# check_run <pull request> <ID> <name> [<conclusion>]
+check_run() {
+  printf '%s\n' "check$tab$1$tab$2$tab$3$tab${4:-}"
+}
+# removal <pull request> <time> <reason>
+removal() {
+  printf '%s\n' "removal$tab$1$tab$2$tab$3"
+}
+
+# A pull request of Dependabot's whose checks passed, which the script turns auto-merge on for:
+# passing_dependabot_pull_request <number>
+passing_dependabot_pull_request() {
+  pull_request "$1" false app/dependabot false CLEAN
+  check_run "$1" 101 check SUCCESS
+  check_run "$1" 102 title SUCCESS
+}
+
+# Makes a repository with copies of scripts/start-build-run and the scripts it runs, with main checked out, and a
+# branch for issue 12. Sets repo to its folder: new_repository
+new_repository() {
+  local script
+  repo=$(mktemp -d "$base/repo.XXXXXX")
+  git init --quiet --initial-branch=main "$repo"
+  mkdir "$repo/scripts"
+  for script in start-build-run open-pull-requests required-checks configure-github check-main-rules \
+    pull-request-state clear-worktrees; do
+    cp "scripts/$script" "$repo/scripts/$script"
+  done
+  git -C "$repo" add --all
+  git -C "$repo" commit --quiet -m "feat: start a build run with a script"
+  git -C "$repo" branch 12-fix-totals
+}
+
+# Runs scripts/start-build-run in the repository, and sets status, output, calls, the gh issue edit and gh pr merge
+# commands it ran, and the times before and after the run: run_start_build_run [<NAME=value>...]
+# Each NAME=value sets one of the stand-in's TEST_ variables, which are empty otherwise, except TEST_MAIN_RULES,
+# which lists the checks that scripts/configure-github requires.
+run_start_build_run() {
+  status=0
+  : >"$base/calls"
+  before=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  output=$(env TEST_ASSIGNED_ISSUES="" TEST_READY_ISSUES="" TEST_MAIN_RULES="check title" TEST_PULL_REQUESTS="" \
+    TEST_ISSUE_BRANCHES="" TEST_FAILING_CALL="" "$@" TEST_GH_CALLS="$base/calls" PATH="$base/bin:$PATH" \
+    "$repo/scripts/start-build-run" 2>&1) || status=$?
+  after=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  calls=$(<"$base/calls")
+}
+
+# Starts a case: begin_case <description>
+begin_case() {
+  description=$1
+  case_count=$((case_count + 1))
+  is_case_failed=""
+}
+
+# Prints an error for the case: report <what's wrong>
+report() {
+  echo "error: $description, $1" >&2
+  if [[ -z $is_case_failed ]]; then
+    failed_cases=$((failed_cases + 1))
+    is_case_failed=yes
+  fi
+}
+
+# Checks the script's exit code, output and gh calls: expect_result <exit code> <output> <calls, one to a line>
+expect_result() {
+  if [[ $status != "$1" || $output != "$2" || $calls != "$3" ]]; then
+    report "scripts/start-build-run must exit with code $1, print \"$2\" and run \"$3\", but it exited with code $status, printed \"$output\" and ran \"$calls\"."
+  fi
+}
+
+new_repository
+
+begin_case "When no ready issue is assigned, no pull request is open and no worktree holds a ready issue's branch"
+run_start_build_run
+expect_result 0 "" ""
+record="$repo/$(git -C "$repo" rev-parse --git-path build-run-start)"
+recorded=$(cat "$record" 2>/dev/null || true)
+if [[ ! $recorded =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ || $recorded < $before || $recorded > $after ]]; then
+  report "scripts/start-build-run must record the time it starts in $record in UTC, between $before and $after, but the file holds \"$recorded\"."
+fi
+
+begin_case "When ready issues are assigned whose pull requests are merging, stopped, left behind, several or none"
+run_start_build_run TEST_ASSIGNED_ISSUES="12 13 14 15 16"
+expect_result 0 "Left issue #12 assigned to you, because scripts/pull-request-state prints merging for it."$'\n'"Left issue #13 assigned to you, because scripts/pull-request-state prints stopped for it." \
+  "issue edit 14 --remove-assignee @me"$'\n'"issue edit 15 --remove-assignee @me"$'\n'"issue edit 16 --remove-assignee @me"
+
+begin_case "When gh can't list the ready issues assigned to the current account"
+run_start_build_run TEST_ASSIGNED_ISSUES=fail TEST_PULL_REQUESTS="$(passing_dependabot_pull_request 40)"
+expect_result 1 "error: can't list the ready issues assigned to you, because gh failed: error connecting to api.github.com" ""
+
+begin_case "When scripts/pull-request-state fails"
+run_start_build_run TEST_ASSIGNED_ISSUES="17 14"
+expect_result 1 "error: can't list the pull requests of issue #17, because gh failed: error connecting to api.github.com" ""
+
+begin_case "When gh can't remove the assignment"
+run_start_build_run TEST_ASSIGNED_ISSUES="14 15" TEST_FAILING_CALL="issue edit 14 --remove-assignee @me"
+expect_result 1 "error: can't remove your assignment from issue #14, because gh failed: HTTP 502: Bad Gateway" \
+  "issue edit 14 --remove-assignee @me"
+
+begin_case "When pull requests of Dependabot's have passed, running, missing and rerun checks"
+pull_requests=$(
+  passing_dependabot_pull_request 40
+  pull_request 41 false app/dependabot false BLOCKED
+  check_run 41 103 check
+  pull_request 42 false app/dependabot false BLOCKED
+  pull_request 43 false app/dependabot false CLEAN
+  check_run 43 106 check SUCCESS
+  check_run 43 105 title SUCCESS
+  check_run 43 104 check FAILURE
+  pull_request 44 false app/dependabot false UNSTABLE
+  check_run 44 107 check SUCCESS
+  check_run 44 108 title SUCCESS
+  check_run 44 109 "$unrequired_check" FAILURE
+)
+run_start_build_run TEST_PULL_REQUESTS="$pull_requests"
+expect_result 0 "" "pr merge 40"$'\n'"pr merge 41"$'\n'"pr merge 42"$'\n'"pr merge 43"$'\n'"pr merge 44"
+
+begin_case "When pull requests of Dependabot's are DIRTY, failed checks, have auto-merge, are in the queue or were removed from it"
+pull_requests=$(
+  pull_request 40 false app/dependabot false DIRTY
+  pull_request 41 false app/dependabot false BLOCKED
+  check_run 41 101 title FAILURE
+  check_run 41 102 check SUCCESS
+  pull_request 42 false app/dependabot false BLOCKED
+  check_run 42 103 check CANCELLED
+  check_run 42 104 title TIMED_OUT
+  pull_request 43 false app/dependabot false BLOCKED 2026-05-04T09:00:00Z
+  pull_request 44 false app/dependabot true CLEAN
+  pull_request 45 false app/dependabot false CLEAN
+  removal 45 2026-05-04T09:10:00Z merge_conflict
+  pull_request 46 true app/dependabot false CLEAN
+  pull_request 47 false app/dependabot false DIRTY
+  removal 47 2026-05-04T09:10:00Z merge_conflict
+)
+run_start_build_run TEST_PULL_REQUESTS="$pull_requests"
+expected="Skipped pull request 40 of Dependabot's, because it's DIRTY.
+Skipped pull request 41 of Dependabot's, because the check \"title\" failed.
+Skipped pull request 42 of Dependabot's, because the checks \"check\" and \"title\" failed.
+Skipped pull request 43 of Dependabot's, because its auto-merge is on already.
+Skipped pull request 44 of Dependabot's, because it's in the merge queue.
+Skipped pull request 45 of Dependabot's, because the merge queue removed it before.
+Skipped pull request 46 of Dependabot's, because it comes from a fork.
+Skipped pull request 47 of Dependabot's, because it's DIRTY and the merge queue removed it before."
+expect_result 0 "$expected" ""
+
+begin_case "When pull requests of other authors are open, including an account named dependabot that isn't the app"
+pull_requests=$(
+  pull_request 40 false dependabot false CLEAN
+  pull_request 41 false app/renovate false CLEAN
+  pull_request 42 false octocat false CLEAN
+)
+run_start_build_run TEST_PULL_REQUESTS="$pull_requests"
+expect_result 0 "" ""
+
+begin_case "When main no longer requires a check that scripts/configure-github requires"
+run_start_build_run TEST_MAIN_RULES=check TEST_PULL_REQUESTS="$(passing_dependabot_pull_request 40)" \
+  TEST_ASSIGNED_ISSUES=14
+expect_result 0 "error: main no longer requires the title job, so a pull request can merge without passing it. A maintainer with admin access restores it by running scripts/configure-github."$'\n'"error: scripts/start-build-run turned on auto-merge for no pull request of Dependabot's, because of the error above. Go on with the other work, and list this in your report for the maintainer." \
+  "issue edit 14 --remove-assignee @me"
+
+begin_case "When gh can't read the rules for main"
+run_start_build_run TEST_MAIN_RULES=fail TEST_PULL_REQUESTS="$(passing_dependabot_pull_request 40)"
+expect_result 0 "" "pr merge 40"
+
+begin_case "When gh can't list the open pull requests"
+run_start_build_run TEST_PULL_REQUESTS=fail
+expect_result 1 "error: can't list the open pull requests, because gh failed: error connecting to api.github.com" ""
+
+begin_case "When gh can't turn on auto-merge"
+pull_requests=$(
+  passing_dependabot_pull_request 40
+  passing_dependabot_pull_request 41
+)
+run_start_build_run TEST_PULL_REQUESTS="$pull_requests" TEST_FAILING_CALL="pr merge 40"
+expect_result 1 "error: can't turn on auto-merge for pull request 40 of Dependabot's, because gh failed: HTTP 502: Bad Gateway" \
+  "pr merge 40"
+
+begin_case "When a leftover worktree holds a ready issue's branch"
+git -C "$repo" worktree add --quiet "$base/agent-1" 12-fix-totals
+run_start_build_run TEST_READY_ISSUES="12" TEST_ISSUE_BRANCHES="12 12-fix-totals" \
+  TEST_PULL_REQUESTS="$(passing_dependabot_pull_request 40)"
+expect_result 0 "Removed $base/agent-1, which held the branch of issue #12." "pr merge 40"
+if [[ -e $base/agent-1 ]]; then
+  report "scripts/clear-worktrees must remove the worktree $base/agent-1, but it's still there."
+fi
+
+begin_case "When scripts/clear-worktrees fails"
+run_start_build_run TEST_READY_ISSUES=fail TEST_PULL_REQUESTS="$(passing_dependabot_pull_request 40)"
+expect_result 1 "error: can't list the ready issues, because gh failed: error connecting to api.github.com" "pr merge 40"
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/start-build-run.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/start-build-run.test passed. Cases: $case_count."

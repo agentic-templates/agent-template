@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+# Tests scripts/hooks/posted-text.check through scripts/hooks/before-tool.
+set -euo pipefail
+# shellcheck source=scripts/hooks/testing.bash
+source "${BASH_SOURCE[0]%/*}/testing.bash"
+
+# The agent works in a project in a temporary home folder. Cursor sends no folder, so its hook runs in the test's own
+# folder, which is the project too.
+folders=$(CDPATH='' cd -- "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$folders"' EXIT
+test_home=$folders/home
+test_cwd=$test_home/project
+mkdir -p "$test_cwd" "$folders/bin"
+cd "$test_cwd"
+
+# A stand-in for gh, first on the PATH, that fails, as gh does without a network. The other checks then ask nothing
+# of GitHub, and allow these commands.
+printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$folders/bin/gh"
+chmod +x "$folders/bin/gh"
+PATH=$folders/bin:$PATH
+
+# The name of a person's home folder. scripts/check doesn't take $person for a name, so this file holds no path into
+# a home folder.
+person=ana
+
+# Each body and comment in the cases starts with this text, because scripts/hooks/issues-and-labels.check blocks a new
+# issue whose body lacks its headings.
+change_body=$'## What should change\nThe app skips the expenses it already has.\n\n## Why\nPeople import the same file twice.\n\n## Done when\n- Importing a file twice adds each expense once.'
+
+home_path_line="The app reads /Users/$person/bank.csv."
+semicolon_line="The app skips the expenses; it keeps the total."
+dash_line="The app skips the expenses - it keeps the total."
+code_span_line="Run \`import; total - 1\` to check it."
+code_block=$'~~~\ncat /home/'"$person"$'/bank.csv\n~~~'
+
+# Prints the message that blocks a command with these problems: blocked <command, such as gh issue comment> <problem>...
+blocked() {
+  local command=$1
+  shift
+  printf '%s\n' "Blocked: the text that this command would post has these problems:" "$@" "Fix each problem, and run $command again."
+}
+
+# Print the problems as scripts/check-pull-request words them: home_path <where> <path>, semicolon <where> and
+# dash <where>, where <where> is as in: The title "<title>"
+home_path() {
+  echo "$1 holds a path into a home folder, $2. Use a path relative to the repository, or ~ or \$HOME."
+}
+semicolon() {
+  echo "$1 has a semicolon in prose. Replace it with a period or a word such as \"and\", as \"Write clear sentences\" in docs/writing.md says."
+}
+dash() {
+  echo "$1 has a dash between words in prose. If it joins two sentences, write two sentences, as \"Write clear sentences\" in docs/writing.md says. Otherwise, replace it with a word, as in \"pages 10 to 20\"."
+}
+
+# Prints a command with a text in single quotes in place of TEXT: with_text <command> <text>
+with_text() {
+  local quoted="'$2'"
+  printf '%s' "${1/TEXT/$quoted}"
+}
+
+# Prints the first three words of a command, such as gh issue comment: command_name <command>
+command_name() {
+  local gh_word group subcommand rest
+  read -r gh_word group subcommand rest <<<"$1"
+  printf '%s' "$gh_word $group $subcommand"
+}
+
+# The commands that post a body or a comment, with TEXT in place of it
+body_commands=(
+  "gh issue create --title 'Skip imported expenses' --label feature --body TEXT"
+  "gh issue new --label feature -b TEXT"
+  "gh issue edit 7 --body TEXT"
+  "gh issue comment 7 --body TEXT"
+  "gh pr comment 5 -b TEXT"
+  "gh pr review 5 --request-changes --body TEXT"
+  "gh issue close 7 --comment TEXT"
+  "gh issue close 7 --reason 'not planned' -c TEXT"
+  "gh issue reopen 7 -c TEXT"
+  "gh pr close 5 --comment TEXT"
+  "gh pr reopen 5 -c TEXT"
+)
+for template in "${body_commands[@]}"; do
+  name=$(command_name "$template")
+  expect_allow Bash "$(with_text "$template" "$change_body")"
+  expect_block Bash "$(with_text "$template" "$change_body"$'\n'"$home_path_line")" \
+    "$(blocked "$name" "$(home_path "The line \"$home_path_line\"" "/Users/$person/")")"
+  expect_block Bash "$(with_text "$template" "$change_body"$'\n'"$semicolon_line")" \
+    "$(blocked "$name" "$(semicolon "The line \"$semicolon_line\"")")"
+  expect_block Bash "$(with_text "$template" "$change_body"$'\n'"$dash_line")" \
+    "$(blocked "$name" "$(dash "The line \"$dash_line\"")")"
+  expect_allow Bash "$(with_text "$template" "$change_body"$'\n'"$code_span_line")"
+  expect_block Bash "$(with_text "$template" "$change_body"$'\n'"$code_block")" \
+    "$(blocked "$name" "$(home_path "The line \"cat /home/$person/bank.csv\"" "/home/$person/")")"
+done
+
+# A review that asks for changes, with the dash line written as two sentences, with an empty body, with no body, and
+# with the dash line only in code, then also as prose after the code
+review_template="gh pr review 5 --request-changes --body TEXT"
+expect_allow Bash "$(with_text "$review_template" "$change_body"$'\n'"The app skips the expenses. It keeps the total.")"
+expect_allow Bash "$(with_text "$review_template" "")"
+expect_allow Bash "gh pr review 5 --request-changes"
+for code in "\`$dash_line\`" $'~~~\n'"$dash_line"$'\n~~~'; do
+  expect_allow Bash "$(with_text "$review_template" "$change_body"$'\n'"$code")"
+  expect_block Bash "$(with_text "$review_template" "$change_body"$'\n'"$code"$'\n'"$dash_line")" \
+    "$(blocked "gh pr review" "$(dash "The line \"$dash_line\"")")"
+done
+
+# The commands that set a title, with TEXT in place of it
+title_commands=(
+  "gh issue create --title TEXT --label feature --body '$change_body'"
+  "gh issue new -t TEXT --label feature --body '$change_body'"
+  "gh issue edit 7 -t TEXT"
+)
+for template in "${title_commands[@]}"; do
+  name=$(command_name "$template")
+  expect_allow Bash "$(with_text "$template" "Skip imported expenses")"
+  expect_block Bash "$(with_text "$template" "Read /Users/$person/bank.csv")" \
+    "$(blocked "$name" "$(home_path "The title \"Read /Users/$person/bank.csv\"" "/Users/$person/")")"
+  expect_block Bash "$(with_text "$template" "Skip imported expenses; keep the total")" \
+    "$(blocked "$name" "$(semicolon "The title \"Skip imported expenses; keep the total\"")")"
+  expect_block Bash "$(with_text "$template" "Skip imported expenses - keep the total")" \
+    "$(blocked "$name" "$(dash "The title \"Skip imported expenses - keep the total\"")")"
+  expect_allow Bash "$(with_text "$template" "Skip \`import; total - 1\` in the imports")"
+done
+
+# Every problem in a command, the title's first. A path into a home folder counts in an HTML comment, and a semicolon
+# doesn't.
+expect_block Bash "gh issue edit 7 --title 'Keep the total; skip the rest' --body '$semicolon_line
+<!-- Copied from /Users/$person/notes.md; see there -->
+$dash_line'" "$(blocked "gh issue edit" \
+  "$(semicolon "The title \"Keep the total; skip the rest\"")" \
+  "$(home_path "The line \"<!-- Copied from /Users/$person/notes.md; see there -->\"" "/Users/$person/")" \
+  "$(semicolon "The line \"$semicolon_line\"")" \
+  "$(dash "The line \"$dash_line\"")")"
+
+# Text from a here-document on standard input or inside $( ), from a file, after = and after --repo
+expect_block Bash "gh issue comment 7 --body-file - <<'EOF'
+\`\`\`
+cat /home/$person/bank.csv
+\`\`\`
+EOF" "$(blocked "gh issue comment" "$(home_path "The line \"cat /home/$person/bank.csv\"" "/home/$person/")")"
+expect_block Bash "gh pr comment 5 --body \"\$(cat <<'EOF'
+$semicolon_line
+EOF
+)\"" "$(blocked "gh pr comment" "$(semicolon "The line \"$semicolon_line\"")")"
+printf '%s\n' "$dash_line" >"$test_cwd/notes.md"
+expect_block Bash "gh pr review 5 --comment --body-file notes.md" "$(blocked "gh pr review" "$(dash "The line \"$dash_line\"")")"
+expect_block Bash "gh issue close 7 --comment='$semicolon_line'" \
+  "$(blocked "gh issue close" "$(semicolon "The line \"$semicolon_line\"")")"
+expect_block Bash "gh pr close -R jtmpl/other 5 -c '$semicolon_line'" \
+  "$(blocked "gh pr close" "$(semicolon "The line \"$semicolon_line\"")")"
+# The -c of gh pr review takes no value.
+expect_block Bash "gh pr review 5 -c -b '$semicolon_line'" "$(blocked "gh pr review" "$(semicolon "The line \"$semicolon_line\"")")"
+
+# Text that the hook reads as the command writes it, without filling in variables
+may_expand="This hook reads the text as the command writes it, without running \$( ) or filling in variables."
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so $ stays as written.
+expect_block Bash 'gh issue comment 7 --body "Saved in $folder; see the notes."' \
+  "$(blocked "gh issue comment" "$(semicolon "The line \"Saved in \$folder; see the notes.\"")") $may_expand"
+# shellcheck disable=SC2016
+expect_block Bash 'gh issue edit 7 --title "$type; skip imported expenses"' \
+  "$(blocked "gh issue edit" "$(semicolon "The title \"\$type; skip imported expenses\"")") $may_expand"
+
+# Text that the hook can't read before the command runs
+expect_block Bash "cat notes.md | gh issue comment 7 --body-file -" \
+  "Blocked: this hook can't read a body from standard input, other than from a here-document, so it can't check the body for paths into a home folder, semicolons and dashes. Give the body with --body, or write it to a file and give the file with --body-file."
+expect_block Bash "gh pr comment 5 --body-file missing.md" \
+  "Blocked: this hook checks the body file before the command runs, and missing.md doesn't exist yet or the command writes it. Write the file in a command of its own first, and give its path without variables."
+
+# Commands that give no text
+expect_allow Bash 'gh issue edit 7 --add-label ready'
+expect_allow Bash 'gh issue comment 7 --editor'
+expect_allow Bash 'gh pr comment 5 --web'
+expect_allow Bash 'gh pr review 5 --approve'
+expect_allow Bash 'gh issue close 7 --reason completed'
+expect_allow Bash 'gh issue reopen 7'
+expect_allow Bash 'gh pr close 5'
+expect_allow Bash 'gh pr reopen 5'
+
+# Commands that post nothing
+expect_allow Bash "gh issue comment 7 --body '$semicolon_line' --help"
+expect_allow Bash "echo gh issue comment 7 --body '$semicolon_line'"
+expect_allow Bash 'gh issue view 7 --comments'
+
+# Every command that posts text keeps its message with the repository flag before the subcommand.
+for template in "${body_commands[@]}" "${title_commands[@]}"; do
+  name=$(command_name "$template")
+  read -r gh_word group subcommand <<<"$name"
+  rest=${template#"$name "}
+  if [[ $rest == *'--title TEXT'* || $rest == *'-t TEXT'* ]]; then
+    problem=$(semicolon "The title \"$semicolon_line\"")
+    text=$semicolon_line
+  else
+    problem=$(semicolon "The line \"$semicolon_line\"")
+    text=$change_body$'\n'$semicolon_line
+  fi
+  expect_repository_flags 2 "$(blocked "$name" "$problem")" "$group" "$subcommand" "$(with_text "$rest" "$text")"
+  expect_repository_flags 0 "" "$group" "$subcommand" "$(with_text "$rest" "$change_body") --help"
+done
+
+# A long body in quotes takes about as long as a short one, because the hooks read quoted text in pieces and in the
+# C locale. Before, a body of 400 lines took more than a minute on a Mac.
+long_body=$change_body
+for ((line = 1; line <= 400; line++)); do
+  long_body+=$'\n'"Line $line of the comment, which says what changed and why."
+done
+started=$SECONDS
+expect_allow Bash "gh issue comment 7 --body '$long_body'"
+if ((SECONDS - started > 10)); then
+  echo "error: the hook took $((SECONDS - started)) seconds for a command with a body of 400 lines in quotes, and the limit is 10." >&2
+  failed_cases=$((failed_cases + 1))
+fi
+
+finish_tests

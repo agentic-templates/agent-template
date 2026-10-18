@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Lists the security advisories that aren't published, closed or withdrawn, and says for each branch of their private
+# forks whether a fix waits in it: scripts/waiting-fixes [<base>]
+# Step 1 of "Publish a release" and step 2 of "Check the security advisories" in docs/releasing.md run it. <base> is
+# the commit or tag to compare the branches with, origin/main unless the command gives another one.
+# It runs git fetch origin. Then it prints a line for each advisory, with its GHSA ID and its state. For an advisory
+# with a private fork, it fetches the fork's branches into refs/private-fork/<GHSA ID>/ in this clone, and prints a
+# line for each of them:
+# - <ref>: holds a fix that <base> doesn't have, when merging the branch into <base> would change <base>'s files.
+#   The files tell, and the commits don't, because a squash merge puts the fix on main without the fork's commits.
+# - <ref>: nothing waiting, when the merge would change nothing
+# - <ref>: can't tell, because merging it into <base> conflicts
+# When git can't fetch a fork, it says that it can't tell, with git's error, and goes on.
+# It needs admin access, because only an admin can list the advisories that aren't published. It stops with an
+# error, and exits with code 1, without admin access, and when gh or git fails. It asks gh about the repository of
+# this checkout, or the one in GH_REPO.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/admin-access
+source scripts/admin-access
+
+# git fails instead of asking for a password that nobody can type, such as for a fork it has no access to.
+export GIT_TERMINAL_PROMPT=0
+
+# Prints an error and stops: stop <message>
+stop() {
+  echo "error: $1" >&2
+  exit 1
+}
+
+# Prints whether a fix waits in a branch: check_branch <ref>
+check_branch() {
+  local tree merge_status=0
+  # git merge-tree exits with code 1 when the merge conflicts, and with another code when it can't merge.
+  tree=$(git merge-tree --write-tree "$base_commit" "$1") || merge_status=$?
+  if ((merge_status == 1)); then
+    echo "$1: can't tell, because merging it into $base conflicts"
+  elif ((merge_status != 0)); then
+    stop "git can't merge $1 into $base, and its error is above."
+  elif [[ $tree == "$base_tree" ]]; then
+    echo "$1: nothing waiting"
+  else
+    echo "$1: holds a fix that $base doesn't have"
+  fi
+}
+
+if (($# > 1)); then
+  stop "scripts/waiting-fixes takes at most one argument, the commit or tag to compare each fork's branches with, and it got $#. For example: scripts/waiting-fixes v1.2.3"
+fi
+base=${1:-origin/main}
+
+if ! repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>&1); then
+  stop "can't read the repository's name, because gh failed: $repo"
+fi
+if ! permission=$(gh repo view --json viewerPermission --jq .viewerPermission 2>&1); then
+  stop "can't read your access to $repo, because gh failed: $permission"
+fi
+require_admin "$permission" "$repo" "listing the security advisories"
+
+if ! answer=$(git fetch --quiet origin 2>&1); then
+  stop "can't fetch origin, because git failed: $answer"
+fi
+if ! base_commit=$(git rev-parse --verify --quiet --end-of-options "$base^{commit}"); then
+  stop "this clone has no commit $base, even after git fetch origin. Pass a commit or a tag that origin has, such as the latest release's tag."
+fi
+base_tree=$(git rev-parse "$base_commit^{tree}")
+
+# The fork comes last, because it can be empty, and read joins the tabs around an empty field.
+if ! advisories=$(gh api --paginate "repos/{owner}/{repo}/security-advisories" \
+  --jq '.[] | [.ghsa_id, .state, (.private_fork.full_name // "")] | @tsv' 2>&1); then
+  stop "can't list the security advisories, because gh failed: $advisories"
+fi
+
+while IFS=$'\t' read -r ghsa_id state fork; do
+  if [[ -z $ghsa_id || $state == published || $state == closed || $state == withdrawn ]]; then
+    continue
+  fi
+  if [[ -z $fork ]]; then
+    echo "$ghsa_id ($state): no private fork"
+    continue
+  fi
+  refs=refs/private-fork/$ghsa_id
+  # --prune removes the refs of the branches that the fork no longer has.
+  if ! answer=$(git fetch --quiet --prune "https://github.com/$fork" "+refs/heads/*:$refs/*" 2>&1); then
+    echo "$ghsa_id ($state): private fork $fork: can't tell, because git can't fetch it: $answer"
+    continue
+  fi
+  echo "$ghsa_id ($state): private fork $fork"
+  branches=$(git for-each-ref --format='%(refname)' "$refs/")
+  while IFS= read -r branch; do
+    if [[ -n $branch ]]; then
+      check_branch "$branch"
+    fi
+  done <<<"$branches"
+done <<<"$advisories"

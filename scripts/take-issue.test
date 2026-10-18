@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# Tests scripts/take-issue with a stand-in for gh.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+case_count=0
+failed_cases=0
+
+base=$(mktemp -d)
+trap 'rm -rf "$base"' EXIT
+mkdir -p "$base/bin"
+# The folder that holds the labels and the assignees of issue 12, one to a line.
+issue=$base/issue
+
+# A stand-in for gh, first on the PATH. It answers the commands that read the labels and the assignees of issue 12
+# from the files labels and assignees in TEST_ISSUE_FOLDER, and changes the file labels for the commands that remove
+# and add ready. It writes each command to the file calls, one to a line. It fails the commands that start with TEST_FAILING_CALL, as gh does without the network, every
+# command about another issue, as gh does for an issue that doesn't exist, and every command it doesn't know.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+folder=$TEST_ISSUE_FOLDER
+echo "$*" >>"$folder/calls"
+if [[ -n $TEST_FAILING_CALL && $* == "$TEST_FAILING_CALL"* ]]; then
+  echo "error connecting to api.github.com" >&2
+  exit 1
+fi
+if [[ $1 == issue && $3 != 12 ]]; then
+  echo "GraphQL: Could not resolve to an issue or pull request with the number of $3. (repository.issue)" >&2
+  exit 1
+fi
+case "$*" in
+  "issue view 12 --json labels --jq .labels[].name") cat "$folder/labels" ;;
+  "issue view 12 --json assignees --jq .assignees[].login") cat "$folder/assignees" ;;
+  "issue edit 12 --remove-label ready")
+    grep -vxF ready "$folder/labels" >"$folder/labels.new" || true
+    mv "$folder/labels.new" "$folder/labels"
+    ;;
+  "issue edit 12 --add-label ready") echo ready >>"$folder/labels" ;;
+  *)
+    echo "The stand-in for gh doesn't answer: gh $*" >&2
+    exit 1
+    ;;
+esac
+STAND_IN
+chmod +x "$base/bin/gh"
+
+# Starts a case with issue 12, with its labels and its assignees, each separated by spaces:
+# new_issue <labels> <assignees>
+new_issue() {
+  rm -rf "$issue"
+  mkdir -p "$issue"
+  : >"$issue/labels"
+  : >"$issue/assignees"
+  : >"$issue/calls"
+  if [[ -n $1 ]]; then
+    tr ' ' '\n' <<<"$1" >"$issue/labels"
+  fi
+  if [[ -n $2 ]]; then
+    tr ' ' '\n' <<<"$2" >"$issue/assignees"
+  fi
+}
+
+# Runs scripts/take-issue with the arguments, and sets status, output and labels, the issue's labels afterwards,
+# sorted and separated by spaces: run_take_issue [<argument>...]
+run_take_issue() {
+  status=0
+  output=$(TEST_ISSUE_FOLDER=$issue TEST_FAILING_CALL=${failing_call:-} PATH=$base/bin:$PATH \
+    scripts/take-issue "$@" 2>&1) || status=$?
+  labels=$(sort "$issue/labels" | paste -sd ' ' -)
+}
+
+# Checks the script's exit code, its output and the issue's labels afterwards:
+# expect_result <description> <exit code> <output> <labels, sorted and separated by spaces>
+expect_result() {
+  local description=$1 expected_status=$2 expected_output=$3 expected_labels=$4
+  case_count=$((case_count + 1))
+  if [[ $status != "$expected_status" || $output != "$expected_output" || $labels != "$expected_labels" ]]; then
+    echo "error: $description, scripts/take-issue must exit with code $expected_status, print \"$expected_output\" and leave the labels \"$expected_labels\", but it exited with code $status, printed \"$output\" and left the labels \"$labels\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks the gh commands that the script ran, in order, one to a line: expect_calls <description> <commands>
+expect_calls() {
+  local description=$1 expected_calls=$2 calls
+  calls=$(<"$issue/calls")
+  case_count=$((case_count + 1))
+  if [[ $calls != "$expected_calls" ]]; then
+    echo "error: $description, scripts/take-issue must run \"$expected_calls\", but it ran \"$calls\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+read_labels="issue view 12 --json labels --jq .labels[].name"
+remove_ready="issue edit 12 --remove-label ready"
+read_assignees="issue view 12 --json assignees --jq .assignees[].login"
+
+new_issue "feature ready" ""
+run_take_issue 12
+expect_result "When the issue has no assignee" 0 "free" "feature"
+expect_calls "When the issue has no assignee" "$read_labels"$'\n'"$remove_ready"$'\n'"$read_assignees"
+
+new_issue "feature ready" "jtmpl"
+run_take_issue 12
+expect_result "When the issue has an assignee" 0 "taken" "feature ready"
+expect_calls "When the issue has an assignee" \
+  "$read_labels"$'\n'"$remove_ready"$'\n'"$read_assignees"$'\n'"issue edit 12 --add-label ready"
+
+new_issue "feature ready" "jtmpl dependabot"
+run_take_issue 12
+expect_result "When the issue has two assignees" 0 "taken" "feature ready"
+
+new_issue "feature" ""
+run_take_issue 12
+expect_result "When the issue doesn't have ready" 1 \
+  "error: issue #12 doesn't have the ready label, so someone may already work on it outside a build run, because scripts/take-issue removes the label. Ask the maintainer whether to work on it." \
+  "feature"
+
+new_issue "feature ready" ""
+failing_call="issue view 12 --json labels"
+run_take_issue 12
+expect_result "When gh can't read the issue's labels" 1 \
+  "error: can't read the labels of issue #12, because gh failed: error connecting to api.github.com" "feature ready"
+
+new_issue "feature ready" ""
+failing_call="issue edit 12 --remove-label"
+run_take_issue 12
+expect_result "When gh can't remove ready" 1 \
+  "error: can't remove ready from issue #12, because gh failed: error connecting to api.github.com" "feature ready"
+
+new_issue "feature ready" ""
+failing_call="issue view 12 --json assignees"
+run_take_issue 12
+expect_result "When gh can't read the issue's assignees" 1 \
+  "error: removed ready from issue #12, but can't check whether a build run has it, because gh failed: error connecting to api.github.com. Add ready back with gh issue edit 12 --add-label ready, and run scripts/take-issue 12 again." \
+  "feature"
+
+new_issue "feature ready" "jtmpl"
+failing_call="issue edit 12 --add-label"
+run_take_issue 12
+expect_result "When gh can't add ready back to an issue that has an assignee" 1 \
+  "error: issue #12 is assigned, so a build run has it, but can't add ready back, because gh failed: error connecting to api.github.com. Add it with gh issue edit 12 --add-label ready." \
+  "feature"
+failing_call=""
+
+new_issue "feature ready" ""
+run_take_issue 13
+expect_result "When the issue doesn't exist" 1 \
+  "error: can't read the labels of issue #13, because gh failed: GraphQL: Could not resolve to an issue or pull request with the number of 13. (repository.issue)" \
+  "feature ready"
+
+new_issue "feature ready" ""
+run_take_issue
+expect_result "When it gets no argument" 1 \
+  "error: scripts/take-issue takes one argument, the number of an issue, and it got 0." "feature ready"
+
+new_issue "feature ready" ""
+run_take_issue 12 13
+expect_result "When it gets two arguments" 1 \
+  "error: scripts/take-issue takes one argument, the number of an issue, and it got 2." "feature ready"
+
+new_issue "feature ready" ""
+run_take_issue "#12"
+expect_result "When the issue's number starts with #" 1 \
+  "error: scripts/take-issue takes the number of an issue, such as 12, and it got \"#12\"." "feature ready"
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/take-issue.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/take-issue.test passed. Cases: $case_count."
