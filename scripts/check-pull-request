@@ -4,7 +4,8 @@
 # commit. The title job in .github/workflows/pr-title.yml passes the title in TITLE, the body in BODY, the name of the
 # pull request's branch in BRANCH, the repository that holds the branch in HEAD_REPOSITORY and this repository in
 # GH_REPO, each repository as <owner>/<name>. The hook scripts/hooks/pull-request-rules.check passes TITLE, BODY and
-# BRANCH before gh pr create, and passes BRANCH only for a branch in this repository. Run it in the repository's folder.
+# BRANCH before gh pr create and gh pr edit, and passes BRANCH only for a branch in this repository. Run it in the
+# repository's folder.
 # - The body has a line that closes an issue, such as "Closes #12", and no line that closes another issue. The issue,
 #   which gh looks up, is open, is in this repository, and has neither the label research nor sub-issues.
 # - If the pull request's branch was created for an issue, the body closes no other issue. scripts/start-issue creates

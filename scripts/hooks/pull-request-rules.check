@@ -13,6 +13,12 @@
 #   a cd to a folder that it can't tell.
 # - A relative path to a body file starts from the folder that gh runs in, and git finds the repository from it. That's
 #   the folder the agent works in, or the one that a cd before gh changes to, as follow_cd in helpers.bash finds it.
+# It also blocks gh pr edit with --title, --body or --body-file when the title job would fail on the pull request with
+# the new title or body. It reads them as it reads those of gh pr create, and asks gh pr view for the rest of the pull
+# request: the title or body that the command keeps, the branch, the base branch unless --base changes it, the latest
+# commit, which it fetches from origin when this repository lacks it, and the author. As in the title job, it checks
+# only the title of a pull request from Dependabot. It allows the command for a merged pull request, and when gh can't
+# find the pull request or the hook can't find the commits.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 
@@ -45,7 +51,7 @@ consequential_files() {
 }
 
 check_gh_pr_create() {
-  local problems="" output message files
+  local files
   if ! opens_pull_request; then
     return 0
   fi
@@ -65,11 +71,84 @@ check_gh_pr_create() {
       block "Blocked: this pull request changes files that a reviewer reads before the change merges: ${files//$'\n'/, }. Run gh pr create again with --draft, so that it waits for the review, and say in your report that it's a draft."
     fi
   fi
+  block_if_title_job_fails "gh pr create" ""
+}
+
+# The flags of gh pr edit that take a value, as gh pr edit --help lists them.
+pr_edit_flags_with_value=" --add-assignee --add-label --add-project --add-reviewer --attach -B --base -b --body -F --body-file -m --milestone --remove-assignee --remove-label --remove-project --remove-reviewer -t --title -R --repo "
+
+check_gh_pr_edit() {
+  if ! edits_pull_request_text; then
+    return 0
+  fi
+  if [[ -z $command_folder ]] || ! cd -- "$command_folder" 2>/dev/null; then
+    return 0
+  fi
+  if [[ -n $body_source ]]; then
+    read_body "the pull request's body"
+  fi
+  if ! read_edited_pull_request; then
+    return 0
+  fi
+  # The issue that a merged pull request closes is closed, so scripts/check-pull-request would fail on it, though the
+  # title job no longer decides anything for it.
+  if [[ $pull_request_state == MERGED ]]; then
+    return 0
+  fi
+  if ! find_base_commit "${pr_base:-$base_branch}"; then
+    return 0
+  fi
+  if ! git rev-parse --verify --quiet "$head_commit^{commit}" >/dev/null; then
+    GIT_TERMINAL_PROMPT=0 git fetch --quiet origin -- "$head_commit" >/dev/null 2>&1 || return 0
+  fi
+  block_if_title_job_fails "gh pr edit" "$pull_request_author"
+}
+
+# Succeeds if command_words changes the title or body of a pull request with gh pr edit, rather than show the
+# command's help. It reads the command's flags with read_pull_request_flags in helpers.bash.
+edits_pull_request_text() {
+  if [[ ${command_words[0]##*/} != gh || ${command_words[1]:-} != pr || ${command_words[2]:-} != edit ]]; then
+    return 1
+  fi
+  read_pull_request_flags "$pr_edit_flags_with_value" && [[ -n $pr_has_title || -n $body_source ]]
+}
+
+# Reads the pull request that gh pr edit edits from gh pr view, and fails when gh can't find it. It sets pr_title and
+# body to the pull request's when the command doesn't give them, and sets pull_request_state, base_branch, head_branch,
+# head_commit and pull_request_author. head_branch is empty when the branch is in a fork.
+read_edited_pull_request() {
+  local answer fields is_from_fork
+  # Without a pull request in the arguments, gh pr view and gh pr edit both take the current branch's.
+  read_arguments 3 "$pr_edit_flags_with_value"
+  answer=$(gh pr view ${target[@]+"${target[@]}"} \
+    --json title,body,state,baseRefName,headRefName,headRefOid,isCrossRepository,author 2>/dev/null) || return 1
+  fields=$(jq -r '[.state, .baseRefName, .headRefName, .headRefOid, .isCrossRepository, .author.login] | @tsv' <<<"$answer")
+  IFS=$'\t' read -r pull_request_state base_branch head_branch head_commit is_from_fork pull_request_author <<<"$fields"
+  if [[ -z $pr_has_title ]]; then
+    pr_title=$(jq -r .title <<<"$answer")
+  fi
+  if [[ -z $body_source ]]; then
+    body=$(jq -r .body <<<"$answer")
+  fi
+  # scripts/check-pull-request takes the branch only when it's in this repository.
+  if [[ $is_from_fork == true ]]; then
+    head_branch=""
+  fi
+}
+
+# Blocks the command when the title job in .github/workflows/pr-title.yml would fail on the pull request, with a message
+# that gives the errors of scripts/check-title and scripts/check-pull-request:
+# block_if_title_job_fails <command, such as gh pr create> <the pull request's author on GitHub, or empty>
+# The pull request has the title pr_title, the body body, the branch head_branch, and the commits from base_commit to
+# head_commit. As in the title job, scripts/check-pull-request skips a pull request from Dependabot.
+block_if_title_job_fails() {
+  local problems="" output message
   # The subshells drop the trap, which would otherwise turn every exit code of the scripts into 1.
   if ! output=$(trap - ERR && TITLE=$pr_title "$scripts_folder/check-title" 2>&1); then
     problems+=$output$'\n'
   fi
-  if ! output=$(trap - ERR && TITLE=$pr_title BODY=$body BRANCH=$head_branch "$scripts_folder/check-pull-request" "$base_commit" "$head_commit" 2>&1); then
+  if [[ $2 != app/dependabot ]] &&
+    ! output=$(trap - ERR && TITLE=$pr_title BODY=$body BRANCH=$head_branch "$scripts_folder/check-pull-request" "$base_commit" "$head_commit" 2>&1); then
     problems+=$output$'\n'
   fi
   if [[ -z $problems ]]; then
@@ -77,7 +156,7 @@ check_gh_pr_create() {
   fi
   # The scripts mark each error for GitHub Actions.
   message="Blocked: the checks on pull requests in CI would fail on this one:"$'\n'"${problems//::error::/}"
-  message+="Fix each problem, and run gh pr create again."
+  message+="Fix each problem, and run $1 again."
   if [[ -n $body_may_expand || -n $pr_title_may_expand ]]; then
     message+=" This hook reads the title and body as the command writes them, without running \$( ) or filling in variables."
   fi
@@ -92,6 +171,7 @@ check_simple_command() {
     return 0
   fi
   check_gh_pr_create
+  check_gh_pr_edit
   follow_cd
 }
 
