@@ -164,6 +164,12 @@ def typed_line(minute: float, content: Any) -> dict[str, Any]:
     return prompt_line(minute, content) | {"origin": {"kind": "human"}}
 
 
+def queued_line(minute: float, prompt: Any, kind: str = "human") -> dict[str, Any]:
+    """A transcript's line for a message that arrived while a turn ran, such as one that a person typed then."""
+    attachment = {"type": "queued_command", "prompt": prompt, "origin": {"kind": kind}, "timestamp": at(minute)}
+    return {"type": "attachment", "timestamp": at(minute), "attachment": attachment | {"humanTurn": kind == "human"}}
+
+
 class PersonMessagesTest(TranscriptTest):
     def test_gives_the_time_and_text_of_each_message_that_a_person_typed(self) -> None:
         self.write(
@@ -181,6 +187,22 @@ class PersonMessagesTest(TranscriptTest):
             ],
         )
 
+    def test_gives_the_messages_that_a_person_typed_while_a_turn_ran(self) -> None:
+        self.write(
+            prompt_line(0),
+            queued_line(1, "Read the clock instead."),
+            queued_line(2, [{"type": "image"}, {"type": "text", "text": "This one."}]),
+            queued_line(3, "<task-notification>done</task-notification>", kind="task-notification"),
+            {"type": "attachment", "timestamp": at(4), "attachment": {"type": "hook_success", "content": "ok"}},
+        )
+        self.assertEqual(
+            transcripts.person_messages(self.file),
+            [
+                transcripts.Message(START + dt.timedelta(minutes=1), "Read the clock instead."),
+                transcripts.Message(START + dt.timedelta(minutes=2), "This one."),
+            ],
+        )
+
     def test_leaves_out_the_lines_that_no_person_typed(self) -> None:
         notification = prompt_line(1, "<task-notification>done</task-notification>")
         agent_message = prompt_line(2, "The pull request is open.")
@@ -193,5 +215,6 @@ class PersonMessagesTest(TranscriptTest):
             prompt_line(5, "This session is being continued.") | {"isCompactSummary": True},
             prompt_line(6, "/compact Resume from .loop/state.md."),
             prompt_line(7, "Build the issue."),
+            {key: value for key, value in typed_line(8, "A line without its time.").items() if key != "timestamp"},
         )
         self.assertEqual(transcripts.person_messages(self.file), [])
