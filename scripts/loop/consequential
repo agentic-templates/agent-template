@@ -1,42 +1,38 @@
 #!/usr/bin/env -S uv run --script --quiet
-"""Lists the files of a change that a reviewer reads before the change merges: the rules, the loop's scripts and the
-files that keep agents safe, such as the hooks, the settings and the checks.
+"""Lists the files of a change that a reviewer reads before the change merges: the rules, the scripts and the files
+that keep agents safe, such as the hooks, the settings and the checks.
 
-RANGE is a git revision range, and it is origin/main...HEAD by default. When RANGE ends at HEAD, the change includes
-the changes that aren't committed yet and the new files that git doesn't ignore. A renamed file counts by its old path
-and its new one.
+RANGE is a git revision range, and it is origin/main...HEAD by default. When RANGE ends at HEAD, or names a single
+commit, the change includes the changes that aren't committed yet and the new files that git doesn't ignore. A renamed
+file counts by its old path and its new one.
 
-The script prints each listed file that the change touches, one to a line, and exits with code 0. If the change touches
-none of them, it prints "Not consequential." and exits with code 1. It exits with code 2 when git fails, such as for a
-RANGE that names no commit.
+The script prints each listed file that the change touches, one to a line, with its path from the top of the
+checkout, and exits with code 0. If the change touches none of them, it prints "Not consequential." and exits with
+code 1. It exits with code 2 when git fails, such as for a RANGE that names no commit.
 """
 
 import argparse
+import fnmatch
 import subprocess
 import sys
+from pathlib import Path
 
 # A mistake in one of these files can let a secret out, weaken a check, or change the rules that every later change
-# follows. A pattern that ends in * matches each path that starts with the rest of the pattern. Any other pattern
-# matches only that path.
+# follows. In a pattern, * matches any characters, / too.
 CONSEQUENTIAL_PATTERNS = (
     # The rules
     "AGENTS.md",
-    "docs/releasing.md",
-    "docs/reviewing.md",
-    "docs/rules.md",
-    # The loop's scripts
-    "scripts/loop/*",
-    # The files that keep agents safe
+    "*/AGENTS.md",
+    "docs/*",
+    # The files that keep agents safe, and the files that decide what git ignores and what scripts/check runs
     ".claude/*",
     ".codex/*",
     ".github/workflows/*",
+    "scripts/*",
+    ".gitignore",
+    ".python-version",
     "pyproject.toml",
-    "scripts/check",
-    "scripts/check-main-rules",
-    "scripts/configure-github*",
-    "scripts/hooks/*",
-    "scripts/required-checks",
-    "scripts/text-rules",
+    "uv.lock",
 )
 DEFAULT_RANGE = "origin/main...HEAD"
 
@@ -70,26 +66,27 @@ def consequential_files(files: list[str]) -> list[str]:
 
 
 def is_consequential(file: str) -> bool:
-    for pattern in CONSEQUENTIAL_PATTERNS:
-        if pattern.endswith("*") and file.startswith(pattern.removesuffix("*")):
-            return True
-        if file == pattern:
-            return True
-    return False
+    return any(fnmatch.fnmatchcase(file, pattern) for pattern in CONSEQUENTIAL_PATTERNS)
 
 
 def changed_files(revision_range: str) -> list[str]:
+    # git ls-files gives paths from the folder that it runs in, and only for the files inside it.
+    top = Path(git_output(["rev-parse", "--show-toplevel"], Path.cwd()).strip())
     # --no-renames lists a renamed file by its old path too, so that moving a hook away from its path counts.
     # --end-of-options keeps a range that starts with - from passing git an option, such as --output.
-    files = git_paths("diff", "--name-only", "--no-renames", "-z", "--end-of-options", revision_range)
-    if revision_range.endswith("HEAD"):
-        files += git_paths("diff", "--name-only", "--no-renames", "-z", "HEAD")
-        files += git_paths("ls-files", "--others", "--exclude-standard", "-z")
+    files = git_paths(["diff", "--name-only", "--no-renames", "-z", "--end-of-options", revision_range], top)
+    if revision_range.endswith("HEAD") or ".." not in revision_range:
+        files += git_paths(["diff", "--name-only", "--no-renames", "-z", "HEAD"], top)
+        files += git_paths(["ls-files", "--others", "--exclude-standard", "-z"], top)
     return files
 
 
-def git_paths(*arguments: str) -> list[str]:
-    done = subprocess.run(["git", *arguments], capture_output=True, text=True, check=False)
+def git_paths(arguments: list[str], folder: Path) -> list[str]:
+    return [path for path in git_output(arguments, folder).split("\0") if path]
+
+
+def git_output(arguments: list[str], folder: Path) -> str:
+    done = subprocess.run(["git", *arguments], cwd=folder, capture_output=True, text=True, check=False)
     if done.returncode != 0:
         # git's later lines suggest a -- that this script's argument can't take.
         cause = done.stderr.strip().partition("\n")[0]
@@ -97,7 +94,7 @@ def git_paths(*arguments: str) -> list[str]:
             f"git {' '.join(arguments)} failed: {cause} Run the script in a checkout of the repository, "
             "with a range of commits that the checkout has. If origin/main is missing, run git fetch origin main."
         )
-    return [path for path in done.stdout.split("\0") if path]
+    return done.stdout
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import io
 import os
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -24,20 +25,25 @@ class ConsequentialFilesTest(unittest.TestCase):
         self.assertEqual(consequential.consequential_files(["README.md"]), [])
 
     def test_lists_each_file_under_a_pattern_that_ends_in_a_star(self) -> None:
-        for file in ["scripts/hooks/before-tool", "scripts/loop/test_meter.py", "scripts/configure-github.test"]:
+        for file in ["scripts/hooks/before-tool", "scripts/loop/test_meter.py", "docs/code.md", ".claude/agents/a.md"]:
+            with self.subTest(file=file):
+                self.assertEqual(consequential.consequential_files([file]), [file])
+
+    def test_lists_an_agents_file_in_any_folder(self) -> None:
+        for file in ["docs/AGENTS.md", "src/app/AGENTS.md"]:
             with self.subTest(file=file):
                 self.assertEqual(consequential.consequential_files([file]), [file])
 
     def test_matches_a_pattern_without_a_star_only_as_the_whole_path(self) -> None:
-        for file in ["scripts/checker", "scripts/check.test", "docs/rules.md.old", "docs/AGENTS.md", "xAGENTS.md"]:
+        for file in ["pyproject.toml.old", "src/uv.lock", "AGENTS.md.old", "xAGENTS.md", "src/xAGENTS.md"]:
             with self.subTest(file=file):
                 self.assertEqual(consequential.consequential_files([file]), [])
 
-    def test_matches_a_pattern_with_a_star_only_at_the_start_of_the_path(self) -> None:
-        self.assertEqual(consequential.consequential_files(["docs/scripts/hooks/before-tool"]), [])
+    def test_matches_a_folder_pattern_only_at_the_start_of_the_path(self) -> None:
+        self.assertEqual(consequential.consequential_files(["src/scripts/check", "src/docs/guide.md"]), [])
 
     def test_lists_only_the_listed_files_of_a_change(self) -> None:
-        files = ["README.md", ".claude/settings.json", "docs/code.md"]
+        files = ["README.md", ".claude/settings.json", ".github/ISSUE_TEMPLATE/bug.yml"]
         self.assertEqual(consequential.consequential_files(files), [".claude/settings.json"])
 
     def test_lists_a_file_once(self) -> None:
@@ -79,6 +85,13 @@ class ScriptTest(test_paths.RepositoryTest):
         self.commit("README.md", "src/app.py")
         self.assertEqual(self.run_script(), (1, "Not consequential.\n", ""))
 
+    def test_exits_2_outside_a_checkout(self) -> None:
+        outside = self.enterContext(tempfile.TemporaryDirectory())
+        self.enterContext(contextlib.chdir(outside))
+        status, printed, errors = self.run_script()
+        self.assertEqual((status, printed), (2, ""))
+        self.assertRegex(errors, r"^error: git rev-parse --show-toplevel failed: fatal: not a git repository")
+
     def test_prints_the_listed_files_and_exits_0(self) -> None:
         self.commit("README.md", "AGENTS.md", "scripts/hooks/before-tool")
         self.assertEqual(self.run_script(), (0, "AGENTS.md\nscripts/hooks/before-tool\n", ""))
@@ -97,6 +110,16 @@ class ScriptTest(test_paths.RepositoryTest):
         self.git("mv", "AGENTS.md", "notes.md", folder=self.folder)
         self.git("commit", "--quiet", "--message", "Move", folder=self.folder)
         self.assertEqual(self.run_script(), (0, "AGENTS.md\n", ""))
+
+    def test_counts_new_files_from_the_top_of_the_checkout_when_run_from_a_folder(self) -> None:
+        self.commit("src/app.py")
+        self.write("scripts/hooks/new-hook")
+        self.enterContext(contextlib.chdir(self.folder / "src"))
+        self.assertEqual(self.run_script(), (0, "scripts/hooks/new-hook\n", ""))
+
+    def test_counts_uncommitted_changes_and_new_files_for_a_single_commit(self) -> None:
+        self.write("AGENTS.md", "scripts/hooks/new-hook")
+        self.assertEqual(self.run_script("origin/main"), (0, "AGENTS.md\nscripts/hooks/new-hook\n", ""))
 
     def test_exits_2_with_the_cause_for_a_range_that_names_no_commit(self) -> None:
         status, printed, errors = self.run_script("nowhere...HEAD")
