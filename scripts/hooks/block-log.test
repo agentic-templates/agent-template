@@ -194,6 +194,14 @@ expect_result "With LOOP_DIR, the hook" 2 "$env_message"
 expect_last_line "With LOOP_DIR" "secret-files.check .env" "$base/other-loop/blocks.log"
 expect_line_count "With LOOP_DIR" "$blocks_before"
 
+# A check that runs outside the hook, as when an agent runs it by hand to compare two versions of it, blocks but adds
+# no line, because it blocked no tool's action.
+hook_status=0
+hook_message=$(HOME=$test_home HOOK_TOOL_NAME=Bash HOOK_COMMAND='cat .env' HOOK_CWD=$main_checkout \
+  bash "$main_checkout/scripts/hooks/secret-files.check" 2>&1 >/dev/null) || hook_status=$?
+expect_result "For cat .env, the check that runs outside the hook" 2 "$env_message"
+expect_line_count "After a check that runs outside the hook" "$blocks_before"
+
 # Without the token shapes, the line leaves out every word.
 mv "$main_checkout/scripts/token-shapes" "$base/token-shapes"
 run_copy "$main_checkout" Bash 'cat .env'

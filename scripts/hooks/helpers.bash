@@ -87,11 +87,16 @@ hook_main_checkout() {
   main_checkout "${git_folders%%$'\n'*}" "${git_folders#*$'\n'}"
 }
 
-# Adds a line to blocks.log in the loop's folder of this hook's repository. HOOK_BLOCK_LOG names another file, as in
-# the hooks' tests. The line holds the time, the check's file name and the words, with the values that could hold a
-# secret left out, so that its reader can tell a real block from a false alarm: log_block <word>...
+# Adds a line to blocks.log in the loop's folder of this hook's repository, when scripts/hooks/before-tool runs the
+# check for a tool's action. A check that runs on its own, as when an agent runs it by hand to compare two versions of
+# it, adds no line, because it blocked no action. HOOK_BLOCK_LOG names another file, as in the hooks' tests. The line
+# holds the time, the check's file name and the words, with the values that could hold a secret left out, so that its
+# reader can tell a real block from a false alarm: log_block <word>...
 log_block() {
   local log=${HOOK_BLOCK_LOG:-} line words
+  if [[ -z ${is_run_by_hook:-} ]]; then
+    return 0
+  fi
   if [[ -z $log ]]; then
     log=$(hook_loop_folder)/blocks.log || return 0
     mkdir -p "${log%/*}" || return 0
