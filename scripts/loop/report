@@ -26,6 +26,12 @@ The lines are:
                             of all that they and their agents used.
   Hook blocks               How many actions the before-tool hook blocked, from .loop/blocks.log, and how many each
                             rule blocked.
+  Agents' time              The minutes of the agents in the Type lines, from the first line of each one's transcript to
+                            the last, and how many of them have no transcript, such as the runs of
+                            scripts/loop/run-builder. Then the minutes and the share of each part of that time, which
+                            scripts/loop/agent_time.py describes: the model's time, the tool calls that ran
+                            scripts/check, ran a single test file, waited for CI, slept, ran another command or used
+                            another tool, and the waits for the agents' background tasks and for the orchestrator.
   Machine                   A line for each number of the machine that scripts/loop/meter records in
                             .loop/meter.jsonl: free disk, free memory, swap in use, GPU use, GPU memory in use and
                             load. Each gives the median and the worst: the lowest of free disk and free memory, and
@@ -38,7 +44,7 @@ The lines are:
                             change from the first reading to the last. A number that no reading gives says so.
 
 With --issues, the report also gives a line for each agent that built an issue, of the kinds other and left behind,
-with its numbers and those of its pull request.
+with its numbers, those of its pull request, and the minutes of each part of its time.
 
 The input tokens count the cached tokens too.
 
@@ -59,6 +65,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import agent_time
 import paths
 import request_events
 from agent_log import AgentRun, Period, agent_transcripts, read_runs, started, working_periods
@@ -186,6 +193,12 @@ def main(argv: list[str] | None = None) -> int:
         if (number := opened(run))
     }
     agents = count_once(transcripts, since)
+    transcripts_by_id = agent_transcripts(paths.claude_project_folder(checkout))
+    splits = {
+        run.start["id"]: agent_time.read_split(file)
+        for run in recent
+        if (file := transcripts_by_id.get(run.start["id"])) and file.exists()
+    }
     event_tokens = request_events.output_tokens(read_log(request_events.REQUESTS_FILE))
     ends = [run.end for run in recent if run.end]
     lines = [
@@ -195,10 +208,11 @@ def main(argv: list[str] | None = None) -> int:
         no_event_line(ends, event_tokens),
         orchestrator_line(agents),
         block_line(count_blocks(read_log("blocks.log"), since)),
-        *machine_lines(read_machine_readings(read_log("meter.jsonl"), since), periods_of(all_runs, checkout)),
+        time_line(list(splits.values()), len(recent)),
+        *machine_lines(read_machine_readings(read_log("meter.jsonl"), since), periods_of(all_runs, transcripts_by_id)),
     ]
     if options.issues:
-        lines += issue_lines(recent, results, event_tokens)
+        lines += issue_lines(recent, results, event_tokens, splits)
     print("\n".join(lines))
     return 0
 
@@ -412,16 +426,23 @@ def no_event_line(ends: list[dict[str, Any]], event_tokens: dict[str, int]) -> s
     return f"Requests of the agents of a session that have no event: {without_event} of {requests}"
 
 
-def issue_lines(runs: list[AgentRun], results: dict[str, PullRequestResult], event_tokens: dict[str, int]) -> list[str]:
-    """A line for each agent that built an issue, with its numbers and what happened to its pull request."""
+def issue_lines(
+    runs: list[AgentRun],
+    results: dict[str, PullRequestResult],
+    event_tokens: dict[str, int],
+    splits: dict[str, dict[str, float]],
+) -> list[str]:
+    """A line for each agent that built an issue, with its numbers, what happened to its pull request, and the split
+    of its time."""
     lines = []
     for run in runs:
         kind = run.start["kind"]
         if not kind or not kind.startswith(BUILD_KINDS):
             continue
         line = f"Issue #{run.start['issue']} {run.start['label']} {kind}: {run.start['type']}"
+        time = agent_time_part(splits.get(run.start["id"]))
         if not run.end:
-            lines.append(f"{line}, not ended")
+            lines.append(f"{line}, not ended{time}")
             continue
         end = run.end
         output_tokens, without_event = agent_output_tokens(end, event_tokens)
@@ -431,11 +452,32 @@ def issue_lines(runs: list[AgentRun], results: dict[str, PullRequestResult], eve
             line += f", {without_event} of its requests with no event"
         result = results.get(run.start["id"])
         if result is None:
-            lines.append(f"{line} | no pull request")
+            lines.append(f"{line} | no pull request{time}")
             continue
         happened = [words for has_happened, words in zip(result, RESULT_WORDS, strict=True) if has_happened]
-        lines.append(f"{line} | pull request #{opened(run)}: {', '.join(happened) or NOTHING_HAPPENED}")
+        lines.append(f"{line} | pull request #{opened(run)}: {', '.join(happened) or NOTHING_HAPPENED}{time}")
     return lines
+
+
+def time_line(splits: list[dict[str, float]], agents: int) -> str:
+    """The minutes and the share of each part of the time of the agents that have a transcript, out of the agents."""
+    total = {part: sum(split[part] for split in splits) for part in agent_time.PARTS}
+    seconds = sum(total.values())
+    line = (
+        f"Agents' time: {seconds / 60:.1f} min, from the transcripts of {len(splits)} agents, and "
+        f"{agents - len(splits)} agents have none"
+    )
+    if not seconds:
+        return line
+    parts = [f"{part} {total[part] / 60:.1f} min ({total[part] / seconds:.0%})" for part in agent_time.PARTS]
+    return " | ".join([line, *parts])
+
+
+def agent_time_part(split: dict[str, float] | None) -> str:
+    """The minutes of each part of an agent's time that it spent any in, to end its issue line, or nothing for an
+    agent without a transcript or without time in it."""
+    parts = [f"{part} {seconds / 60:.1f} min" for part, seconds in (split or {}).items() if seconds]
+    return " | time: " + ", ".join(parts) if parts else ""
 
 
 def orchestrator_line(agents: list[Agent]) -> str:
@@ -469,9 +511,8 @@ def read_machine_readings(log: str, since: dt.datetime) -> list[MachineReading]:
     return sorted(readings, key=lambda reading: reading.at)
 
 
-def periods_of(runs: list[AgentRun], checkout: Path) -> list[Period]:
+def periods_of(runs: list[AgentRun], transcripts_by_id: dict[str, Path]) -> list[Period]:
     """The periods in which the agents worked, as scripts/loop/agent_log.py tells them."""
-    transcripts_by_id = agent_transcripts(paths.claude_project_folder(checkout))
     runs_folder = paths.loop_dir() / "runs"
     return [period for run in runs for period in working_periods(run, transcripts_by_id, runs_folder)]
 
