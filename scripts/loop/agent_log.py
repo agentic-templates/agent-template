@@ -165,9 +165,18 @@ def transcript_numbers(transcript: Path) -> Numbers:
         tool_calls=sum(call.tool_calls for call in calls),
         input_tokens=sum(call.input_tokens for call in calls),
         output_tokens=sum(call.output_tokens for call in calls),
-        requests={call.request_id: call.output_tokens for call in calls if call.request_id},
+        requests=request_tokens(calls),
         pull_request=transcripts.opened_pull_request(transcript),
     )
+
+
+def request_tokens(calls: list[transcripts.Call]) -> dict[str, int]:
+    """The output tokens of each call that has a request id, as the transcript gives them, by request id."""
+    return {call.request_id: call.output_tokens for call in calls if call.request_id}
+
+
+def transcript_requests(transcript: Path) -> dict[str, int]:
+    return request_tokens(transcripts.read_transcript(transcript)[0])
 
 
 def folder_megabytes(folder: Path) -> float | None:
@@ -256,9 +265,9 @@ def read_runs(log: Path) -> list[AgentRun]:
 
 
 def agent_output_tokens(end: dict[str, Any], event_tokens: dict[str, int]) -> tuple[int, int]:
-    """The output tokens of an agent that ended, and how many of its requests have no event, from its end line and the
-    output tokens of each request that request_events.output_tokens gives. A run's own count is exact. An agent of a session gets each request's count from its event, or else from its transcript. An end line
-    written before agents.jsonl had requests gives none, so its own count counts, as for an agent with no events."""
+    """The output tokens, and how many requests have no event. A run's own count is exact. An agent of a session gets
+    each request's count from its event, or else from its transcript. An end line written before agents.jsonl had
+    requests gives none, so its own count counts, as for an agent with no events."""
     requests: dict[str, int] | None = end.get("requests")
     if requests is None:
         return end["output_tokens"], 0

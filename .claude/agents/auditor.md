@@ -19,10 +19,11 @@ background: true
    measurement didn't move or got worse.
 5. Judge which kind of work each issue in the report's `Issue` lines was, from the kinds that the descriptions of the
    builder types in `.claude/agents/` name, and whether the issue went to the type whose description fits it. Add up
-   the cost and the results of each kind's issues, as the report does for each type. The output tokens of an agent of
-   a session leave out most of them, as the report's lines say, so compare output tokens only between runs of
-   `scripts/loop/run-builder`. For each issue that went to a type whose description doesn't fit it, change the
-   descriptions so that they name the right type for such an issue.
+   the cost and the results of each kind's issues, as the report does for each type. The report counts the output
+   tokens of a request with no event from its transcript, which leaves out most of them. So compare the output tokens
+   of agents of a session only if the report's line `Requests of the agents of a session that have no event` gives 0
+   of them, and otherwise only between runs of `scripts/loop/run-builder`. For each issue that went to a type whose
+   description doesn't fit it, change the descriptions so that they name the right type for such an issue.
 6. Find what went wrong since the time in step 3, and fix each cause. Follow docs/rules.md for a change to a
    rule or to an agent type's instructions, and docs/code.md for a change to code, such as a check. Look at least at
    these:
@@ -35,13 +36,17 @@ background: true
    - the issues that the orchestrator planned again after a builder took them, which lost `ready` then
 7. Test the agent types, as "Test the agent types" below describes.
 8. Set `OUTPUT_TOKENS_PER_RETROSPECTIVE` in `scripts/loop/meter`, the output tokens of the agents that make the next
-   retrospective due. If it is `None`, the hours in `HOURS_PER_RETROSPECTIVE` made this retrospective due, so set it
-   to the output tokens of those hours: the sum of the output tokens in the report's `Type` lines, other than the
-   `auditor` line. Otherwise change it only when this retrospective and the one before it point the same way, so that
-   one unusual retrospective can't move it. Lower it when both found much to fix. Raise it when both found little, or
-   when each cost a large share of the agents' hours since the retrospective before it. A retrospective costs the
-   hours of the auditor, the agents that it starts and its test builds. Judge each retrospective by what it fixed and
-   what it cost, as its pull request records them.
+   retrospective due. If it is `None`, the hours in `HOURS_PER_RETROSPECTIVE` made this retrospective due. Then set
+   it to the output tokens of those hours, the sum of the output tokens in the report's `Type` lines other than the
+   `auditor` line, but only if the report's line `Requests of the agents of a session that have no event` gives 0 of
+   them. If it gives more, leave it `None`, and say why in your pull request's description. In the pull request that
+   sets it, delete `HOURS_PER_RETROSPECTIVE`, the code that only the hours need, its tests and the help text about
+   the hours, so that the output tokens alone make a retrospective due. If it has a number already, change it only
+   when this retrospective and the one before it point the same way, so that one unusual retrospective can't move it.
+   Lower it when both found much to fix. Raise it when both found little, or when each cost a large share of the
+   agents' hours since the retrospective before it. A retrospective costs the hours of the auditor, the agents that
+   it starts and its test builds. Judge each retrospective by what it fixed and what it cost, as its pull request
+   records them.
 9. Open the pull request with the label `retrospective`. In its description, give:
    - the report's measurements, and the cost and results of each kind of issue
    - each change, including a new version of an agent type, with the measurement in the report that it should move,

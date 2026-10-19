@@ -23,8 +23,10 @@ The last line gives the machine's free disk, free memory, swap in use, GPU use a
 orchestrator's context size, and whether a retrospective is due. One is due once the output tokens of the agents that
 started since the last retrospective, reasoning tokens included, reach OUTPUT_TOKENS_PER_RETROSPECTIVE in this
 script. The last retrospective is the newest merged pull request with the label retrospective, or the start of
-.loop/agents.jsonl before there is one. The meter counts the output tokens of the agents that ended, as
-scripts/loop/report counts them. Until a retrospective sets OUTPUT_TOKENS_PER_RETROSPECTIVE, one is due once the
+.loop/agents.jsonl before there is one. The meter counts the output tokens as scripts/loop/report counts them, and an
+agent of a session without an end line until the last line of its transcript. A request with no event in
+.loop/requests.jsonl counts the output tokens that the transcript gives, which leave out most of them, so the line
+says how many requests have none. Until a retrospective sets OUTPUT_TOKENS_PER_RETROSPECTIVE, one is due once the
 agents have worked {hours} hours since the last retrospective instead. The hours come from the periods on each agent's
 last end line in .loop/agents.jsonl, which scripts/loop/agent_log.py describes. An agent without an end line counts
 until the last line of its transcript. The test builds and the auditors don't count.
@@ -99,7 +101,7 @@ TRANSCRIPT_TAIL_BYTES = 400_000
 # How often meter --wake looks for a new note of scripts/hooks/hand-off between two readings
 HAND_OFF_CHECK_SECONDS = 60
 RETROSPECTIVE_LABEL = "retrospective"
-# A retrospective sets this number. While it is None, HOURS_PER_RETROSPECTIVE makes a retrospective due instead.
+# .claude/agents/auditor.md says when a retrospective sets this.
 OUTPUT_TOKENS_PER_RETROSPECTIVE: int | None = None
 HOURS_PER_RETROSPECTIVE = 30.0
 # A retrospective doesn't look back on the work of an earlier one.
@@ -607,16 +609,13 @@ def read_retrospective(checkout: Path, loop_folder: Path) -> str:
     last = max(merges, default=None)
     runs = agent_log.read_runs(loop_folder / "agents.jsonl")
     counted = [run for run in runs if not run.start["test"] and run.start["type"] != AUDITOR]
+    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
     if OUTPUT_TOKENS_PER_RETROSPECTIVE is not None:
         requests = loop_folder / request_events.REQUESTS_FILE
         event_tokens = request_events.output_tokens(requests.read_text() if requests.exists() else "")
-        tokens = sum(
-            agent_log.agent_output_tokens(run.end, event_tokens)[0]
-            for run in counted
-            if run.end and (last is None or agent_log.started(run) >= last)
-        )
-        return tokens_note(last, tokens, OUTPUT_TOKENS_PER_RETROSPECTIVE)
-    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
+        recent = [run for run in counted if last is None or agent_log.started(run) >= last]
+        ends = [end for run in recent if (end := counted_end(run, transcripts))]
+        return tokens_note(last, ends, event_tokens, OUTPUT_TOKENS_PER_RETROSPECTIVE)
     minutes = sum(
         agent_log.minutes_after(agent_log.working_periods(run, transcripts, loop_folder / "runs"), last)
         for run in counted
@@ -628,11 +627,32 @@ def since_words(last: dt.datetime | None) -> str:
     return "since the last one" if last else "with no retrospective yet"
 
 
-def tokens_note(last: dt.datetime | None, tokens: int, tokens_per_retrospective: int) -> str:
+def counted_end(run: agent_log.AgentRun, transcripts: dict[str, Path]) -> dict[str, Any] | None:
+    """The agent's last end line. An agent of a session without one, such as one whose session ended first, gets the
+    requests until the last line of its transcript instead."""
+    if run.end is not None:
+        return run.end
+    transcript = transcripts.get(run.start["id"])
+    if transcript is None or not transcript.exists():
+        return None
+    return {"requests": agent_log.transcript_requests(transcript)}
+
+
+def tokens_note(
+    last: dt.datetime | None, ends: list[dict[str, Any]], event_tokens: dict[str, int], tokens_per_retrospective: int
+) -> str:
     since = since_words(last)
+    counts = [agent_log.agent_output_tokens(end, event_tokens) for end in ends]
+    tokens = sum(tokens for tokens, _ in counts)
+    without_event = sum(without_event for _, without_event in counts)
     if tokens >= tokens_per_retrospective:
-        return f"retrospective due: {tokens} output tokens of agents' work {since}"
-    return f"retrospective not due: {tokens} of {tokens_per_retrospective} output tokens of agents' work {since}"
+        note = f"retrospective due: {tokens} output tokens of agents' work {since}"
+    else:
+        note = f"retrospective not due: {tokens} of {tokens_per_retrospective} output tokens of agents' work {since}"
+    if not without_event:
+        return note
+    requests = sum(len(end.get("requests") or {}) for end in ends)
+    return f"{note}, {without_event} of {requests} requests with no event"
 
 
 def hours_note(last: dt.datetime | None, hours: float) -> str:

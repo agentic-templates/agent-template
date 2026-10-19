@@ -955,11 +955,39 @@ class OutputTokensRetrospectiveTest(RetrospectiveNoteTest):
                 ]
                 self.assertEqual(self.retrospective(*agents), note)
 
-    def test_counts_the_transcripts_tokens_of_a_request_without_an_event(self) -> None:
+    def test_counts_the_transcripts_tokens_of_a_request_without_an_event_and_says_how_many_have_none(self) -> None:
         self.log_requests(("req_a", 3000))
         self.assertEqual(
             self.retrospective(agent("toolu_1", "2026-10-18T01:30:00", 60, requests={"req_a": 2, "req_b": 5})),
-            "retrospective not due: 3005 of 10000 output tokens of agents' work since the last one",
+            "retrospective not due: 3005 of 10000 output tokens of agents' work since the last one, 1 of 2 requests "
+            "with no event",
+        )
+
+    def test_says_that_no_request_has_an_event_when_nothing_received_them(self) -> None:
+        self.assertEqual(
+            self.retrospective(agent("toolu_1", "2026-10-18T01:30:00", 60, requests={"req_a": 2, "req_b": 5})),
+            "retrospective not due: 7 of 10000 output tokens of agents' work since the last one, 2 of 2 requests "
+            "with no event",
+        )
+
+    def test_counts_an_agent_of_a_session_without_an_end_line_until_the_last_line_of_its_transcript(self) -> None:
+        project = "".join(character if character.isalnum() else "-" for character in str(paths.main_checkout()))
+        agents = self.root / "claude-config" / "projects" / project / "session-1" / "subagents"
+        write_transcript(
+            agents / "agent-a1.jsonl",
+            [
+                prompt_line(0),
+                call_line("a", 1, output_tokens=2, request_id="req_a"),
+                call_line("b", 2, output_tokens=5, request_id="req_b"),
+            ],
+        )
+        (agents / "agent-a1.meta.json").write_text(json.dumps({"agentType": "builder", "toolUseId": "toolu_1"}))
+        self.log_requests(("req_a", 3000), ("req_b", 1000))
+        self.assertEqual(
+            self.retrospective(
+                agent("toolu_1", "2026-10-18T01:30:00", None), agent("other", "2026-10-18T01:30:00", None)
+            ),
+            "retrospective not due: 4000 of 10000 output tokens of agents' work since the last one",
         )
 
     def test_is_not_due_after_30_hours_of_work(self) -> None:
@@ -968,14 +996,14 @@ class OutputTokensRetrospectiveTest(RetrospectiveNoteTest):
             "retrospective not due: 100 of 10000 output tokens of agents' work since the last one",
         )
 
-    def test_leaves_out_test_builds_auditors_agents_that_started_before_the_last_one_and_agents_still_working(
+    def test_leaves_out_test_builds_auditors_agents_before_the_last_one_and_agents_without_an_end_or_transcript(
         self,
     ) -> None:
         agents = [
             agent("test", "2026-10-18T01:30:00", 60, is_test=True, output_tokens=20_000),
             agent("auditor", "2026-10-18T01:30:00", 60, "auditor", output_tokens=20_000),
             agent("before", "2026-10-18T00:30:00", 60, output_tokens=20_000),
-            agent("working", "2026-10-18T01:30:00", None),
+            agent("no transcript", "2026-10-18T01:30:00", None),
             agent("counted", "2026-10-18T01:00:00", 60, output_tokens=40),
         ]
         self.assertEqual(
