@@ -8,6 +8,8 @@
 # - a CLAUDE.md, .claude/CLAUDE.md or CLAUDE.local.md that makes Claude Code skip AGENTS.md
 # - a gh older than the rules need
 # - a missing jq, which the hooks need
+# - the orchestrator's state file, which it prints for the orchestrator, and for a new session that can take over the
+#   loop once the orchestrator's process has ended. Any other session gets a line that names the orchestrator.
 # In a Claude Code on the web session, it also installs the tools that scripts/check runs, as CI does.
 # Copilot CLI and Cursor also run the hooks in .claude/settings.json, so the hook does nothing outside Claude Code.
 # When it fails on its own error, it exits with code 0, so that a broken hook never stops work.
@@ -21,6 +23,20 @@ fi
 # shellcheck source=scripts/minimum-gh-version
 source "${BASH_SOURCE[0]%/*}/../minimum-gh-version"
 home=${HOME%/}
+
+# Claude Code replaces a hook's output of more than 10,000 characters with its start, and doesn't ask Claude to read
+# the rest. So the hook counts the bytes it prints, which are never fewer than its characters, and cuts the state file
+# to fit.
+output_limit=10000
+printed_bytes=0
+
+# Prints a line, and adds its bytes to printed_bytes: note <line>
+note() {
+  # In the C locale, ${#1} counts bytes.
+  local LC_ALL=C
+  printf '%s\n' "$1"
+  printed_bytes=$((printed_bytes + ${#1} + 1))
+}
 
 # Prints a path with the symlinks in its folder resolved, or nothing if its folder doesn't exist.
 physical_path() {
@@ -81,12 +97,14 @@ reads_both_files() {
   [[ $setting == claude-md-and-agents-md ]]
 }
 
-# 1. A compaction. Claude Code sends the event as JSON on standard input, and its source field is compact after a
-# compaction. Without jq, or with input that isn't JSON, the source is empty. The subshell drops the trap, which would
-# otherwise take the source from input that is only partly JSON.
-event_source=$(trap - ERR && jq -r '.source // empty' 2>/dev/null) || event_source=""
+# 1. A compaction. Claude Code sends the event as JSON on standard input, with the session's id, and a source field
+# that is compact after a compaction. Without jq, or with input that isn't JSON, both are empty. The subshells drop the
+# trap, which would otherwise take a field from input that is only partly JSON.
+IFS= read -r -d '' input || true
+event_source=$(trap - ERR && jq -r '.source // empty' 2>/dev/null <<<"$input") || event_source=""
+session_id=$(trap - ERR && jq -r '.session_id // empty' 2>/dev/null <<<"$input") || session_id=""
 if [[ $event_source == compact ]]; then
-  echo "This conversation was just compacted, so the guides that this session read from docs/ survive only in the summary. Read again each guide that \"Read the guides\" in AGENTS.md names for the work you're doing, and AGENTS.md itself if its text isn't in your context."
+  note "This conversation was just compacted, so the guides that this session read from docs/ survive only in the summary. Read again each guide that \"Read the guides\" in AGENTS.md names for the work you're doing, and AGENTS.md itself if its text isn't in your context."
 fi
 
 # 2. Files that make Claude Code read them instead of AGENTS.md, in this folder and each folder above it.
@@ -111,24 +129,26 @@ while true; do
   folder=${folder:-/}
 done
 if ((${#hiding_files[@]} > 0)) && ! $imported && ! reads_both_files; then
-  echo "Claude Code didn't load AGENTS.md, which holds this repository's rules, because these files make it read them instead:"
-  printf -- '- %s\n' "${hiding_files[@]}"
-  echo "Read AGENTS.md before you do anything else, and follow it. Then tell the person which files hide AGENTS.md, and how to fix that: move or delete those files, or set \"Project instructions\" in /config so that Claude Code reads both CLAUDE.md and AGENTS.md."
+  note "Claude Code didn't load AGENTS.md, which holds this repository's rules, because these files make it read them instead:"
+  for file in "${hiding_files[@]}"; do
+    note "- $file"
+  done
+  note "Read AGENTS.md before you do anything else, and follow it. Then tell the person which files hide AGENTS.md, and how to fix that: move or delete those files, or set \"Project instructions\" in /config so that Claude Code reads both CLAUDE.md and AGENTS.md."
 fi
 
 # 3. A gh older than the rules need. If the version can't be read, the hook says nothing about gh.
 if ! command -v gh >/dev/null; then
-  echo "The rules in AGENTS.md need gh $minimum_gh_version or later, and gh isn't installed. Tell the person, and that https://github.com/cli/cli#installation says how to install it."
+  note "The rules in AGENTS.md need gh $minimum_gh_version or later, and gh isn't installed. Tell the person, and that https://github.com/cli/cli#installation says how to install it."
 else
   found=$(older_gh_version "$(gh --version 2>/dev/null || true)")
   if [[ -n $found ]]; then
-    echo "The rules in AGENTS.md need gh $minimum_gh_version or later, and this machine has gh $found. Tell the person, and that https://github.com/cli/cli#installation says how to update it."
+    note "The rules in AGENTS.md need gh $minimum_gh_version or later, and this machine has gh $found. Tell the person, and that https://github.com/cli/cli#installation says how to update it."
   fi
 fi
 
 # 4. A missing jq. The hooks need it to read what the tool sends them, and without it they let every action through.
 if ! command -v jq >/dev/null; then
-  echo "The hooks in scripts/hooks need jq, and it isn't installed, so they let every action through. Tell the person, and that they can install it with a package manager, such as brew install jq on macOS or sudo apt install jq on Ubuntu."
+  note "The hooks in scripts/hooks need jq, and it isn't installed, so they let every action through. Tell the person, and that they can install it with a package manager, such as brew install jq on macOS or sudo apt install jq on Ubuntu."
 fi
 
 # 5. In a Claude Code on the web session, install shellcheck, actionlint and zizmor, so that scripts/check runs
@@ -139,13 +159,76 @@ if [[ ${CLAUDE_CODE_REMOTE:-} == true ]]; then
   if [[ ! -x $tools_folder/shellcheck || ! -x $tools_folder/actionlint || ! -x $tools_folder/zizmor ]]; then
     # The subshell drops the trap, which would otherwise turn the install's failure into success.
     if ! install_error=$(trap - ERR && "${BASH_SOURCE[0]%/*}/../install-check-tools" "$tools_folder" 2>&1); then
-      echo "The check tools shellcheck, actionlint and zizmor are missing, because scripts/install-check-tools failed: $install_error"
-      echo "scripts/check skips their checks, and CI still runs them."
+      note "The check tools shellcheck, actionlint and zizmor are missing, because scripts/install-check-tools failed: $install_error"
+      note "scripts/check skips their checks, and CI still runs them."
     fi
   fi
   if [[ -x $tools_folder/shellcheck && -x $tools_folder/actionlint && -x $tools_folder/zizmor && -n ${CLAUDE_ENV_FILE:-} ]]; then
     # shellcheck disable=SC2016 # $PATH expands when Claude Code reads the file.
     printf 'export PATH="%s:$PATH"\n' "$tools_folder" >>"$CLAUDE_ENV_FILE"
+  fi
+fi
+
+# 6. The orchestrator's state file, .loop/state.md in the main checkout. Its session line holds the orchestrator's
+# session id, and its pid line the id of its Claude Code process, which Claude Code gives its hooks in CLAUDE_PID.
+# The hook reads both lines, because /clear gives the session a new id in the same process, and claude --resume gives
+# the same session a new process.
+# This step comes last, so that no note after the file reads as part of it.
+
+# Prints the first word after "<name>:" on the first line of the state file that starts with it: state_field <name>
+state_field() {
+  awk -v name="$1:" 'index($0, name) == 1 { $0 = substr($0, length(name) + 1); print $1; exit }' "$state_file"
+}
+
+# Succeeds if a process with the id runs: is_running <process id>
+# The id must be a positive number, because kill -0 also succeeds for 0 and -1, which name groups of processes.
+is_running() {
+  [[ $1 =~ ^[1-9][0-9]*$ ]] && kill -0 "$1" 2>/dev/null
+}
+
+# Prints a note, and then as much of the state file as fits in output_limit: print_state_file <note>
+print_state_file() {
+  local file_bytes
+  note "$1"
+  file_bytes=$(($(wc -c <"$state_file")))
+  # The blank line before the file takes one byte.
+  if ((printed_bytes + 1 + file_bytes > output_limit)); then
+    note "The file is too long to show here in full. Read the rest of it from $state_file."
+  fi
+  note ""
+  head -c "$((output_limit - printed_bytes))" "$state_file"
+}
+
+state_file=""
+in_main_checkout=""
+if [[ -n $repository && -n $session_id && -n ${CLAUDE_PID:-} ]] &&
+  git_folder=$(git -C "$repository" rev-parse --absolute-git-dir 2>/dev/null) &&
+  shared_git_folder=$(git -C "$repository" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+  # The main checkout holds the git folder that its worktrees share, unless the repository keeps its git folder
+  # elsewhere, as a submodule does.
+  if [[ $shared_git_folder == */.git ]]; then
+    state_file=${shared_git_folder%/.git}/.loop/state.md
+  else
+    state_file=$repository/.loop/state.md
+  fi
+  if [[ $git_folder == "$shared_git_folder" ]]; then
+    in_main_checkout=yes
+  fi
+fi
+if [[ -n $state_file && -f $state_file ]]; then
+  owner=$(state_field session)
+  owner_process=$(state_field pid)
+  both_lines="\"session: $session_id\" and \"pid: $CLAUDE_PID\" as the session and pid lines"
+  if [[ $owner == "$session_id" && $owner_process == "$CLAUDE_PID" ]]; then
+    print_state_file "You are this repository's orchestrator. Continue the loop from your state file, $state_file, which follows."
+  elif [[ $owner == "$session_id" || $owner_process == "$CLAUDE_PID" ]]; then
+    print_state_file "You are this repository's orchestrator, in a new session or process. Write $both_lines of your state file, $state_file. Then continue the loop from the file, which follows."
+  # Only a new session in the main checkout can take over the loop, because builders work in worktrees, and a session
+  # that started earlier has work of its own.
+  elif [[ $event_source == startup && -n $in_main_checkout ]] && ! is_running "$owner_process"; then
+    print_state_file "The Claude Code process of this repository's orchestrator has ended. If the maintainer asks you to continue its work, take over the loop: write $both_lines of its state file, $state_file, and continue the loop from the file, which follows."
+  elif [[ -n $owner ]]; then
+    note "Session $owner is this repository's orchestrator, and keeps the loop's state in $state_file."
   fi
 fi
 exit 0

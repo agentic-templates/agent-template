@@ -7,4 +7,7 @@
 .claude/settings.local.json
 .claude/worktrees/
 
+# The loop's working files, such as the orchestrator's state file
+.loop/
+
 .DS_Store
