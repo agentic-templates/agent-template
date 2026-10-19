@@ -586,8 +586,6 @@ read_body_input() {
   block "Blocked: this hook can't read a body from standard input, other than from a here-document, so it can't check $1. $give_the_body"
 }
 
-# Adds the text of a here-document to body, and sets body_may_expand to yes when the text has active expansion syntax:
-# add_heredoc_to_body <here-document's number>
 add_heredoc_to_body() {
   body+=${heredocs[$1]}
   if [[ ${heredoc_note_expands[$1]} == yes ]] && heredoc_has_expansion "${heredocs[$1]}"; then

@@ -49,8 +49,7 @@ read_parenthesis_substitution() {
 }
 
 # Reads the character at index in the command of a $( ) substitution, and changes index, quote and depth, which
-# read_parenthesis_substitution keeps. A backslash makes the next character literal, and a nested substitution moves
-# index to its end.
+# read_parenthesis_substitution keeps.
 read_substitution_character() {
   local char=${text:index:1}
   if [[ $quote == "'" ]]; then
@@ -193,7 +192,6 @@ split_simple_commands() {
       word_may_expand=yes
     fi
     if ((i == length)); then
-      # The end of the command ends the word and the simple command.
       read_separator
     elif [[ $quote != "'" && ($char == '`' || ($char == '$' && $next == '(')) ]]; then
       add_substitution
@@ -203,8 +201,8 @@ split_simple_commands() {
       read_unquoted_character
     else
       # Most characters outside quotes only join the word. The loop adds them itself, because calling
-      # read_unquoted_character for each of them made the splitter take a tenth more CPU time, as pull request #130
-      # measured.
+      # read_unquoted_character for each of them made the splitter take 6% more CPU time, as a comment on issue #95
+      # shows.
       word+=$char
       has_word=true
     fi
@@ -258,8 +256,6 @@ read_quoted_text() {
   fi
 }
 
-# Reads the character at i outside quotes, which ends the word, starts quotes or a comment, makes the next character
-# literal, or joins the word.
 read_unquoted_character() {
   if [[ $char == [[:space:]\;\&\|\(\)\<\>] ]]; then
     read_separator
@@ -302,8 +298,8 @@ read_separator() {
   fi
 }
 
-# Adds the word to the simple command's words, or to its redirections when it follows an operator. A number right
-# before a redirection's operator, as in 2>, is the operator's file descriptor: end_word <whether a redirection starts>
+# Adds the word to the simple command's words, or to its redirections when it follows an operator:
+# end_word <whether a redirection starts>
 end_word() {
   if [[ -n $operator ]]; then
     redirections+=("$operator" "$word")
