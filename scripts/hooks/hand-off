@@ -14,7 +14,8 @@
 # .loop/hand-offs, named <agent>.<threshold>, where <agent> is a subagent's agent id or a session's id.
 # scripts/loop/meter reads them.
 # The files are in the .loop of the main checkout. When the hook can't create a note's file, the note says so. The hook
-# says nothing when it can't tell the context's size, such as when it can't find the agent's transcript.
+# says nothing when it can't tell the context's size, such as when it can't find the agent's transcript, or after a
+# compaction until the agent's next reply.
 
 compact_tokens=300000
 soon_tokens=400000
@@ -43,13 +44,19 @@ find_loop_folder() {
 # Prints the size of the context that the latest call of a transcript read, or nothing if it can't tell:
 # context_size <transcript>
 # The size is the call's input tokens, cached or not. The transcript gives most replies the output tokens from the
-# start of their stream, so the size leaves them out.
+# start of their stream, so the size leaves them out. Claude Code marks each compaction with an entry of the subtype
+# compact_boundary, and the replies before it read the context from before the compaction, so after such an entry, the
+# hook can't tell the size until the next reply.
 context_size() {
   if [[ ! -f $1 ]]; then
     return 0
   fi
-  tail -c "$transcript_tail_bytes" "$1" | grep -F '"usage"' | jq -R -n '
-    [inputs | fromjson? | select(.type == "assistant") | .message.usage // empty] | last | select(.)
+  tail -c "$transcript_tail_bytes" "$1" | grep -F -e '"usage"' -e '"compact_boundary"' | jq -R -n '
+    reduce (inputs | fromjson?) as $entry (null;
+      if $entry.type == "system" and $entry.subtype == "compact_boundary" then null
+      elif $entry.type == "assistant" then ($entry.message.usage? // .)
+      else . end)
+    | select(.)
     | (.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0)' 2>/dev/null
 }
 
