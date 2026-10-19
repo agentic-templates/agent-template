@@ -1,6 +1,6 @@
 ---
 name: builder-small
-description: Builds one issue that changes a line or two of code, or only wording, into a pull request in its own worktree, unless the description of builder-deep names the issue.
+description: Builds one issue that changes a line or two of code, or rewords text without changing what it asks anyone to do, into a pull request in its own worktree, unless the description of builder-deep names the issue.
 model: sonnet
 effort: medium
 isolation: worktree
