@@ -21,6 +21,7 @@ When a maintainer's request conflicts with a rule here, follow the request, and 
 
 Read each guide before you first do its kind of work in a session, even when the change is small.
 
+- [docs/loop.md](docs/loop.md), before you run the loop as its orchestrator: the session that turns the maintainer's goals into issues, starts the agents that build them, and lands their pull requests.
 - [docs/writing.md](docs/writing.md), before you write anything that others read: docs, issues, pull requests, commit messages, comments, error messages, and replies and reports to the maintainer.
 - [docs/pages.md](docs/pages.md), before you write or change the README, AGENTS.md or a page in `docs/`.
 - [docs/rules.md](docs/rules.md), before you change AGENTS.md, a guide or the labels.
