@@ -21,7 +21,7 @@ notes=$repository/.loop/hand-offs
 
 soon="Your context has passed 400k tokens. Hand off your work at your next stopping point, so that a fresh agent continues it."
 now="Your context has passed 500k tokens. Hand off your work as soon as the step you're on ends, so that a fresh agent continues it."
-how="To hand off, push your branch if you have one. Then write a comment on your issue or pull request with what's done, what's left, the commands you ran and where their outputs are, and the open questions. End with a report that says that you handed off, with the comment's link."
+how="To hand off, push your branch. Then write a comment on your issue or pull request with what's done, what's left, the commands you ran and where their outputs are, and the open questions. End with a report that says that you handed off, with the comment's link."
 
 # Prints a reply of a transcript, whose call read the given number of tokens: reply <tokens>
 # The call's input splits into its three parts, so that a hook that leaves one out reads a smaller size.
@@ -32,6 +32,7 @@ reply() {
 }
 
 # Adds lines to the transcript of a session, or of a subagent of it: add_lines <session> <agent id or ""> <line>...
+# A subagent's transcript gets the file that Claude Code writes next to it, for an agent that the session started.
 add_lines() {
   local transcript=$projects/$1.jsonl
   if [[ -n $2 ]]; then
@@ -40,6 +41,9 @@ add_lines() {
   shift 2
   mkdir -p "${transcript%/*}"
   printf '%s\n' "$@" >>"$transcript"
+  if [[ $transcript == */subagents/* && ! -f ${transcript%.jsonl}.meta.json ]]; then
+    echo '{"agentType": "builder", "toolUseId": "toolu_01", "spawnDepth": 1}' >"${transcript%.jsonl}.meta.json"
+  fi
 }
 
 # Adds a reply to a transcript, with a tool result after it: add_reply <session> <agent id or ""> <tokens>
@@ -48,13 +52,15 @@ add_reply() {
     '{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "content": "a \"usage\" line"}]}}'
 }
 
-# Runs the hook after a tool call of a session or a subagent, and sets output:
+# Runs the hook after a tool call of a session or of a subagent, whose type is in agent_type, and sets output:
 # run_hook <session> <agent id or ""> [<NAME=value>...]
+agent_type=builder
 run_hook() {
   local input
-  input=$(jq -n --arg session "$1" --arg agent "$2" --arg transcript "$projects/$1.jsonl" --arg cwd "$repository" \
+  input=$(jq -n --arg session "$1" --arg agent "$2" --arg type "$agent_type" --arg transcript "$projects/$1.jsonl" \
+    --arg cwd "$repository" \
     '{session_id: $session, transcript_path: $transcript, cwd: $cwd, hook_event_name: "PostToolUse", tool_name: "Read",
-      tool_input: {file_path: "README.md"}} + (if $agent == "" then {} else {agent_id: $agent, agent_type: "builder"} end)')
+      tool_input: {file_path: "README.md"}} + (if $agent == "" then {} else {agent_id: $agent, agent_type: $type} end)')
   shift 2
   output=$(env -u LOOP_HAND_OFF -u LOOP_DIR "$@" "$repository/scripts/hooks/hand-off" <<<"$input" 2>&1) || true
 }
@@ -145,6 +151,25 @@ expect_note "For a subagent of a session other than the orchestrator's" ""
 add_reply "$orchestrator" ../a6 600000
 run_hook "$orchestrator" ../a6
 expect_note "For an agent id that isn't a file name" ""
+add_reply "$orchestrator" d1 600000
+echo '{"agentType": "builder", "toolUseId": "toolu_02", "spawnDepth": 2}' >"$projects/$orchestrator/subagents/agent-d1.meta.json"
+run_hook "$orchestrator" d1
+expect_note "For a subagent of a builder in the orchestrator's session" ""
+add_reply "$orchestrator" d2 600000
+rm "$projects/$orchestrator/subagents/agent-d2.meta.json"
+run_hook "$orchestrator" d2
+expect_note "For a subagent without the file that says who started it" ""
+for agent_type in reviewer researcher auditor Explore general-purpose; do
+  add_reply "$orchestrator" "t-$agent_type" 600000
+  run_hook "$orchestrator" "t-$agent_type"
+  expect_note "For a subagent of the type $agent_type" ""
+done
+agent_type="builder-small"
+add_reply "$orchestrator" t-small 410000
+run_hook "$orchestrator" t-small
+expect_note "For a subagent of the type builder-small" "$soon $how"
+agent_type=builder
+rm -rf "$notes"
 expect_note_files "For the agents that get no note" ""
 
 # A session that scripts/loop/run-builder started, and its subagent
@@ -156,10 +181,17 @@ run_hook "$builder" ""
 expect_note "For a session without LOOP_HAND_OFF" ""
 add_reply "$builder" c1 410000
 run_hook "$builder" c1 LOOP_HAND_OFF=1
-expect_note "For a subagent of a builder that scripts/loop/run-builder started" "$soon $how"
+expect_note "For a subagent of a builder that scripts/loop/run-builder started" ""
 run_hook 44444444-aaaa-4bbb-8ccc-000000000004 "" LOOP_HAND_OFF=1
 expect_note "For a builder whose transcript can't be found" ""
-expect_note_files "For the builders" "$builder.400000 c1.400000"
+expect_note_files "For the builders" "$builder.400000"
+
+# A note whose file the hook can't write
+add_reply "$orchestrator" a8 410000
+chmod 555 "$notes"
+run_hook "$orchestrator" a8
+chmod 755 "$notes"
+expect_note "When the hook can't write the note's file" "$soon $how scripts/hooks/hand-off couldn't write $notes/a8.400000, so it may give this note again, and scripts/loop/meter doesn't show it. List this in your report for the orchestrator."
 
 # Calls that end at the same time
 add_reply "$orchestrator" a7 410000

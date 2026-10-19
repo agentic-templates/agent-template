@@ -56,10 +56,11 @@ on.
 - **Reports.** When an agent ends, read its report, and act on what it asks of you. For each item that it lists for
   the maintainer, such as a command that a hook told it to leave to them, ask the maintainer in an issue with
   `needs-decision`.
-- **Hand-offs.** When an agent reports that it handed off its work, because its context grew too long, start a new
-  agent of the same type with the same prompt, and put the link to its hand-off comment in that prompt. Start the new
-  agent in your session once your own account's advice lets you, because `scripts/loop/run-builder` can't give a
-  builder the link.
+- **Hand-offs.** When a builder reports that it handed off its work, because its context grew too long, run
+  `scripts/clear-worktrees <issue>`, so that a new builder can check out the issue's branch. If the script exits with
+  a code other than 0, plan the issue again. Otherwise, start a new agent of the same type with the same prompt, and
+  put the link to the hand-off comment in that prompt. Start it in your session once your own account's advice lets
+  you, because `scripts/loop/run-builder` can't give a builder the link.
 - **Builders that stopped.** A builder that ends without a pull request, and without a report that says why, stopped
   before it finished, such as at a usage limit. If its issue is still open and assigned to you, run
   `scripts/clear-worktrees <issue>`, which saves its unfinished work on the issue's branch and removes its worktree.

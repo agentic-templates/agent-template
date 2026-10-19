@@ -4,12 +4,14 @@
 # the whole context again, so a long context costs more on every step, and the agent works worse. Once the context
 # first passes soon_tokens, the agent hands off at its next stopping point, and once it first passes now_tokens, after
 # the step it's on.
-# The agents are the subagents of the orchestrator's session, which the session: line of .loop/state.md names, and the
-# builders that scripts/loop/run-builder starts for an issue, which have LOOP_HAND_OFF set. The orchestrator itself
-# gets no note, because it compacts its context, as "Compact your context" in docs/loop.md describes.
+# The agents are the builders that the orchestrator starts: the subagents of a builder type that the orchestrator's
+# session starts itself, and the builders that scripts/loop/run-builder starts for an issue, which have LOOP_HAND_OFF
+# set. Other agents get no note, because the note's steps are a builder's. The orchestrator itself gets none either,
+# because it compacts its context, as "Compact your context" in docs/loop.md describes.
 # Each note comes once to each agent. For each note, the hook creates a file in .loop/hand-offs in the main checkout,
 # named <agent>.<threshold>, where <agent> is a subagent's agent id or a session's id. scripts/loop/meter reads them.
-# The hook says nothing when it can't tell the context's size, such as when it can't find the agent's transcript.
+# When the hook can't create the file, the note says so. The hook says nothing when it can't tell the context's size,
+# such as when it can't find the agent's transcript.
 
 soon_tokens=400000
 now_tokens=500000
@@ -19,15 +21,22 @@ transcript_tail_bytes=400000
 # shellcheck source=scripts/loop-folder
 source "${BASH_SOURCE[0]%/*}/../loop-folder" || exit 0
 
-fields=$(jq -r '.agent_id // "", .session_id // "", .transcript_path // ""' 2>/dev/null) || exit 0
+fields=$(jq -r '.agent_id // "", .agent_type // "", .session_id // "", .transcript_path // ""' 2>/dev/null) || exit 0
 {
   IFS= read -r agent_id
+  IFS= read -r agent_type
   IFS= read -r session_id
   IFS= read -r transcript
 } <<<"$fields"
-if [[ -z $agent_id && -z ${LOOP_HAND_OFF:-} ]]; then
+# A subagent of a builder that scripts/loop/run-builder started has LOOP_HAND_OFF too.
+if [[ -n $agent_id && -n ${LOOP_HAND_OFF:-} ]] || [[ -z $agent_id && -z ${LOOP_HAND_OFF:-} ]]; then
   exit 0
 fi
+# The builder types in .claude/agents are builder and builder-<kind of issue>.
+case $agent_type in
+  "" | builder | builder-*) ;;
+  *) exit 0 ;;
+esac
 # A subagent's hook gets the transcript of its session, and the subagent's own is in a folder next to it.
 agent=${agent_id:-$session_id}
 if [[ -n $agent_id ]]; then
@@ -50,18 +59,33 @@ fi
 git_folders=$(git -C "${BASH_SOURCE[0]%/*}" rev-parse --path-format=absolute --git-common-dir --show-toplevel 2>/dev/null) ||
   exit 0
 loop=$(loop_folder "${git_folders%%$'\n'*}" "${git_folders#*$'\n'}")
-if [[ -z ${LOOP_HAND_OFF:-} ]]; then
+if [[ -n $agent_id ]]; then
   if [[ ! -f $loop/state.md || -z $session_id || $(state_field "$loop/state.md" session) != "$session_id" ]]; then
+    exit 0
+  fi
+  # Claude Code writes the depth at which the agent started next to its transcript: 1 for an agent that the session
+  # started itself, and 2 for one that its agent started.
+  depth=$(jq -r '.spawnDepth // empty' "${transcript%.jsonl}.meta.json" 2>/dev/null)
+  if [[ $depth != 1 ]]; then
     exit 0
   fi
 fi
 notes=$loop/hand-offs
-mkdir -p "$notes" 2>/dev/null || exit 0
+mkdir -p "$notes" 2>/dev/null
 
 # Creates the file of a note, and fails if it exists already. With noclobber, the redirection fails when the file
-# exists, so of two calls that end at the same time, only one gives the note: claim_note <threshold>
+# exists, so of two calls that end at the same time, only one gives the note. When the hook can't create the file, it
+# gives the note, and adds the file to unwritten: claim_note <threshold>
+unwritten=""
 claim_note() {
-  (set -o noclobber && : >"$notes/$agent.$1") 2>/dev/null
+  local file=$notes/$agent.$1
+  if (set -o noclobber && : >"$file") 2>/dev/null; then
+    return 0
+  fi
+  if [[ -e $file ]]; then
+    return 1
+  fi
+  unwritten+=" $file"
 }
 
 # Tells the agent something, in the form that Claude Code adds to its context: tell <message>
@@ -69,14 +93,21 @@ tell() {
   jq -n --arg message "$1" '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $message}}'
 }
 
-how="To hand off, push your branch if you have one. Then write a comment on your issue or pull request with what's done, what's left, the commands you ran and where their outputs are, and the open questions. End with a report that says that you handed off, with the comment's link."
+how="To hand off, push your branch. Then write a comment on your issue or pull request with what's done, what's left, the commands you ran and where their outputs are, and the open questions. End with a report that says that you handed off, with the comment's link."
+note=""
 if ((size > now_tokens)); then
   # The note to hand off at the next stopping point would come too late after this one.
   claim_note "$soon_tokens" || true
   if claim_note "$now_tokens"; then
-    tell "Your context has passed $((now_tokens / 1000))k tokens. Hand off your work as soon as the step you're on ends, so that a fresh agent continues it. $how"
+    note="Your context has passed $((now_tokens / 1000))k tokens. Hand off your work as soon as the step you're on ends, so that a fresh agent continues it. $how"
   fi
 elif claim_note "$soon_tokens"; then
-  tell "Your context has passed $((soon_tokens / 1000))k tokens. Hand off your work at your next stopping point, so that a fresh agent continues it. $how"
+  note="Your context has passed $((soon_tokens / 1000))k tokens. Hand off your work at your next stopping point, so that a fresh agent continues it. $how"
+fi
+if [[ -n $note && -n $unwritten ]]; then
+  note+=" scripts/hooks/hand-off couldn't write${unwritten}, so it may give this note again, and scripts/loop/meter doesn't show it. List this in your report for the orchestrator."
+fi
+if [[ -n $note ]]; then
+  tell "$note"
 fi
 exit 0

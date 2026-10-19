@@ -15,11 +15,9 @@ Each account's line ends with its advice:
 The session meter's stop point is 100% minus the larger of 2 percentage points and the usage of 8 minutes at the rate
 between the last two readings. Each weekly meter, the one for all models and each model's own, stops at 99%.
 
-The line before the last lists the agents that run: the subagents of the orchestrator's session, each with its agent id
-and type, and the builders that scripts/loop/run-builder started, each with its run folder. It gives each agent's
-context size, and the threshold at which scripts/hooks/hand-off told the agent to hand off its work, if it did. An
-agent counts as running while its transcript, or a builder's events, changed in the last 15 minutes, and a builder
-only until its run ends.
+The line before the last lists the agents that run: those with a start line and no end line in .loop/agents.jsonl,
+each with its type and the number of its issue or pull request. It gives each agent's context size, and the threshold
+at which scripts/hooks/hand-off told the agent to hand off its work, if it did.
 
 The last line gives the machine's free disk, free memory, swap in use, GPU use and GPU memory in use, its load, the
 orchestrator's context size, and whether a retrospective is due. One is due once the agents have worked {hours} hours
@@ -94,9 +92,6 @@ CODEX_SNAPSHOT_AGE = dt.timedelta(days=8)
 # The meter reads only the end of a transcript, where the last call is. An orchestrator's transcript of 218 MB took
 # 0.25 seconds and about 0.5 GB of memory to read whole.
 TRANSCRIPT_TAIL_BYTES = 400_000
-# An agent's transcript changes at each of its calls, and Claude Code's Bash tool waits at most 10 minutes for a
-# command. So an agent whose transcript hasn't changed for longer than this has ended.
-AGENT_IDLE_LIMIT = dt.timedelta(minutes=15)
 # How often meter --wake looks for a new note of scripts/hooks/hand-off between two readings
 HAND_OFF_CHECK_SECONDS = 60
 RETROSPECTIVE_LABEL = "retrospective"
@@ -134,9 +129,9 @@ class Readings(NamedTuple):
 
 
 class Agent(NamedTuple):
-    # How the agents line names the agent
+    # How the agents line names the agent: its type, and its issue or pull request
     name: str
-    # The subagent's agent id or the builder's session id, which names the notes of scripts/hooks/hand-off
+    # The subagent's agent id or the run's session id, which names the notes of scripts/hooks/hand-off
     key: str | None
     context: int | None
 
@@ -162,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
     hand_offs = loop_folder / "hand-offs"
     readings = wait_for_wake(accounts, log, hand_offs) if options.wake else read_accounts(accounts, log)
     checkout = paths.main_checkout()
-    agents = agents_line(running_agents(loop_folder, checkout, now()), hand_off_thresholds(note_files(hand_offs)))
+    agents = agents_line(running_agents(loop_folder, checkout), hand_off_thresholds(note_files(hand_offs)))
     machine = machine_line(
         readings.machine,
         context=orchestrator_context(loop_folder / "state.md", checkout),
@@ -493,43 +488,24 @@ def gpu_part(machine: Machine) -> str:
     return f"{use}, {memory:.1f} GB {whose}"
 
 
-def running_agents(loop_folder: Path, checkout: Path, reading_time: dt.datetime) -> list[Agent]:
-    """The subagents of the orchestrator's session, and the builders of scripts/loop/run-builder, that run."""
-    changed_since = (reading_time - AGENT_IDLE_LIMIT).timestamp()
-    session = session_in_state_file(loop_folder / "state.md")
-    subagents = session_agents(paths.claude_project_folder(checkout) / session, changed_since) if session else []
-    return [*subagents, *builder_runs(loop_folder / "runs", changed_since)]
-
-
-def session_agents(session_folder: Path, changed_since: float) -> list[Agent]:
-    """The subagents of a session whose transcripts changed since the time."""
+def running_agents(loop_folder: Path, checkout: Path) -> list[Agent]:
+    """The agents that have a start line and no end line in agents.jsonl in the loop folder. An agent of a session
+    reads its context from its transcript, and a run of scripts/loop/run-builder from its events in its run folder."""
+    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
     agents = []
-    for transcript in sorted((session_folder / "subagents").glob("agent-*.jsonl")):
-        if transcript.stat().st_mtime >= changed_since:
-            agent_id = transcript.stem.removeprefix("agent-")
-            name = f"{agent_id} {agent_type(transcript.with_suffix('.meta.json'))}"
-            agents.append(Agent(name, agent_id, context_tokens(transcript)))
+    for run in agent_log.read_runs(loop_folder / "agents.jsonl"):
+        if run.end is not None:
+            continue
+        issue = run.start.get("issue")
+        name = f"{run.start['type']} #{issue}" if issue else run.start["type"]
+        transcript = transcripts.get(run.start["id"])
+        if transcript is not None:
+            agents.append(Agent(name, transcript.stem.removeprefix("agent-"), context_tokens(transcript)))
+            continue
+        events = loop_folder / "runs" / run.start["id"] / "events.jsonl"
+        session = run_session(events) if events.exists() else None
+        agents.append(Agent(name, session, context_tokens(events)))
     return agents
-
-
-def builder_runs(runs_folder: Path, changed_since: float) -> list[Agent]:
-    """The builders of scripts/loop/run-builder whose runs haven't ended, and whose events changed since the time. The
-    script keeps each builder's events in its run folder, and writes status.json there when the run ends. Claude's
-    events hold its calls as its transcript does."""
-    agents = []
-    for events in sorted(runs_folder.glob("*/events.jsonl")):
-        if not (events.parent / "status.json").exists() and events.stat().st_mtime >= changed_since:
-            agents.append(Agent(f"run {events.parent.name}", run_session(events), context_tokens(events)))
-    return agents
-
-
-def agent_type(meta: Path) -> str:
-    """The type in the file that Claude Code keeps next to a subagent's transcript, or agent."""
-    try:
-        found = json.loads(meta.read_text()).get("agentType")
-    except OSError, ValueError, AttributeError:
-        return "agent"
-    return found if isinstance(found, str) and found else "agent"
 
 
 def run_session(events: Path) -> str | None:
