@@ -397,11 +397,12 @@ pr_close_flags_with_value=" -c --comment -R --repo "
 # - repository: --repo and the value of -R or --repo, or empty, as in --repo jtmpl/other for -dRjtmpl/other
 # - target: the words that name the argument to other gh commands: the argument, and the words in repository
 # - flags: the words that start with a dash, as the command writes them, such as -cn or --title=Title
-# - flag_values: for each word in flags, the next word when it's the value of the word's last flag, or empty
+# - last_flags: for each word in flags, its last flag, such as -n of -cn or --title of --title=Title
+# - flag_values: for each word in flags, the value of its last flag, from the same word or the next, or empty
 # read_arguments <index> <flags that take a value>
 read_arguments() {
   local i word flag value value_is_next_word flags_before
-  argument="" repository=() target=() flags=() flag_values=()
+  argument="" repository=() target=() flags=() last_flags=() flag_values=()
   for ((i = $1; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
     if [[ $word != -* ]]; then
@@ -412,14 +413,13 @@ read_arguments() {
       continue
     fi
     split_flag_word "$word" "$2"
-    flags+=("$word")
     if [[ -n $value_is_next_word ]]; then
       i=$((i + 1))
       value=${command_words[i]:-}
-      flag_values+=("$value")
-    else
-      flag_values+=("")
     fi
+    flags+=("$word")
+    last_flags+=("$flag")
+    flag_values+=("$value")
     if [[ $flag == -R || $flag == --repo ]]; then
       repository=(--repo "$value")
     fi
@@ -486,18 +486,12 @@ has_git_flag() {
 # Sets api_method to the method of the gh api request whose flags read_arguments read, such as POST, in capitals when
 # it's GET. Without a method, gh api sends POST if the command adds a field or an input file, and GET otherwise.
 read_api_method() {
-  local i flag sends_body=false
+  local i sends_body=false
   api_method=""
-  for ((i = 0; i < ${#flags[@]}; i++)); do
-    flag=${flags[i]}
-    case $flag in
+  for ((i = 0; i < ${#last_flags[@]}; i++)); do
+    case ${last_flags[i]} in
       -X | --method) api_method=${flag_values[i]} ;;
-      --method=*) api_method=${flag#--method=} ;;
-      -X*)
-        api_method=${flag#-X}
-        api_method=${api_method#=}
-        ;;
-      -f* | -F* | --raw-field | --raw-field=* | --field | --field=* | --input | --input=*) sends_body=true ;;
+      -f | -F | --raw-field | --field | --input) sends_body=true ;;
     esac
   done
   if [[ -z $api_method ]]; then
