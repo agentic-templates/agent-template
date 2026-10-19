@@ -211,11 +211,12 @@ hook_message=$(HOME=$test_home "$base/copy/hooks/before-tool" 2>&1 >/dev/null \
 expect_result "With no line break after the last pattern, the hook" 2 "$(draft_needed imports.txt)"
 
 # A cd before gh pr create changes the folder that the hook reads the body file and the commits from, unless the cd
-# runs in a subshell. The worktree holds the commit of the branch rules, and a body file of its own, while the folder
-# that the agent works in is on the branch work.
+# runs in a subshell. The worktree holds the commit of the branch rules, a body file of its own and a pass of its own,
+# while the folder that the agent works in is on the branch work.
 worktree=$base/rules-worktree
 git worktree add --quiet --detach "$worktree" rules
 cp "$base/body.md" "$worktree/pr-body.md"
+(cd "$worktree" && record_pass)
 expect_block Bash "cd $worktree && gh pr create --title '$title' --body-file ../body.md" "$rules_need_draft"
 expect_allow Bash "cd $worktree && gh pr create --draft --title '$title' --body-file pr-body.md"
 expect_allow Bash "(cd $worktree) && gh pr create --title '$title' --body-file ../body.md"

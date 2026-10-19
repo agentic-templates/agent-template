@@ -2,8 +2,10 @@
 # Blocks opening a pull request with gh pr create, or its alias gh pr new, until scripts/check has passed on the
 # pull request's files, because a pull request that fails in CI costs a round trip.
 # scripts/check records the tree of the files it passed on, as check-passed.bash describes. This check compares that
-# record with the tree of HEAD, or of the branch that --head names. It allows the command when it has nothing to
-# compare: outside a git repository, before the first commit, and when this repository has no branch of that name.
+# record with the tree of HEAD, or of the branch that --head names, in the folder that gh runs in: the folder the agent
+# works in, or the one that a cd before gh changes to, as follow_cd in helpers.bash finds it. It allows the command
+# when it has nothing to compare: outside a git repository, before the first commit, when this repository has no
+# branch of that name, and after a cd to a folder that it can't tell.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 # shellcheck source=scripts/hooks/check-passed.bash
@@ -20,8 +22,9 @@ check_gh_pr_create() {
   # --head can name the branch as <user>:<branch>.
   branch=${pr_head#*:}
 
-  # Cursor doesn't send the folder the agent works in, so for Cursor the hook's own folder counts.
-  cd -- "${cwd:-.}" || return 0
+  if [[ -z $command_folder ]] || ! cd -- "$command_folder" 2>/dev/null; then
+    return 0
+  fi
   head_tree=$(git rev-parse --verify --quiet 'HEAD^{tree}') || return 0
   pull_request_tree=$head_tree
   if [[ -n $branch ]]; then
@@ -51,9 +54,12 @@ check_simple_command() {
     return 0
   fi
   check_gh_pr_create
+  follow_cd
 }
 
 read_input
 if [[ $tool_name == Bash ]]; then
+  # The folder that gh runs in, as follow_cd in helpers.bash describes.
+  command_folder=${cwd:-$PWD}
   for_each_simple_command check_simple_command "$shell_command"
 fi
