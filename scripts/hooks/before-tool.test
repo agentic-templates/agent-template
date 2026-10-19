@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Tests how scripts/hooks/before-tool runs the checks, on copies of the scripts with a check added or a file missing.
+# The test of each check tests what that check blocks.
+set -euo pipefail
+# shellcheck source=scripts/hooks/testing.bash
+source "${BASH_SOURCE[0]%/*}/testing.bash"
+
+copies=$(mktemp -d)
+trap 'rm -rf "$copies"' EXIT
+scripts_folder=${hooks_folder%/*}
+
+# Copies the scripts, and runs the cases after it on the copy's hooks: use_copy <name>
+use_copy() {
+  cp -R "$scripts_folder" "$copies/$1"
+  hooks_folder=$copies/$1/hooks
+}
+
+# A check in another language runs as a program. This one, in awk, blocks the command drop-db.
+use_copy other-language
+printf '%s\n' "#!$(command -v awk) -f" \
+  'BEGIN { if (ENVIRON["HOOK_COMMAND"] ~ /drop-db/) { print "Blocked: drop-db deletes the database." > "/dev/stderr"; exit 2 } }' \
+  >"$hooks_folder/drop-db.check"
+chmod +x "$hooks_folder/drop-db.check"
+expect_block Bash 'drop-db prod' 'Blocked: drop-db deletes the database.'
+expect_allow Bash 'ls'
+
+# Without helpers.bash, no check can run, and the hook allows every action without a message, because a broken hook
+# must never stop work.
+use_copy without-helpers
+rm "$hooks_folder/helpers.bash"
+expect_allow Bash 'cat .env'
+
+finish_tests
