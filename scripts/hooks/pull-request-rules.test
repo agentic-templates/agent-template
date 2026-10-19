@@ -279,6 +279,9 @@ expect_block Bash "gh pr edit 5 -F../no-closing-line.md" "$(edit_blocked "$no_cl
 expect_block Bash "gh pr edit 5 -F=../no-closing-line.md" "$(edit_blocked "$no_closing_line")"
 expect_block Bash "gh pr create -t'skip the expenses that were already imported' --body-file ../body.md" \
   "$(blocked "$not_a_type")"
+# The -d of gh pr create takes no value, so the title follows it in the same word.
+expect_block Bash "gh pr create -dt'skip the expenses that were already imported' --body-file ../body.md" \
+  "$(blocked "$not_a_type")"
 
 # gh pr edit commands that change no title and no body, or that change nothing
 expect_allow Bash "gh pr edit 7 --add-label feature"
@@ -298,6 +301,9 @@ $home_path_line'" "$(text_blocked "$home_path_problem")"
 expect_block Bash "gh pr edit 9 --title 'skip the expenses; keep the total'" "$(text_blocked \
   "The title \"skip the expenses; keep the total\" doesn't follow the format \"<type>: <what changed>\". Edit the title to match. The types are feat, fix, docs, test, refactor, perf, build, ci, revert, chore." \
   "The title \"skip the expenses; keep the total\" has a semicolon in prose. Replace it with a period or a word such as \"and\", as \"Write clear sentences\" in docs/writing.md says.")"
+# gh reads -t= as the title =, because it drops the = after a short flag only when more follows it.
+expect_block Bash "gh pr edit 9 -t=" "$(text_blocked \
+  "The title \"=\" doesn't follow the format \"<type>: <what changed>\". Edit the title to match. The types are feat, fix, docs, test, refactor, perf, build, ci, revert, chore.")"
 
 # A body that closes #12 for a pull request from the branch 20-show-the-totals, which was created for #20. From a
 # fork, the branch can have that name though no issue here links to it.

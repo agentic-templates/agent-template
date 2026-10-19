@@ -164,6 +164,17 @@ expect_block Bash "gh issue edit 7 -t'Read /Users/$person/bank.csv'" \
   "$(blocked "gh issue edit" "$(home_path "The title \"Read /Users/$person/bank.csv\"" "/Users/$person/")")"
 expect_block Bash "gh pr reopen 5 -c'$semicolon_line'" "$(blocked "gh pr reopen" "$(semicolon "The line \"$semicolon_line\"")")"
 
+# Several short flags in one word, where the last one takes the text, give the same message as the flags in separate
+# words. The -c of gh pr review and the -d of gh pr close take no value. Another check of the hook blocks the -d of gh
+# pr close first, so this check runs by itself for it.
+expect_block Bash "gh pr review 5 -cb '$semicolon_line'" "$(blocked "gh pr review" "$(semicolon "The line \"$semicolon_line\"")")"
+for command in "gh pr close 5 -d -c '$semicolon_line'" "gh pr close 5 -dc'$semicolon_line'"; do
+  hook_status=0
+  hook_message=$(run_check posted-text "$(sample_input claude-code Bash "$command")" 2>&1) || hook_status=$?
+  expect_result "scripts/hooks/posted-text.check for \"$command\"" 2 \
+    "$(blocked "gh pr close" "$(semicolon "The line \"$semicolon_line\"")")"
+done
+
 # Text that the hook reads as the command writes it, without filling in variables
 may_expand="This hook reads the text as the command writes it, without running \$( ) or filling in variables."
 # shellcheck disable=SC2016 # The commands are the text that the agent sends, so $ stays as written.

@@ -509,21 +509,44 @@ opens_pull_request() {
 # Splits a word of a gh command that starts with a dash into the flag and the value that the word gives, as gh reads
 # them: split_flag_word <word> <flags that take a value>
 # It sets flag, and sets value to the value in the same word, as in --title=Title, or to empty when the word gives
-# none. A short flag that takes a value can also have it in the same word, as in -tTitle or -t=Title, which gh reads as
-# the title Title. It sets value_is_next_word to yes when the flag takes a value that the word doesn't give, because
-# the next word is then the value, even if it starts with a dash.
+# none. A word can hold several short flags, as in -dc, where each flag but the last takes no value. The first flag that
+# takes a value ends the flags, and the rest of the word is its value, as in -tTitle or -dt=Title, which gh reads as the
+# title Title. gh drops the = after a short flag only when more follows it, so it reads -t= as the title =. Of such a
+# word, flag is the flag that takes a value, or the whole word when none does. It sets value_is_next_word to yes when
+# the flag takes a value that the word doesn't give, because the next word is then the value, even if it starts with a
+# dash.
 split_flag_word() {
-  flag=$1 value="" value_is_next_word=""
-  if [[ $1 == --*=* ]]; then
-    flag=${1%%=*}
-    value=${1#*=}
-  elif [[ $2 == *" $1 "* ]]; then
-    value_is_next_word=yes
-  elif [[ $1 == -[!-]?* && $2 == *" ${1:0:2} "* ]]; then
-    flag=${1:0:2}
-    value=${1:2}
-    value=${value#=}
-  fi
+  local word=$1 flags_with_value=$2 position letter
+  flag=$word value="" value_is_next_word=""
+  case $word in
+    --*=*)
+      flag=${word%%=*}
+      value=${word#*=}
+      return 0
+      ;;
+    --*)
+      if [[ $flags_with_value == *" $word "* ]]; then
+        value_is_next_word=yes
+      fi
+      return 0
+      ;;
+  esac
+  for ((position = 1; position < ${#word}; position++)); do
+    letter=${word:position:1}
+    # gh reads what follows = as the value of the flag before it, which takes none here.
+    if [[ $letter == = ]]; then
+      return 0
+    fi
+    if [[ $flags_with_value == *" -$letter "* ]]; then
+      flag=-$letter
+      value=${word:position+1}
+      case $value in
+        "") value_is_next_word=yes ;;
+        =?*) value=${value#=} ;;
+      esac
+      return 0
+    fi
+  done
 }
 
 # Reads the flags of a gh pr command from command_words, from its fourth word on, and fails when the command shows its
