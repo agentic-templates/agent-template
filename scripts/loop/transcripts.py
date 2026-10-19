@@ -18,6 +18,11 @@ PULL_REQUEST_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/([1-9][
 # such as the loop's heartbeat, a hook's output and a compaction's summary have another origin or none.
 PERSON_ORIGIN = "human"
 QUEUED_MESSAGE = "queued_command"
+# Claude Code writes a system line when Claude's safety classifier stops a response. When it goes on once without the
+# response, the line's content holds these words. When the classifier refused the request, the line's subtype starts
+# with these words, as in model_refusal_no_fallback. Claude Code 2.1.303 writes them so.
+STOPPED_RESPONSE = "safeguards stopped the response"
+REFUSED_REQUEST = "model_refusal"
 
 
 class Call(NamedTuple):
@@ -123,6 +128,17 @@ def is_prompt(entry: dict[str, Any]) -> bool:
         return False
     content = entry["message"].get("content")
     return not isinstance(content, list) or any(block.get("type") != "tool_result" for block in content)
+
+
+def safety_stops(file: Path) -> list[dt.datetime]:
+    """The times in a transcript at which Claude's safety classifier stopped a response or refused a request."""
+    return [dt.datetime.fromisoformat(entry["timestamp"]) for entry in timed_entries(file) if is_safety_stop(entry)]
+
+
+def is_safety_stop(entry: dict[str, Any]) -> bool:
+    if entry.get("type") != "system":
+        return False
+    return str(entry.get("subtype")).startswith(REFUSED_REQUEST) or STOPPED_RESPONSE in str(entry.get("content"))
 
 
 def person_messages(file: Path) -> list[Message]:

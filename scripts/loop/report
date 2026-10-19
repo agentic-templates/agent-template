@@ -34,6 +34,10 @@ The lines are:
                             of all that they and their agents used.
   Hook blocks               How many actions the before-tool hook blocked, from .loop/blocks.log, and how many each
                             rule blocked.
+  Safety classifier stops   How many times Claude's safety classifier stopped a response or refused a request, in the
+                            sessions in the main checkout and in their agents, from the notes that Claude Code writes
+                            in their transcripts. A stop withholds the rest of the response, and the tool calls in it
+                            that hadn't finished don't run.
   Agents' time              The minutes of the agents in the Type lines, from the first line of each one's transcript to
                             the last, and how many of them have no transcript, such as the runs of
                             scripts/loop/run-builder. Then the minutes and the share of each part of that time, which
@@ -110,7 +114,7 @@ from agent_log import AgentRun, Period, agent_output_tokens, agent_transcripts, 
 from github import GitHubError, gh_api, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, hook_threshold, note_files
 from meter_waits import LONGEST_READING_GAP
-from transcripts import Call, Message, person_messages, read_transcript
+from transcripts import Call, Message, person_messages, read_transcript, safety_stops
 
 CI_WORKFLOW = "ci.yml"
 ORCHESTRATOR = "orchestrator"
@@ -168,6 +172,8 @@ class Transcript(NamedTuple):
     file: Path
     modified: float
     calls: list[Call]
+    # The times at which Claude's safety classifier stopped a response or refused a request
+    safety_stops: list[dt.datetime]
 
 
 class Agent(NamedTuple):
@@ -274,6 +280,7 @@ def main(argv: list[str] | None = None) -> int:
         no_event_line(ends, event_tokens),
         orchestrator_line(agents),
         block_line(count_blocks(read_log("blocks.log"), since)),
+        safety_stop_line(transcripts, since),
         time_line(list(splits.values()), len(recent)),
         *context_lines(contexts_by_type(recent, contexts), orchestrator_contexts),
         *heavy_lines(heavy_log.read(paths.loop_dir() / heavy_log.NAME), since),
@@ -364,7 +371,7 @@ def read_transcripts(project_folder: Path, checkout: Path, since: dt.datetime) -
     for file, role in found:
         modified = file.stat().st_mtime
         if modified >= since.timestamp():
-            transcripts.append(Transcript(role, file, modified, read_transcript(file)[0]))
+            transcripts.append(Transcript(role, file, modified, read_transcript(file)[0], safety_stops(file)))
     return transcripts
 
 
@@ -757,6 +764,18 @@ def orchestrator_line(agents: list[Agent]) -> str:
 def block_line(blocks: Counter[str]) -> str:
     parts = [f"{rule} {count}" for rule, count in sorted(blocks.items(), key=lambda item: (-item[1], item[0]))]
     return " | ".join([f"Hook blocks: {blocks.total()}", *parts])
+
+
+def safety_stop_line(transcripts: list[Transcript], since: dt.datetime) -> str:
+    """How many times the safety classifier stopped the sessions and their agents after the time. A resumed session's
+    transcript starts with copies of the earlier transcript's lines, so each stop counts once."""
+    stops: dict[str, set[dt.datetime]] = {ORCHESTRATOR: set(), AGENT: set()}
+    for transcript in transcripts:
+        stops[transcript.role].update(stop for stop in transcript.safety_stops if stop >= since)
+    return (
+        f"Safety classifier stops: {len(stops[ORCHESTRATOR])} in the sessions in the main checkout, "
+        f"{len(stops[AGENT])} in their agents"
+    )
 
 
 def heavy_lines(entries: list[dict[str, Any]], since: dt.datetime) -> list[str]:
