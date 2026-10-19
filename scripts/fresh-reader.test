@@ -286,6 +286,33 @@ commit_all "docs: rename the expenses page to spending"
 run_fresh_reader "$reader" docs/spending.md
 expect_input "When the branch renamed the page and committed it" "$renamed_input"
 
+# The branch and another branch each add a line at the end of the page, and the branch merges the other one, which
+# stops with a conflict in the page. git lists such a page once for each stage of the conflict, up
+# to three times, until it's staged.
+new_case 0
+before_conflict=$(git -C "$base/project" rev-parse HEAD)
+git -C "$base/project" switch --quiet --create 13-export
+printf '%s\n' "Run \`expenses export\` to save them as CSV." >>"$base/project/docs/spending.md"
+commit_all "docs: say how to export expenses"
+git -C "$base/project" switch --quiet 12-change
+printf '%s\n' "Run \`expenses total\` to see what you spent." >>"$base/project/docs/spending.md"
+commit_all "docs: say how to total expenses"
+if git -C "$base/project" -c user.name=test -c user.email=test@example.com merge --quiet 13-export >/dev/null; then
+  fail_case "When the branch merges 13-export, git must stop with a conflict in docs/spending.md, but it merged."
+fi
+printf '%s\n' "$renamed_text" "Run \`expenses total\` to see what you spent." "Run \`expenses export\` to save them as CSV." \
+  >"$base/project/docs/spending.md"
+resolved_input="$prompt_with_new_lines"$'\n\n'"$(<"$base/project/docs/spending.md")"$'\n\n'"The lines that the change added or rewrote:"$'\n\n'"# Record your expenses"$'\n'"Run \`expenses list\` to see them."$'\n'"Run \`expenses total\` to see what you spent."$'\n'"Run \`expenses export\` to save them as CSV."
+run_fresh_reader "$reader" docs/spending.md
+expect_result "When the page has a merge conflict that isn't staged" succeeds "The reader's answer from run 1"
+expect_input "When the page has a merge conflict that isn't staged" "$resolved_input"
+new_case 0
+git -C "$base/project" add docs/spending.md
+run_fresh_reader "$reader" docs/spending.md
+expect_input "When the resolution of the page's merge conflict is staged" "$resolved_input"
+git -C "$base/project" merge --abort
+git -C "$base/project" reset --quiet --hard "$before_conflict"
+
 new_case 0
 printf '%s\n' "# Notes" >"$base/notes.md"
 run_fresh_reader "$reader" "$base/notes.md"
