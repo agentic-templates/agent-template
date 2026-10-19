@@ -618,12 +618,15 @@ has_word_that_may_expand() {
 # that it posts nothing. gh has no flag -h of its own, so it stops at the h of a word of short flags, whatever follows
 # the h, as in -h, -dh and -h=false. read_help_flag reads --help.
 # It fails for a command with a word that may expand, as in -d${x}h or $x -h, because the shell can turn the letters or
-# the word before the h into a flag that takes the h as its value. The hooks then check the command.
+# the word before the h into a flag that takes the h as its value. It also fails when a character other than a letter
+# or a digit comes before the h, because ANSI-C quotes, as in -d$'\x74'h, a brace expansion or a glob can do the same,
+# and the hooks don't mark these as words that may expand. The hooks then check the command.
 stops_for_help() {
-  if has_word_that_may_expand; then
+  local letters=$flags_before${flag#-}
+  if [[ $flag == --* || $letters != *h* ]] || has_word_that_may_expand; then
     return 1
   fi
-  [[ $flag == -h || $flags_before == *h* ]]
+  [[ ${letters%%h*} != *[![:alnum:]]* ]]
 }
 
 # Sets asks_for_help to yes or to empty when the word that split_flag_word last split is --help, from its value as

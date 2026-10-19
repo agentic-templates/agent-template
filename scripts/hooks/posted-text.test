@@ -238,8 +238,8 @@ expect_block Bash "gh issue comment 7 --body '$semicolon_line' --help --help=fal
 expect_allow Bash "gh issue comment 7 --body '$semicolon_line' --help=false --help"
 expect_allow Bash "gh issue comment 7 --body '$semicolon_line' -h --help=false"
 # The shell can turn the letters or the word before the h into a flag that takes the h as its value, so the hook checks
-# a command with a word that may expand.
-for help in "-e\${x}h" "\$x -h" "--help \$x"; do
+# a command with a word that may expand, and a word with ANSI-C quotes, a brace expansion or a glob before the h.
+for help in "-e\${x}h" "\$x -h" "--help \$x" "-e\$'\\x62'h" "-e{a..c}h" "-e?h"; do
   expect_block Bash "gh issue comment 7 --body '$semicolon_line' $help" \
     "$(blocked "gh issue comment" "$(semicolon "The line \"$semicolon_line\"")")"
 done

@@ -96,6 +96,13 @@ done
 for word in -c --comment -bh -cbh -Rh -c=h --body=-h --help; do
   expect_stop "$word" no
 done
+# Only letters and digits keep their meaning in every shell word. Here ANSI-C quotes, as in -$'\x62'h, a brace
+# expansion or a glob can put a flag that takes a value before the h, and the words are as the hook reads them.
+# shellcheck disable=SC2016 # The $ of the ANSI-C quotes stays as written.
+for word in '-$\x62h' '-c$\x62h' '-{a..c}h' '-c{a..c}h' '-?h' '-c*h' '-[c]h'; do
+  expect_stop "$word" no
+done
+expect_stop -c1h yes
 
 # Checks what read_help_flag sets asks_for_help to after these words of gh pr review, as split_flag_word splits each:
 # expect_help_flag <yes or empty> <word>...
