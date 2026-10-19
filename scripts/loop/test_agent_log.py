@@ -133,11 +133,6 @@ class StartTest(AgentLogTest):
         )
         self.assertEqual(self.gh_calls(), ["issue view 12 --json labels --jq .labels[].name"])
 
-    def test_marks_an_agent_that_a_test_build_starts_as_a_test(self) -> None:
-        with mock.patch.dict(os.environ, {"LOOP_TEST_BUILD": "1"}):
-            self.run_script("start", agent_call("Find the files.", subagent_type="Explore"))
-        self.assertIs(self.lines()[0]["test"], True)
-
     def test_takes_the_model_and_effort_that_the_call_gives(self) -> None:
         self.run_script("start", agent_call("12 left behind 31", subagent_type="builder", model="sonnet", effort="max"))
         [line] = self.lines()
@@ -202,6 +197,17 @@ class StartTest(AgentLogTest):
         self.assertEqual([line["id"] for line in self.lines()], ["toolu_01", "toolu_02"])
 
 
+class AgentSettingsTest(AgentLogTest):
+    def test_reads_the_tools_that_an_agent_file_lists_on_the_lines_after_the_field(self) -> None:
+        (self.agents / "builder.md").write_text(
+            "---\nname: builder\ntools:\n  - Read\n  - Edit\ndisallowedTools:\n  - WebFetch\nmaxTurns: 9\n---\n"
+        )
+        settings = agent_log.agent_settings("builder")
+        self.assertEqual(
+            (settings.tools, settings.disallowed_tools, settings.max_turns), ("Read, Edit", "WebFetch", "9")
+        )
+
+
 class EndTest(AgentLogTest):
     def setUp(self) -> None:
         super().setUp()
@@ -233,10 +239,10 @@ class EndTest(AgentLogTest):
             self.transcript,
             [
                 prompt_line(0),
-                call_line("a", 1, tokens=1000, tool_calls=2),
+                call_line("a", 1, tokens=1000, tool_calls=2, output_tokens=30),
                 command_line("b", 5, "toolu_9", "gh pr create --fill"),
                 result_line(6, "toolu_9", "https://github.com/owner/repo/pull/57\n"),
-                call_line("c", 12, tokens=500),
+                call_line("c", 12, tokens=500, output_tokens=4),
             ],
         )
 
@@ -248,11 +254,40 @@ class EndTest(AgentLogTest):
         worktree_mb = line.pop("worktree_mb")
         self.assertEqual(
             line,
-            {"event": "end", "id": "toolu_01", "minutes": 12.0, "tool_calls": 3, "tokens": 1500, "pull_request": 57},
+            {
+                "event": "end",
+                "id": "toolu_01",
+                "model": None,
+                "effort": None,
+                "minutes": 12.0,
+                "tool_calls": 3,
+                "input_tokens": 1500,
+                "output_tokens": 34,
+                "output_tokens_exact": False,
+                "pull_request": 57,
+            },
         )
         # The disk can give a file more space than its size, in blocks of a few kilobytes.
         self.assertGreaterEqual(worktree_mb, 0.3)
         self.assertLess(worktree_mb, 0.4)
+
+    def test_takes_the_model_and_effort_that_the_file_next_to_the_transcript_holds(self) -> None:
+        self.write_build()
+        self.meta({"agentType": "general-purpose", "toolUseId": "toolu_01", "model": "opus", "effort": "xhigh"})
+        self.run_script("end", self.stop(agent_type="general-purpose"))
+        self.meta({"agentType": "general-purpose", "toolUseId": "toolu_02", "model": "haiku"})
+        self.run_script("end", self.stop(agent_type="general-purpose"))
+        self.assertEqual(
+            [(line["id"], line["model"], line["effort"]) for line in self.lines()],
+            [("toolu_01", "opus", "xhigh"), ("toolu_02", "haiku", None)],
+        )
+
+    def test_writes_no_line_for_an_agent_that_a_run_of_run_builder_started(self) -> None:
+        self.write_build()
+        with mock.patch.dict(os.environ, {"LOOP_RUN": "1"}):
+            self.assertEqual(self.run_script("start", agent_call("12 other", subagent_type="builder")), 0)
+            self.assertEqual(self.run_script("end", self.stop()), 0)
+        self.assertEqual(self.lines(), [])
 
     def test_gives_no_size_for_an_agent_without_a_worktree_or_whose_worktree_is_gone(self) -> None:
         self.write_build()
@@ -327,7 +362,7 @@ class HookTest(AgentLogTest):
         done = self.run_command(command, hook_input)
         self.assertEqual((done.returncode, done.stderr), (0, ""))
         [line] = self.lines()
-        self.assertEqual((line["id"], line["minutes"], line["tokens"]), ("toolu_01", 4.0, 10))
+        self.assertEqual((line["id"], line["minutes"], line["input_tokens"]), ("toolu_01", 4.0, 10))
 
     def test_the_subagent_stop_command_lets_the_agent_end_when_the_script_fails(self) -> None:
         [command] = self.settings_commands("SubagentStop")

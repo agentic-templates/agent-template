@@ -6,7 +6,8 @@ Claude Code sends a hook on standard input:
   scripts/loop/agent-log end     when an agent ends, from the SubagentStop command in .claude/settings.json
 
 scripts/loop/agent_log.py describes the lines. An agent that no Agent call started, such as one that a skill or Claude
-Code itself starts, gets no line. The SubagentStop command exits with code 1 when the script fails, because Claude Code
+Code itself starts, gets no line. Neither does an agent that a run of scripts/loop/run-builder starts, because the
+run's end line counts its tokens. The SubagentStop command exits with code 1 when the script fails, because Claude Code
 keeps an agent running when that command exits with code 2, as argparse and uv do on some errors.
 """
 
@@ -32,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("event", choices=("start", "end"))
     event = parser.parse_args(argv).event
     hook_input: dict[str, Any] = json.load(sys.stdin)
+    if os.environ.get(agent_log.RUN_VARIABLE):
+        return 0
     line = start_line(hook_input) if event == "start" else end_line(hook_input)
     if line is not None:
         agent_log.append(line)
@@ -45,8 +48,7 @@ def start_line(hook_input: dict[str, Any]) -> dict[str, Any]:
     settings = in_file._replace(model=call.get("model") or in_file.model, effort=call.get("effort") or in_file.effort)
     issue, kind = agent_log.prompt_subject(call.get("prompt", ""))
     label = agent_log.type_label(issue_labels(issue)) if issue else None
-    is_test = bool(os.environ.get(agent_log.TEST_VARIABLE))
-    return agent_log.start_line(hook_input["tool_use_id"], agent_type, settings, issue, label, kind, is_test)
+    return agent_log.start_line(hook_input["tool_use_id"], agent_type, settings, issue, label, kind, is_test=False)
 
 
 def issue_labels(issue: int) -> list[str]:
@@ -71,14 +73,15 @@ def end_line(hook_input: dict[str, Any]) -> dict[str, Any] | None:
     if not hook_input.get("agent_type"):
         return None
     transcript = Path(hook_input["agent_transcript_path"]).expanduser()
-    # Claude Code keeps the id of the Agent call that started the agent, and the agent's own worktree, next to the
-    # agent's transcript.
+    # Claude Code keeps the id of the Agent call that started the agent, the agent's own worktree, and at times its
+    # model and effort, next to the agent's transcript.
     meta = json.loads(transcript.with_suffix(".meta.json").read_text())
     if "toolUseId" not in meta:
         return None
     worktree = meta.get("worktreePath")
     worktree_mb = agent_log.folder_megabytes(Path(worktree)) if worktree else None
-    return agent_log.end_line(meta["toolUseId"], agent_log.transcript_numbers(transcript), worktree_mb)
+    numbers = agent_log.transcript_numbers(transcript)
+    return agent_log.end_line(meta["toolUseId"], numbers, worktree_mb, meta.get("model"), meta.get("effort"))
 
 
 if __name__ == "__main__":

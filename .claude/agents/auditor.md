@@ -19,8 +19,10 @@ background: true
    measurement didn't move or got worse.
 5. Judge which kind of work each issue in the report's `Issue` lines was, from the kinds that the descriptions of the
    builder types in `.claude/agents/` name, and whether the issue went to the type whose description fits it. Add up
-   the cost and the results of each kind's issues, as the report does for each type. For each issue that went to a
-   type whose description doesn't fit it, change the descriptions so that they name the right type for such an issue.
+   the cost and the results of each kind's issues, as the report does for each type. The output tokens of an agent of
+   a session leave out most of them, as the report's lines say, so compare output tokens only between runs of
+   `scripts/loop/run-builder`. For each issue that went to a type whose description doesn't fit it, change the
+   descriptions so that they name the right type for such an issue.
 6. Find what went wrong since the time in step 3, and fix each cause. Follow docs/rules.md for a change to a
    rule or to an agent type's instructions, and docs/code.md for a change to code, such as a check. Look at least at
    these:
@@ -57,16 +59,17 @@ Test only where the report's numbers since the time in step 3 point to a change:
   clearly better, add the group to its description as a kind.
 - A kind of issue that no type fits well: test a new type for it, against the type that built such issues.
 
-Leave out a test that an earlier retrospective's description records, unless its numbers changed since. Leave out a
-kind with fewer builds since its last test than a test needs. Run the test with the largest expected saving first, and
-start each build only while `scripts/loop/meter` gives the advice `go` for the account that the build runs on.
+Leave out a test that an earlier retrospective's description records, unless its numbers changed since. Run the test
+with the largest expected saving first, and start each build only while `scripts/loop/meter` gives the advice `go`
+for the account that the build runs on.
 
-A version can differ from its type in its model, effort and instructions. Write each version as an agent file in
-`.claude/agents/` in your worktree, such as `builder-cheaper.md`. In a test, each version or other type that you test
-builds the same issues, and the type that built them until now builds each of them once, as the baseline for all of
-them. Pick at least three issues that fit the type: spread across the kinds that its description names, at random
-within each kind, some whose pull requests needed a fix and some whose didn't, and recent ones first. For a test of a
-kind or of a new type, pick issues of that kind. Build more issues when the judges' verdicts split.
+A version can differ from its type in any part, such as its model, effort, instructions, tools or limit on turns.
+Write each version as an agent file in `.claude/agents/` in your worktree, such as `builder-cheaper.md`. In a test,
+each version or other type that you test builds the same issues, and the type that built them until now builds each
+of them once, as the baseline for all of them. Pick at least three issues that fit the type, spread across the kinds
+that its description names, some whose pull requests needed a fix and some whose didn't. Pick them at random from
+each kind's builds since the time in step 3. For a test of a kind or of a new type, pick issues of that kind, so a
+kind with fewer than three such builds gets no test. Build more issues when the judges' verdicts split.
 
 Run each build from your worktree with this command, where the pull request is the issue's:
 
@@ -80,4 +83,6 @@ build's cost, and mark the build as a test, so that the report leaves it out. Fo
 that you test, start a new agent that knows only the issue and two diffs, the baseline's and the other build's, and
 not which build made which, and ask it which diff is better and why. Keep whichever cost least over all the issues,
 unless the judges find another clearly better on most of them. To keep a version, change its type's file to it. To
-keep a new type, add its file, and narrow the description of the type that built its issues until now.
+keep a new type, keep its file, and narrow the description of the type that built its issues until now. Delete each
+version's file, other than that of a new type that you keep, so that your pull request holds only the change that
+won.

@@ -21,10 +21,12 @@ def prompt_line(minute: float, content: Any = "Build the issue.") -> dict[str, A
     return {"type": "user", "timestamp": at(minute), "message": {"role": "user", "content": content}}
 
 
-def call_line(call: str, minute: float, tokens: int = 0, tool_calls: int = 0) -> dict[str, Any]:
+def call_line(
+    call: str, minute: float, tokens: int = 0, tool_calls: int = 0, output_tokens: int | None = None
+) -> dict[str, Any]:
     """A transcript's line for a call, with the tokens as its input."""
     content: list[dict[str, Any]] = [{"type": "text"}] + [{"type": "tool_use", "id": "", "input": {}}] * tool_calls
-    usage = {"input_tokens": tokens, "output_tokens": None}
+    usage = {"input_tokens": tokens, "output_tokens": output_tokens}
     return {"type": "assistant", "timestamp": at(minute), "message": {"id": call, "usage": usage, "content": content}}
 
 
@@ -80,6 +82,22 @@ class WorkingMinutesTest(TranscriptTest):
     def test_is_0_without_a_call(self) -> None:
         self.write(prompt_line(0))
         self.assertEqual(self.minutes(), 0.0)
+
+
+class TokensTest(TranscriptTest):
+    def test_gives_each_calls_input_tokens_with_the_cached_ones_and_its_output_tokens_apart_once(self) -> None:
+        usage = {"input_tokens": 1, "cache_creation_input_tokens": 10, "cache_read_input_tokens": 100}
+        first = {
+            "type": "assistant",
+            "timestamp": at(1),
+            "message": {"id": "a", "usage": {**usage, "output_tokens": 3}},
+        }
+        later = {**first, "timestamp": at(2), "message": {"id": "a", "usage": {**usage, "output_tokens": 40}}}
+        self.write(first, later, call_line("b", 3, tokens=5, output_tokens=7))
+        calls, _ = transcripts.read_transcript(self.file)
+        self.assertEqual(
+            {call.id: (call.input_tokens, call.output_tokens) for call in calls}, {"a": (111, 40), "b": (5, 7)}
+        )
 
 
 class ToolCallTest(TranscriptTest):

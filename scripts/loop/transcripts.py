@@ -7,7 +7,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, NamedTuple
 
-USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+# The fields of a call's usage that count its input tokens, cached tokens too
+INPUT_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+OUTPUT_KEY = "output_tokens"
 # gh pr new is another name for gh pr create, which prints the new pull request's URL. The URL ends in its number.
 PR_CREATE = re.compile(r"\bgh pr (create|new)\b")
 PULL_REQUEST_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/([1-9][0-9]*)")
@@ -17,7 +19,10 @@ class Call(NamedTuple):
     id: str
     start: dt.datetime
     end: dt.datetime
-    tokens: int
+    # Cached tokens too
+    input_tokens: int
+    # The output tokens as of the reply's start, which leave out most of them
+    output_tokens: int
     tool_calls: int
 
 
@@ -37,12 +42,19 @@ def read_transcript(file: Path) -> tuple[list[Call], list[dt.datetime]]:
         message = entry["message"]
         call = message["id"]
         times.setdefault(call, []).append(dt.datetime.fromisoformat(entry["timestamp"]))
-        most = usage.setdefault(call, dict.fromkeys(USAGE_KEYS, 0))
-        for key in USAGE_KEYS:
+        most = usage.setdefault(call, dict.fromkeys((*INPUT_KEYS, OUTPUT_KEY), 0))
+        for key in most:
             most[key] = max(most[key], message.get("usage", {}).get(key) or 0)
         tool_calls[call] += len(blocks(entry, "tool_use"))
     calls = [
-        Call(call, min(moments), max(moments), sum(usage[call].values()), tool_calls[call])
+        Call(
+            call,
+            min(moments),
+            max(moments),
+            sum(usage[call][key] for key in INPUT_KEYS),
+            usage[call][OUTPUT_KEY],
+            tool_calls[call],
+        )
         for call, moments in times.items()
     ]
     return calls, prompts

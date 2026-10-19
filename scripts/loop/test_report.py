@@ -96,15 +96,15 @@ class ReportTest(unittest.TestCase):
         number: int,
         commit_minutes: tuple[float, ...] = (1,),
         conclusions: tuple[str | None, ...] = (),
-        removals: int = 0,
+        removals: tuple[str, ...] = (),
     ) -> None:
         """Gives GitHub's facts about a pull request: its commits, each with check suites of the conclusions, and the
-        number of times that the merge queue removed it."""
+        reason of each time that the merge queue removed it."""
         suites = {"nodes": [{"conclusion": conclusion} for conclusion in conclusions]}
         commits = [{"commit": {"committedDate": at(minute), "checkSuites": suites}} for minute in commit_minutes]
         self.pull_requests[str(number)] = {
             "commits": {"nodes": commits},
-            "timelineItems": {"filteredCount": removals},
+            "timelineItems": {"nodes": [{"reason": reason} for reason in removals]},
         }
         self.answer()
 
@@ -158,7 +158,7 @@ class EmptyPeriodTest(ReportTest):
                     "Since 2026-10-11T14:00:00+00:00",
                     "CI runs that passed: 0",
                     "Types: no agent started",
-                    "Orchestrator's share of the tokens: none used",
+                    "Orchestrator's share of the input tokens: none used",
                     "Hook blocks: 0",
                 ],
                 "",
@@ -238,11 +238,29 @@ def end(
     minutes: float = 1,
     tool_calls: int = 1,
     tokens: int = 1,
+    output_tokens: int = 1,
+    is_exact: bool = False,
     pull_request: int | None = None,
 ) -> dict[str, Any]:
-    """An end line of agents.jsonl."""
-    numbers = {"minutes": minutes, "tool_calls": tool_calls, "tokens": tokens, "pull_request": pull_request}
-    return {"at": at(minute), "event": "end", "id": agent_id, **numbers, "worktree_mb": 1.5}
+    """An end line of agents.jsonl, with the tokens as its input tokens. Its output tokens are exact, as for a run of
+    scripts/loop/run-builder, or leave out most, as for an agent of a session."""
+    numbers = {
+        "minutes": minutes,
+        "tool_calls": tool_calls,
+        "input_tokens": tokens,
+        "output_tokens": output_tokens,
+        "output_tokens_exact": is_exact,
+        "pull_request": pull_request,
+    }
+    return {
+        "at": at(minute),
+        "event": "end",
+        "id": agent_id,
+        "model": None,
+        "effort": None,
+        **numbers,
+        "worktree_mb": 1.5,
+    }
 
 
 class TypeTest(ReportTest):
@@ -265,12 +283,44 @@ class TypeTest(ReportTest):
             [line for line in lines if line.startswith("Type")],
             [
                 (
-                    "Type builder: 4 started, 3 ended, median 20.0 min and 6 tool calls, 75% of the agents' tokens "
+                    "Type builder: 4 started, 3 ended, median 20.0 min and 6 tool calls, 75% of the agents' input "
+                    "tokens | output tokens: at least 3 in agents of a session, whose transcripts leave out most "
                     "| pull requests: 0"
                 ),
                 (
-                    "Type reviewer: 1 started, 1 ended, median 1.0 min and 99 tool calls, 25% of the agents' tokens "
+                    "Type reviewer: 1 started, 1 ended, median 1.0 min and 99 tool calls, 25% of the agents' input "
+                    "tokens | output tokens: at least 1 in agents of a session, whose transcripts leave out most "
                     "| pull requests: 0"
+                ),
+            ],
+        )
+
+    def test_gives_the_output_tokens_of_the_runs_of_run_builder_apart_from_those_of_the_agents_of_a_session(
+        self,
+    ) -> None:
+        self.log_agents(
+            start("run-1", 1),
+            end("run-1", 10, tokens=3000, output_tokens=9000, is_exact=True),
+            start("run-2", 2),
+            end("run-2", 10, tokens=3000, output_tokens=1000, is_exact=True),
+            start("toolu_1", 3),
+            end("toolu_1", 10, tokens=4000, output_tokens=1500),
+            start("run-3", 4, agent_type="builder-small"),
+            end("run-3", 10, tokens=10000, output_tokens=700, is_exact=True),
+        )
+        status, lines, errors = self.run_report()
+        self.assertEqual((status, errors), (0, ""))
+        self.assertEqual(
+            [line for line in lines if line.startswith("Type")],
+            [
+                (
+                    "Type builder: 3 started, 3 ended, median 1.0 min and 1 tool calls, 50% of the agents' input "
+                    "tokens | output tokens: 10000 in runs of run-builder, at least 1500 in agents of a session, whose "
+                    "transcripts leave out most | pull requests: 0"
+                ),
+                (
+                    "Type builder-small: 1 started, 1 ended, median 1.0 min and 1 tool calls, 50% of the agents' "
+                    "input tokens | output tokens: 700 in runs of run-builder | pull requests: 0"
                 ),
             ],
         )
@@ -279,8 +329,8 @@ class TypeTest(ReportTest):
         self.log_agents(start("old", -10), end("old", 5, tokens=5000), start("new", 1), end("new", 6, tokens=1000))
         self.assertEqual(
             self.line("Type"),
-            "Type builder: 1 started, 1 ended, median 1.0 min and 1 tool calls, 100% of the agents' tokens "
-            "| pull requests: 0",
+            "Type builder: 1 started, 1 ended, median 1.0 min and 1 tool calls, 100% of the agents' input tokens "
+            "| output tokens: at least 1 in agents of a session, whose transcripts leave out most | pull requests: 0",
         )
 
     def test_leaves_out_the_test_builds_of_a_retrospective(self) -> None:
@@ -305,7 +355,8 @@ class TypeTest(ReportTest):
             [line for line in lines if line.startswith("Type")],
             [
                 (
-                    "Type Explore: 1 started, 1 ended, median 1.0 min and 1 tool calls, 0% of the agents' tokens "
+                    "Type Explore: 1 started, 1 ended, median 1.0 min and 1 tool calls, 0% of the agents' input "
+                    "tokens | output tokens: at least 1 in agents of a session, whose transcripts leave out most "
                     "| pull requests: 0"
                 ),
                 "Type builder: 1 started, 0 ended | pull requests: 0",
@@ -318,7 +369,7 @@ class TypeTest(ReportTest):
             start("a", 0, issue=12, kind="other"),
             end("a", 9, pull_request=57),
             start("ra", 20, agent_type="reviewer", issue=57),
-            # #58 got its commits before its reviewer started, failed a check, and left the merge queue.
+            # #58 got its commits before its reviewer started, failed a check, and left the merge queue unmerged.
             start("b", 0, issue=13, kind="other"),
             end("b", 9, pull_request=58),
             start("rb", 20, agent_type="reviewer", issue=58),
@@ -336,15 +387,25 @@ class TypeTest(ReportTest):
             end("e", 9, pull_request=61),
         )
         self.add_pull_request(57, commit_minutes=(8, 30))
-        self.add_pull_request(58, commit_minutes=(8, 10), conclusions=("CANCELLED", "FAILURE", None), removals=2)
+        self.add_pull_request(
+            58, commit_minutes=(8, 10), conclusions=("CANCELLED", "FAILURE", None), removals=("merge_conflict",)
+        )
         self.add_pull_request(59, commit_minutes=(8, 50), conclusions=("CANCELLED", "SUCCESS"))
         self.add_pull_request(60, commit_minutes=(8, 50), conclusions=("TIMED_OUT",))
-        self.add_pull_request(61, conclusions=("STARTUP_FAILURE",), removals=1)
+        self.add_pull_request(61, conclusions=("STARTUP_FAILURE",), removals=("merge_conflict", "merged"))
         self.assertEqual(
-            self.line("Type builder:"),
-            "Type builder: 7 started, 5 ended, median 1.0 min and 1 tool calls, 100% of the agents' tokens "
-            "| pull requests: 5, 2 needed a fix after review, 3 failed a check, 2 left the merge queue, "
+            self.line("Type builder:").split(" | ")[-1],
+            "pull requests: 5, 2 needed a fix after review, 3 failed a check, 2 left the merge queue unmerged, "
             "2 got a second builder",
+        )
+
+    def test_does_not_count_the_removal_from_the_merge_queue_that_github_records_when_the_queue_merges(self) -> None:
+        self.log_agents(start("a", 0, issue=12, kind="other"), end("a", 9, pull_request=57))
+        self.add_pull_request(57, removals=("merged",))
+        self.assertEqual(
+            self.line("Type builder:").split(" | ")[-1],
+            "pull requests: 1, 0 needed a fix after review, 0 failed a check, 0 left the merge queue unmerged, "
+            "0 got a second builder",
         )
 
     def test_asks_for_the_facts_of_25_pull_requests_at_a_time(self) -> None:
@@ -361,12 +422,12 @@ class TypeTest(ReportTest):
     def test_lists_each_agent_that_built_an_issue_with_the_issues_option(self) -> None:
         self.log_agents(
             start("a", 0, issue=12, kind="other", label="feature"),
-            end("a", 9, minutes=8.5, tool_calls=40, tokens=1200, pull_request=57),
+            end("a", 9, minutes=8.5, tool_calls=40, tokens=1200, output_tokens=90, pull_request=57),
             start("ra", 20, agent_type="reviewer", issue=57),
             start("b", 1, agent_type="builder-small", issue=13, kind="left behind 31", label="bug"),
-            end("b", 9, minutes=3, tool_calls=10, tokens=300, pull_request=58),
+            end("b", 9, minutes=3, tool_calls=10, tokens=300, output_tokens=200, is_exact=True, pull_request=58),
             start("c", 2, issue=14, kind="other", label="maintenance"),
-            end("c", 9, minutes=4, tool_calls=11, tokens=400),
+            end("c", 9, minutes=4, tool_calls=11, tokens=400, output_tokens=50, is_exact=True),
             start("d", 3, issue=15, kind="other", label="feature"),
             start("research", 4, agent_type="researcher", issue=16, kind="research", label="research"),
             end("research", 9),
@@ -379,14 +440,19 @@ class TypeTest(ReportTest):
             [line for line in lines if line.startswith("Issue")],
             [
                 (
-                    "Issue #12 feature other: builder, 8.5 min, 40 tool calls, 1200 tokens "
-                    "| pull request #57: needed a fix after review, failed a check"
+                    "Issue #12 feature other: builder, 8.5 min, 40 tool calls, 1200 input tokens, at least 90 output "
+                    "tokens, because its transcript leaves out most | pull request #57: needed a fix after review, "
+                    "failed a check"
                 ),
                 (
-                    "Issue #13 bug left behind 31: builder-small, 3.0 min, 10 tool calls, 300 tokens "
-                    "| pull request #58: no fix after review, failed check, removal from the merge queue or second builder"
+                    "Issue #13 bug left behind 31: builder-small, 3.0 min, 10 tool calls, 300 input tokens, 200 output "
+                    "tokens | pull request #58: no fix after review, failed check, unmerged exit from the merge queue "
+                    "or second builder"
                 ),
-                "Issue #14 maintenance other: builder, 4.0 min, 11 tool calls, 400 tokens | no pull request",
+                (
+                    "Issue #14 maintenance other: builder, 4.0 min, 11 tool calls, 400 input tokens, 50 output tokens "
+                    "| no pull request"
+                ),
                 "Issue #15 feature other: builder, not ended",
             ],
         )
@@ -404,19 +470,23 @@ class OrchestratorTest(ReportTest):
         self.transcript("session", [call_line("s", 1, tokens=1000)])
         self.transcript("builder", [call_line("b", 1, tokens=2000)], session="session", agent_type="builder")
         self.transcript("reviewer", [call_line("r", 1, tokens=1000)], session="session", agent_type="reviewer")
-        self.assertEqual(self.line("Orchestrator"), "Orchestrator's share of the tokens: 25%")
+        self.assertEqual(self.line("Orchestrator"), "Orchestrator's share of the input tokens: 25%")
 
-    def test_counts_every_kind_of_token(self) -> None:
+    def test_counts_every_kind_of_input_token_and_no_output_tokens(self) -> None:
         usage = {"input_tokens": 1, "cache_creation_input_tokens": 10, "cache_read_input_tokens": 100}
-        session = {"type": "assistant", "timestamp": at(1), "message": {"id": "s", "usage": usage, "content": "text"}}
+        session = {
+            "type": "assistant",
+            "timestamp": at(1),
+            "message": {"id": "s", "usage": {**usage, "output_tokens": 5000}, "content": "text"},
+        }
         self.transcript("session", [session])
         self.transcript("builder", [call_line("b", 1, tokens=889)], session="session", agent_type="builder")
-        self.assertEqual(self.line("Orchestrator"), "Orchestrator's share of the tokens: 11%")
+        self.assertEqual(self.line("Orchestrator"), "Orchestrator's share of the input tokens: 11%")
 
     def test_counts_the_tokens_of_a_response_on_several_lines_once(self) -> None:
         self.transcript("session", [call_line("s", 1, tokens=1000), call_line("s", 2, tokens=1000)])
         self.transcript("builder", [call_line("b", 1, tokens=1000)], session="session", agent_type="builder")
-        self.assertEqual(self.line("Orchestrator"), "Orchestrator's share of the tokens: 50%")
+        self.assertEqual(self.line("Orchestrator"), "Orchestrator's share of the input tokens: 50%")
 
     def test_counts_a_call_that_a_resumed_session_copied_once(self) -> None:
         earlier = self.transcript("earlier", [call_line("s", 1, tokens=1000)])
@@ -424,7 +494,7 @@ class OrchestratorTest(ReportTest):
         os.utime(earlier, (modified, modified))
         self.transcript("resumed", [call_line("s", 1, tokens=1000), call_line("t", 6, tokens=1000)])
         self.transcript("builder", [call_line("b", 1, tokens=2000)], session="resumed", agent_type="builder")
-        self.assertEqual(self.line("Orchestrator"), "Orchestrator's share of the tokens: 50%")
+        self.assertEqual(self.line("Orchestrator"), "Orchestrator's share of the input tokens: 50%")
 
     def test_counts_only_the_calls_that_started_after_the_time(self) -> None:
         self.transcript("session", [call_line("before", -30, tokens=5000), call_line("after", 1, tokens=1000)])
@@ -432,7 +502,7 @@ class OrchestratorTest(ReportTest):
         old = self.transcript("old", [call_line("old", 1, tokens=7000)], session="session", agent_type="builder")
         modified = (SINCE - dt.timedelta(minutes=1)).timestamp()
         os.utime(old, (modified, modified))
-        self.assertEqual(self.line("Orchestrator"), "Orchestrator's share of the tokens: 50%")
+        self.assertEqual(self.line("Orchestrator"), "Orchestrator's share of the input tokens: 50%")
 
     def test_skips_the_lines_that_hold_no_call(self) -> None:
         lines = [
@@ -444,7 +514,7 @@ class OrchestratorTest(ReportTest):
         ]
         self.transcript("session", lines)
         self.transcript("builder", [call_line("b", 1, tokens=100)], session="session", agent_type="builder")
-        self.assertEqual(self.line("Orchestrator"), "Orchestrator's share of the tokens: 50%")
+        self.assertEqual(self.line("Orchestrator"), "Orchestrator's share of the input tokens: 50%")
 
 
 class TranscriptFolderTest(ReportTest):

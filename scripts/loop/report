@@ -11,20 +11,21 @@ The lines are:
                             run the tests give the tests' time.
   Type                      A line for each type of the agents that started, from .loop/agents.jsonl, which
                             scripts/loop/agent_log.py describes: how many started and how many ended, the median of
-                            their minutes and of their tool calls, and their share of the tokens that all those
-                            agents used. Then how many pull requests they opened, and how many of those needed a fix
-                            after review, failed a check, left the merge queue, or got a second builder. The test
-                            builds of a retrospective don't count.
-  Orchestrator's share      The share of the tokens that the sessions in the main checkout used themselves, out of all
-                            that they and their agents used. Cached tokens count too.
+                            their minutes and of their tool calls, and their share of the input tokens that all those
+                            agents used. Then their output tokens: those of the runs of scripts/loop/run-builder, and
+                            apart from them, those of the agents of a session, which leave out most. Then how many
+                            pull requests they opened, and how many of those needed a fix after review, failed a
+                            check, left the merge queue unmerged, or got a second builder. The test builds of a
+                            retrospective don't count.
+  Orchestrator's share      The share of the input tokens that the sessions in the main checkout used themselves, out
+                            of all that they and their agents used.
   Hook blocks               How many actions the before-tool hook blocked, from .loop/blocks.log, and how many each
                             rule blocked.
 
 With --issues, the report also gives a line for each agent that built an issue, of the kinds other and left behind,
 with its numbers and those of its pull request.
 
-Claude Code's transcripts give each reply's output tokens as of the reply's start, so the orchestrator's share, and
-the tokens of the agents of a session, leave out most output tokens.
+The input tokens count the cached tokens too.
 
 An agent starts on the issue or pull request whose number starts its prompt, as docs/loop.md asks. A pull request
 needed a fix after review when it got a commit after an agent of the type reviewer started on it. It got a second
@@ -76,11 +77,15 @@ query($owner: String!, $repo: String!) {
 }
 fragment facts on PullRequest {
   commits(first: 100) { nodes { commit { committedDate checkSuites(first: 20) { nodes { conclusion } } } } }
-  timelineItems(itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) { filteredCount }
+  timelineItems(itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT], first: 100) {
+    nodes { ... on RemovedFromMergeQueueEvent { reason } }
+  }
 }"""
+# GitHub records a removal from the merge queue with this reason each time the queue merges a pull request.
+MERGED_REASON = "merged"
 # What each field of PullRequestResult says about a pull request, in the fields' order
-RESULT_WORDS = ("needed a fix after review", "failed a check", "left the merge queue", "got a second builder")
-NOTHING_HAPPENED = "no fix after review, failed check, removal from the merge queue or second builder"
+RESULT_WORDS = ("needed a fix after review", "failed a check", "left the merge queue unmerged", "got a second builder")
+NOTHING_HAPPENED = "no fix after review, failed check, unmerged exit from the merge queue or second builder"
 
 
 class CiRun(NamedTuple):
@@ -297,7 +302,7 @@ def pull_request_facts(node: dict[str, Any]) -> PullRequest:
         has_failed_check=any(
             suite["conclusion"] in FAILED_CONCLUSIONS for commit in commits for suite in commit["checkSuites"]["nodes"]
         ),
-        has_left_merge_queue=node["timelineItems"]["filteredCount"] > 0,
+        has_left_merge_queue=any(removal["reason"] != MERGED_REASON for removal in node["timelineItems"]["nodes"]),
     )
 
 
@@ -343,24 +348,38 @@ def ci_lines(runs: list[CiRun]) -> list[str]:
 def type_lines(runs: list[AgentRun], results: dict[str, PullRequestResult]) -> list[str]:
     if not runs:
         return ["Types: no agent started"]
-    all_tokens = sum(run.end["tokens"] for run in runs if run.end)
+    all_input = sum(run.end["input_tokens"] for run in runs if run.end)
     types = sorted({run.start["type"] for run in runs})
-    return [type_line(name, [run for run in runs if run.start["type"] == name], all_tokens, results) for name in types]
+    return [type_line(name, [run for run in runs if run.start["type"] == name], all_input, results) for name in types]
 
 
-def type_line(name: str, runs: list[AgentRun], all_tokens: int, results: dict[str, PullRequestResult]) -> str:
+def type_line(name: str, runs: list[AgentRun], all_input: int, results: dict[str, PullRequestResult]) -> str:
+    """The type's line. Its share is of the input tokens, which are right for every agent, unlike the output tokens."""
     ends = [run.end for run in runs if run.end]
     line = f"Type {name}: {len(runs)} started, {len(ends)} ended"
     if ends:
         minutes = statistics.median(end["minutes"] for end in ends)
         tool_calls = statistics.median(end["tool_calls"] for end in ends)
-        share = sum(end["tokens"] for end in ends) / all_tokens if all_tokens else 0
-        line += f", median {minutes:.1f} min and {tool_calls:g} tool calls, {share:.0%} of the agents' tokens"
+        share = sum(end["input_tokens"] for end in ends) / all_input if all_input else 0
+        line += f", median {minutes:.1f} min and {tool_calls:g} tool calls, {share:.0%} of the agents' input tokens"
+        line += f" | {output_tokens_part(ends)}"
     own = [results[run.start["id"]] for run in runs if run.start["id"] in results]
     if not own:
         return f"{line} | pull requests: 0"
     counts = [f"{sum(result[field] for result in own)} {words}" for field, words in enumerate(RESULT_WORDS)]
     return f"{line} | pull requests: {len(own)}, {', '.join(counts)}"
+
+
+def output_tokens_part(ends: list[dict[str, Any]]) -> str:
+    """The output tokens of the agents that ended, those of the runs apart from those of the agents of a session."""
+    runs = [end["output_tokens"] for end in ends if end["output_tokens_exact"]]
+    session_agents = [end["output_tokens"] for end in ends if not end["output_tokens_exact"]]
+    parts = []
+    if runs:
+        parts.append(f"{sum(runs)} in runs of run-builder")
+    if session_agents:
+        parts.append(f"at least {sum(session_agents)} in agents of a session, whose transcripts leave out most")
+    return f"output tokens: {', '.join(parts)}"
 
 
 def issue_lines(runs: list[AgentRun], results: dict[str, PullRequestResult]) -> list[str]:
@@ -374,7 +393,12 @@ def issue_lines(runs: list[AgentRun], results: dict[str, PullRequestResult]) -> 
         if not run.end:
             lines.append(f"{line}, not ended")
             continue
-        line += f", {run.end['minutes']:.1f} min, {run.end['tool_calls']} tool calls, {run.end['tokens']} tokens"
+        end = run.end
+        line += f", {end['minutes']:.1f} min, {end['tool_calls']} tool calls, {end['input_tokens']} input tokens, "
+        if end["output_tokens_exact"]:
+            line += f"{end['output_tokens']} output tokens"
+        else:
+            line += f"at least {end['output_tokens']} output tokens, because its transcript leaves out most"
         result = results.get(run.start["id"])
         if result is None:
             lines.append(f"{line} | no pull request")
@@ -385,11 +409,12 @@ def issue_lines(runs: list[AgentRun], results: dict[str, PullRequestResult]) -> 
 
 
 def orchestrator_line(agents: list[Agent]) -> str:
-    total = sum(call.tokens for agent in agents for call in agent.calls)
+    """The orchestrator's share of the input tokens, which the transcripts give right, unlike the output tokens."""
+    total = sum(call.input_tokens for agent in agents for call in agent.calls)
     if total == 0:
-        return "Orchestrator's share of the tokens: none used"
-    own = sum(call.tokens for agent in agents if agent.role == ORCHESTRATOR for call in agent.calls)
-    return f"Orchestrator's share of the tokens: {own / total:.0%}"
+        return "Orchestrator's share of the input tokens: none used"
+    own = sum(call.input_tokens for agent in agents if agent.role == ORCHESTRATOR for call in agent.calls)
+    return f"Orchestrator's share of the input tokens: {own / total:.0%}"
 
 
 def block_line(blocks: Counter[str]) -> str:

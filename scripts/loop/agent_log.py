@@ -13,17 +13,21 @@ Each line is a JSON object. A start line holds:
   issue           the number at the start of the prompt's first line, of an issue or a pull request, or null
   label           the issue's type label, such as feature, or null
   kind            the kind after the number, as scripts/take-next-issue prints it, or null
-  test            true for a test build of a retrospective, and for the agents that it starts, which run with the
-                  environment variable LOOP_TEST_BUILD set
+  test            true for a test build of a retrospective
 
 An end line holds at, "end" as its event, the start line's id, and:
 
+  model, effort   for an agent of a session, the model and effort in the .meta.json file next to its transcript, or
+                  null. They count when the start line has none, as for a type without an agent file.
   minutes         the agent's minutes, from each prompt or message that it received to its last call before the next
                   one, or a Codex run's minutes
   tool_calls      the agent's tool calls
-  tokens          the tokens that the agent used, cached tokens too. For an agent of a session, the transcript gives
-                  each reply's output tokens as of the reply's start, so the count leaves out most output tokens. Its
-                  input and cached tokens are right. A run of scripts/loop/run-builder gives the final count.
+  input_tokens    the input tokens that the agent used, cached tokens too
+  output_tokens   the output tokens that the agent used. For an agent of a session, the count leaves out most of
+                  them, because its transcript gives each reply's output tokens as of the reply's start.
+  output_tokens_exact
+                  false for an agent of a session, and true for a run of scripts/loop/run-builder, which counts the
+                  output tokens of the agents that it starts too
   pull_request    the number of the pull request that the agent opened, or null
   worktree_mb     the size of the agent's worktree in megabytes, or null if it had none
   cpu_seconds     a run's CPU time, which only scripts/loop/run-builder gives
@@ -50,7 +54,8 @@ KIND = re.compile(r"research|parent|other|left behind [1-9][0-9]*")
 # The line that scripts/take-next-issue printed, such as 12 other, or a pull request's number alone.
 SUBJECT = re.compile(rf"([1-9][0-9]*)(?: ({KIND.pattern}))?")
 BYTES_IN_A_MEGABYTE = 1_000_000
-TEST_VARIABLE = "LOOP_TEST_BUILD"
+# The environment variable that scripts/loop/run-builder sets for the builders that it runs
+RUN_VARIABLE = "LOOP_RUN"
 
 
 class AgentSettings(NamedTuple):
@@ -59,18 +64,24 @@ class AgentSettings(NamedTuple):
     file_hash: str | None
     # The text after the front matter
     instructions: str = ""
+    # The tools and disallowed tools, separated by commas, and the limit on turns
+    tools: str | None = None
+    disallowed_tools: str | None = None
+    max_turns: str | None = None
 
 
 class Numbers(NamedTuple):
     minutes: float
     tool_calls: int
-    tokens: int
+    input_tokens: int
+    output_tokens: int
+    output_tokens_exact: bool
     pull_request: int | None
 
 
 def agent_settings(agent_type: str) -> AgentSettings:
-    """The model, effort and instructions in the type's agent file, and git's hash of the file. A type without a file,
-    such as Claude Code's Explore, has none of them."""
+    """The settings in the type's agent file, and git's hash of the file. A type without a file, such as Claude Code's
+    Explore, has none of them."""
     file = AGENTS_FOLDER / f"{agent_type}.md"
     if not file.is_file():
         return AgentSettings(None, None, None)
@@ -78,21 +89,36 @@ def agent_settings(agent_type: str) -> AgentSettings:
     file_hash = subprocess.run(
         ["git", "hash-object", str(file)], cwd=file.parent, capture_output=True, text=True, check=True
     ).stdout.strip()
-    return AgentSettings(fields.get("model"), fields.get("effort"), file_hash, instructions)
+    return AgentSettings(
+        model=fields.get("model"),
+        effort=fields.get("effort"),
+        file_hash=file_hash,
+        instructions=instructions,
+        tools=fields.get("tools"),
+        disallowed_tools=fields.get("disallowedTools"),
+        max_turns=fields.get("maxTurns"),
+    )
 
 
 def split_agent_file(text: str) -> tuple[dict[str, str], str]:
     """The fields of the front matter at the start of an agent file, the lines of name: value between two lines of
-    ---, and the text after it."""
+    ---, and the text after it. A field can also list its values on the lines after it, each after a dash, as tools
+    can, and then its value is the list, separated by commas."""
     lines = text.splitlines()
     if not lines or lines[0] != "---":
         return {}, text.strip()
     fields: dict[str, str] = {}
+    name = ""
     for index, line in enumerate(lines[1:], start=2):
         if line == "---":
             return fields, "\n".join(lines[index:]).strip()
+        if line.strip().startswith("- ") and name:
+            listed = line.strip().removeprefix("- ").strip()
+            fields[name] = f"{fields[name]}, {listed}" if fields[name] else listed
+            continue
         name, _, value = line.partition(":")
-        fields[name.strip()] = value.strip()
+        name = name.strip()
+        fields[name] = value.strip()
     return fields, ""
 
 
@@ -121,7 +147,9 @@ def transcript_numbers(transcript: Path) -> Numbers:
     return Numbers(
         minutes=round(transcripts.working_minutes(calls, prompts), 1),
         tool_calls=sum(call.tool_calls for call in calls),
-        tokens=sum(call.tokens for call in calls),
+        input_tokens=sum(call.input_tokens for call in calls),
+        output_tokens=sum(call.output_tokens for call in calls),
+        output_tokens_exact=False,
         pull_request=transcripts.opened_pull_request(transcript),
     )
 
@@ -162,9 +190,25 @@ def start_line(
     }
 
 
-def end_line(agent_id: str, numbers: Numbers, worktree_mb: float | None, **run: float) -> dict[str, Any]:
+def end_line(
+    agent_id: str,
+    numbers: Numbers,
+    worktree_mb: float | None,
+    model: str | None = None,
+    effort: str | None = None,
+    run_usage: dict[str, float] | None = None,
+) -> dict[str, Any]:
     """The end line, with a run's CPU time and peak memory when they're given."""
-    return {"at": now(), "event": "end", "id": agent_id, **numbers._asdict(), "worktree_mb": worktree_mb, **run}
+    return {
+        "at": now(),
+        "event": "end",
+        "id": agent_id,
+        "model": model,
+        "effort": effort,
+        **numbers._asdict(),
+        "worktree_mb": worktree_mb,
+        **(run_usage or {}),
+    }
 
 
 def append(line: dict[str, Any]) -> None:

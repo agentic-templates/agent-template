@@ -40,9 +40,10 @@ To give a builder something, such as a correction or a reviewer's errors, send i
 `scripts/loop/run-builder` started can't take messages. Wait until its run ends, and then start a new agent of the
 type `builder` on its pull request instead, or on its issue if it opened none.
 
-Start the prompt of each agent with a line that names its work: for an issue, the line that `scripts/take-next-issue`
-printed, and for a pull request, its number alone. `scripts/loop/report` reads that line to tell which issue or pull
-request each agent worked on.
+Start the prompt of each agent of the types `builder`, `builder-small`, `builder-deep`, `researcher` and `reviewer`
+with a line that names its work: for an issue, the line that `scripts/take-next-issue` printed, and for a pull
+request, its number alone. `scripts/loop/report` reads that line to tell which issue or pull request each agent worked
+on.
 
 ### Take in
 
