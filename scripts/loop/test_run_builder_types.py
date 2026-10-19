@@ -137,6 +137,7 @@ class AgentLinesTest(RunBuilderTest):
                 "label": "bug",
                 "kind": "other",
                 "test": False,
+                "pid": None,
             },
         )
         self.assert_run_usage(end)
@@ -203,6 +204,7 @@ class AgentLinesTest(RunBuilderTest):
                 "label": "bug",
                 "kind": "other",
                 "test": False,
+                "pid": None,
             },
         )
         self.assert_run_usage(end)

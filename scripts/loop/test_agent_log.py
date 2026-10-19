@@ -74,6 +74,7 @@ class AgentLogTest(unittest.TestCase):
             "PATH": f"{bin_folder}{os.pathsep}{os.environ['PATH']}",
             "STANDIN_DIR": str(self.standins),
             "LOOP_DIR": str(self.loop),
+            "CLAUDE_PID": "4321",
         }
         for patched in (
             mock.patch.dict(os.environ, environment),
@@ -129,9 +130,20 @@ class StartTest(AgentLogTest):
                 "label": "bug",
                 "kind": "other",
                 "test": False,
+                "pid": 4321,
             },
         )
         self.assertEqual(self.gh_calls(), ["issue view 12 --json labels --jq .labels[].name"])
+
+    def test_gives_no_process_id_without_a_positive_number_from_claude_code(self) -> None:
+        for pid in ("", "0", "-1", "12a"):
+            with self.subTest(pid=pid), mock.patch.dict(os.environ, {"CLAUDE_PID": pid}):
+                self.run_script("start", agent_call("12 other", subagent_type="builder"))
+                self.assertIsNone(self.lines()[-1]["pid"])
+        with mock.patch.dict(os.environ):
+            del os.environ["CLAUDE_PID"]
+            self.run_script("start", agent_call("12 other", subagent_type="builder"))
+            self.assertIsNone(self.lines()[-1]["pid"])
 
     def test_takes_the_model_and_effort_that_the_call_gives(self) -> None:
         self.run_script("start", agent_call("12 left behind 31", subagent_type="builder", model="sonnet", effort="max"))

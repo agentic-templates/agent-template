@@ -16,7 +16,8 @@ The session meter's stop point is 100% minus the larger of 2 percentage points a
 between the last two readings. Each weekly meter, the one for all models and each model's own, stops at 99%.
 
 The line before the last lists the agents that run: those with a start line and no end line in .loop/agents.jsonl,
-each with its type and the number of its issue or pull request. It gives each agent's context size, and the threshold
+each with its type and the number of its issue or pull request. It leaves out an agent whose Claude Code process has
+ended, such as a builder of an orchestrator that was restarted. It gives each agent's context size, and the threshold
 at which scripts/hooks/hand-off told the agent to hand off its work, if it did.
 
 The last line gives the machine's free disk, free memory, swap in use, GPU use and GPU memory in use, its load, the
@@ -55,6 +56,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -502,7 +504,7 @@ def running_agents(loop_folder: Path, checkout: Path) -> list[Agent]:
     transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
     agents = []
     for run in agent_log.read_runs(loop_folder / "agents.jsonl"):
-        if run.end is not None:
+        if not is_running(run, process_runs):
             continue
         issue = run.start.get("issue")
         name = f"{run.start['type']} #{issue}" if issue else run.start["type"]
@@ -514,6 +516,27 @@ def running_agents(loop_folder: Path, checkout: Path) -> list[Agent]:
         session = run_session(events) if events.exists() else None
         agents.append(Agent(name, session, context_tokens(events)))
     return agents
+
+
+def is_running(run: agent_log.AgentRun, process_runs: Callable[[int], bool]) -> bool:
+    """Whether an agent runs: it has no end line, and the Claude Code process that started it runs. An agent whose
+    start line has no process id, such as a run of scripts/loop/run-builder, counts as running, because the meter can't
+    tell whether it ended."""
+    if run.end is not None:
+        return False
+    pid = run.start.get("pid")
+    return pid is None or process_runs(pid)
+
+
+def process_runs(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Another user's process has the id.
+        return True
+    return True
 
 
 def run_session(events: Path) -> str | None:

@@ -14,6 +14,7 @@ keeps an agent running when that command exits with code 2, as argparse and uv d
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +25,8 @@ import agent_log
 # The type that Claude Code gives an Agent call without a subagent_type
 DEFAULT_TYPE = "general-purpose"
 GH_TIMEOUT_SECONDS = 10
+# os.kill takes 0 and negative numbers as groups of processes, so a process id must be positive.
+PROCESS_ID = re.compile(r"[1-9][0-9]*")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -48,7 +51,15 @@ def start_line(hook_input: dict[str, Any]) -> dict[str, Any]:
     settings = in_file._replace(model=call.get("model") or in_file.model, effort=call.get("effort") or in_file.effort)
     issue, kind = agent_log.prompt_subject(call.get("prompt", ""))
     label = agent_log.type_label(issue_labels(issue)) if issue else None
-    return agent_log.start_line(hook_input["tool_use_id"], agent_type, settings, issue, label, kind, is_test=False)
+    return agent_log.start_line(
+        hook_input["tool_use_id"], agent_type, settings, issue, label, kind, is_test=False, pid=claude_process()
+    )
+
+
+def claude_process() -> int | None:
+    """The id of the Claude Code process, which Claude Code gives its hooks in CLAUDE_PID, or None without one."""
+    found = PROCESS_ID.fullmatch(os.environ.get("CLAUDE_PID", ""))
+    return int(found[0]) if found else None
 
 
 def issue_labels(issue: int) -> list[str]:
