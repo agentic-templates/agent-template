@@ -297,6 +297,7 @@ expect_block Bash 'gh repo archive someone/else --yes' "$(other_repository someo
 expect_block Bash 'gh pr comment --body Thanks https://github.com/someone/else/pull/5' "$(other_repository someone/else)"
 expect_block Bash 'gh issue close --comment Done https://github.com/someone/else/issues/5' \
   "$(other_repository someone/else)"
+expect_block Bash 'gh pr close 5 -R someone/else' "$(other_repository someone/else)"
 expect_block Bash 'GH_REPO=someone/else gh issue comment 5 --body Hello' "$(other_repository someone/else)"
 expect_block Bash 'env GH_REPO=someone/else gh pr comment 5 --body Hello' "$(other_repository someone/else)"
 expect_block Bash 'GH_REPO=someone/else gh api -X POST "repos/{owner}/{repo}/issues/5/comments" -f body=Thanks' \
