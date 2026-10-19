@@ -334,6 +334,16 @@ expect_allow Bash 'gh gist create -d --public notes.md'
 # Posting to a repository other than this one, or one that the list names
 expect_block Bash 'gh pr comment 5 -R someone/else --body Hello' "$(other_repository someone/else)"
 expect_block Bash 'gh issue comment -Rsomeone/else 5 --body Hello' "$(other_repository someone/else)"
+# A word can hold several short flags, as split_flag_word in helpers.bash reads it, and -R can be the last of them.
+# The -a of gh pr review takes no value. The hooks list no flags of gh run rerun, so the hook reads its -d, which takes
+# no value, as a flag without a value too. The -c of gh issue close takes a comment, so -cRsomeone/else there is the
+# comment Rsomeone/else, and the -b of gh pr comment takes the next word as the body, even when it starts with -R.
+for command in 'gh pr review 5 -a -R someone/else' 'gh pr review 5 -aRsomeone/else' 'gh pr review -aR someone/else 5' \
+  'gh run rerun 12 -dRsomeone/else'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+expect_allow Bash 'gh issue close 5 -cRsomeone/else'
+expect_allow Bash 'gh pr comment 5 -b -Rsomeone/else'
 expect_block Bash 'gh issue -R someone/else comment 5 --body Hello' "$(other_repository someone/else)"
 expect_block Bash 'gh release -R someone/else upload v1 app.tar' "$(other_repository someone/else)"
 expect_block Bash 'gh workflow run ci.yml --repo=github.com/someone/else' "$(other_repository someone/else)"

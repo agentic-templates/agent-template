@@ -577,27 +577,39 @@ find_destination() {
   fi
 }
 
-# Sets destination to the repository that the words of a gh command other than gh api name, or to empty.
+# Sets command_flags_with_value to the flags that take a value of the gh command in command_words, from the lists in
+# helpers.bash. For any other command, it sets it to -R and --repo alone, so that the hook reads each other flag as one
+# that takes no value, as in -dRowner/name, which it reads as -d -R owner/name. If the -d of such a command takes a
+# value in fact, gh reads Rowner/name as that value, and the hook blocks a command that doesn't post to owner/name,
+# which is safer than missing a post.
+read_command_flags_with_value() {
+  case "${command_words[1]:-} ${command_words[2]:-}" in
+    "issue create" | "issue new") command_flags_with_value=$issue_create_flags_with_value ;;
+    "issue edit") command_flags_with_value=$issue_edit_flags_with_value ;;
+    "issue close") command_flags_with_value=$issue_close_flags_with_value ;;
+    "issue develop") command_flags_with_value=$develop_flags_with_value ;;
+    "issue comment" | "pr comment") command_flags_with_value=$comment_flags_with_value ;;
+    "issue reopen" | "pr reopen") command_flags_with_value=$reopen_flags_with_value ;;
+    "pr create" | "pr new") command_flags_with_value=$pr_create_flags_with_value ;;
+    "pr edit") command_flags_with_value=$pr_edit_flags_with_value ;;
+    "pr review") command_flags_with_value=$review_flags_with_value ;;
+    "pr close") command_flags_with_value=$pr_close_flags_with_value ;;
+    "pr merge") command_flags_with_value=$merge_flags_with_value ;;
+    *) command_flags_with_value=" -R --repo " ;;
+  esac
+}
+
+# Sets destination to the repository that the words of a gh command other than gh api name, or to empty. It reads -R
+# and --repo as read_arguments in helpers.bash reads them, with the command's flags that take a value.
 find_named_repository() {
-  local i word
+  local i word command_flags_with_value
   destination=""
-  for ((i = 2; i < ${#command_words[@]}; i++)); do
-    word=${command_words[i]}
-    case $word in
-      -R | --repo)
-        destination=${command_words[i + 1]:-}
-        return 0
-        ;;
-      --repo=*)
-        destination=${word#--repo=}
-        return 0
-        ;;
-      -R?*)
-        destination=${word#-R}
-        return 0
-        ;;
-    esac
-  done
+  read_command_flags_with_value
+  read_arguments 2 "$command_flags_with_value"
+  if ((${#repository[@]} > 0)); then
+    destination=${repository[1]}
+    return 0
+  fi
   if [[ ${command_words[1]:-} == repo ]]; then
     case ${command_words[2]:-} in
       edit) read_arguments 3 "$repo_edit_flags_with_value" ;;

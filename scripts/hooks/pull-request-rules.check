@@ -92,9 +92,6 @@ draft_message() {
   fi
 }
 
-# The flags of gh pr edit that take a value, as gh pr edit --help lists them.
-pr_edit_flags_with_value=" --add-assignee --add-label --add-project --add-reviewer --attach -B --base -b --body -F --body-file -m --milestone --remove-assignee --remove-label --remove-project --remove-reviewer -t --title -R --repo "
-
 check_gh_pr_edit() {
   local message
   if ! edits_pull_request_text; then

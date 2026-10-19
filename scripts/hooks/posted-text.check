@@ -14,13 +14,6 @@ source "${BASH_SOURCE[0]%/*}/helpers.bash"
 # shellcheck source=scripts/text-rules
 source "${BASH_SOURCE[0]%/*}/../text-rules"
 
-# The flags that take a value, as the --help of these commands lists them. gh issue comment and gh pr comment take the
-# same flags, and so do gh issue reopen and gh pr reopen.
-comment_flags_with_value=" --attach -b --body -F --body-file -R --repo "
-review_flags_with_value=" -b --body -F --body-file -R --repo "
-issue_close_flags_with_value=" -c --comment --duplicate-of -r --reason -R --repo "
-reopen_flags_with_value=" -c --comment -R --repo "
-
 # Reads the text that a gh command gives from command_words, from its fourth word on: read_text <flags that take a value>
 # It sets title to the value of --title, and has_title to yes when the command gives --title, whose value can be empty.
 # It sets body_source, body_word and body_file for read_body, from --body, --body-file or --comment, and records

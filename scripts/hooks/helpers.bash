@@ -401,9 +401,16 @@ move_gh_repository_flags() {
 # The flags of gh api that take a value, as gh api --help lists them.
 api_flags_with_value=" --cache -F --field -H --header --hostname --input -q --jq -X --method -p --preview -f --raw-field -t --template "
 
-# The flags that take a value, as gh issue create --help, gh issue edit --help and gh pr close --help list them.
+# The flags that take a value, as the --help of these commands lists them. gh issue comment and gh pr comment take the
+# same flags, and so do gh issue reopen and gh pr reopen.
 issue_create_flags_with_value=" -a --assignee --attach --blocked-by --blocking -b --body -F --body-file -l --label -m --milestone --parent -p --project --recover -T --template -t --title --type -R --repo "
 issue_edit_flags_with_value=" --add-assignee --add-blocked-by --add-blocking --add-label --add-project --add-sub-issue --attach -b --body -F --body-file -m --milestone --parent --remove-assignee --remove-blocked-by --remove-blocking --remove-label --remove-project --remove-sub-issue -t --title --type -R --repo "
+issue_close_flags_with_value=" -c --comment --duplicate-of -r --reason -R --repo "
+develop_flags_with_value=" -b --base --branch-repo -n --name --worktree -R --repo "
+comment_flags_with_value=" --attach -b --body -F --body-file -R --repo "
+reopen_flags_with_value=" -c --comment -R --repo "
+pr_edit_flags_with_value=" --add-assignee --add-label --add-project --add-reviewer --attach -B --base -b --body -F --body-file -m --milestone --remove-assignee --remove-label --remove-project --remove-reviewer -t --title -R --repo "
+review_flags_with_value=" -b --body -F --body-file -R --repo "
 pr_close_flags_with_value=" -c --comment -R --repo "
 
 # Reads the words of a gh command from an index on, each word that starts with a dash as split_flag_word reads it, and
