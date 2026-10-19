@@ -67,6 +67,7 @@ from accounts import Account, AccountsError, claude_environment, load_accounts
 from github import GitHubError, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, note_files
 from machine import Machine, read_machine
+from meter_waits import READ_EVERY_SECONDS, WAKE_EVERY
 from usage import Meter, parse_usage
 
 WATCH_PERCENT = 80.0
@@ -87,14 +88,11 @@ WEEK_NEAR_MARGIN_PERCENT = 1.0
 # Waiting at a stop wakes the orchestrator every 50 minutes, and each wake spends some of the week. So a weekly stop
 # further than this from its reset parks the account instead.
 LONGEST_STOP = dt.timedelta(hours=10)
-READ_EVERY_SECONDS = {"go": 30 * 60, "watch": 10 * 60, "near": 150}
 SHORTEST_WAIT_SECONDS = 60
 # A wait for a reset ends this long after it, so that the next reading sees the new window.
 AFTER_RESET_SECONDS = 60
 UNKNOWN_RESET_WAIT_SECONDS = 10 * 60
 LATEST_TIME = dt.datetime.max.replace(tzinfo=dt.UTC)
-# Less than an hour, so that the orchestrator wakes while a prompt cache that lasts an hour still holds its context.
-WAKE_EVERY = dt.timedelta(minutes=50)
 CLAUDE_TIMEOUT_SECONDS = 120
 # A Codex snapshot from before this is from an earlier weekly window, so the meter doesn't read older session files.
 CODEX_SNAPSHOT_AGE = dt.timedelta(days=8)

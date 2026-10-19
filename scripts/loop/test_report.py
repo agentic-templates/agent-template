@@ -869,8 +869,11 @@ class MachineTest(ReportTest):
     def test_gives_the_share_of_the_time_in_which_swap_grew_and_of_the_readings_with_a_load_above_the_cores(
         self,
     ) -> None:
-        # Swap grows in 78 of the 90 minutes that count. The gap of 61 minutes from minute 80 doesn't count, and
-        # neither do the minutes next to the reading without swap.
+        # Swap grows in 78 of the 90 minutes that count. With a longest gap of 60 minutes, the gap of 61 minutes from
+        # minute 80 doesn't count, and neither do the minutes next to the reading without swap.
+        patcher = mock.patch.object(report, "LONGEST_READING_GAP", dt.timedelta(minutes=60))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.log_readings(
             meter_reading(0, cores=10, swap_used_gb=1.0, load=12),
             meter_reading(10, cores=10, swap_used_gb=1.5, load=10),

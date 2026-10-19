@@ -62,7 +62,7 @@ The lines are:
                             load. Each gives the median and the worst: the lowest of free disk and free memory, and
                             the highest of the others. Free disk also gives its change from the first reading to the
                             last. Swap in use also gives the share of the time between readings in which it grew,
-                            leaving out a gap of more than an hour, when the loop stopped. The load also gives
+                            leaving out a gap longer than the meter waits while the loop runs. The load also gives
                             the share of the readings with a load above the number of cores. A number that no reading
                             gives says so. Then a line for each number of agents, from one to the most that worked at a
                             reading: how many readings they worked at, and the median of each number in those
@@ -109,6 +109,7 @@ import request_events
 from agent_log import AgentRun, Period, agent_output_tokens, agent_transcripts, read_runs, started, working_periods
 from github import GitHubError, gh_api, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, hook_threshold, note_files
+from meter_waits import LONGEST_READING_GAP
 from transcripts import Call, Message, person_messages, read_transcript
 
 CI_WORKFLOW = "ci.yml"
@@ -211,10 +212,6 @@ MACHINE_NUMBERS = (
     MachineNumber("gpu_memory_used_gb", "GPU memory in use, GB", "GPU memory in use", False),
     MachineNumber("load", "Load", "load", False),
 )
-
-# scripts/loop/meter reads the machine at least every 50 minutes while the loop runs, so a longer gap between two
-# readings is a time when the loop stopped, such as a night, and the swap share leaves it out.
-LONGEST_READING_GAP = dt.timedelta(hours=1)
 
 
 class ReportError(Exception):
