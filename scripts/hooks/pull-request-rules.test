@@ -138,12 +138,19 @@ $quoted_body
 EOF"
 expect_allow Bash "gh pr create --title '$title' --body-file - < ../body.md"
 
-# Titles and bodies that the hook reads as the command writes them, without filling in variables
+# A title that the hook reads as the command writes it, without filling in variables
 may_expand="This hook reads the title and body as the command writes them, without running \$( ) or filling in variables."
 expect_block Bash "gh pr create --title \"\$type: skip the expenses\" --body-file ../body.md" \
   "$(blocked "The title \"\$type: skip the expenses\" doesn't follow the format \"<type>: <what changed>\". Edit the title to match. The types are feat, fix, docs, test, refactor, perf, build, ci, revert, chore.") $may_expand"
-expect_block Bash "gh pr create --title '$title' --body \"\$(cat ../body.md)\"" \
-  "$(blocked "$no_closing_line" "The body has no heading \"What changed and why\". Add it as .github/pull_request_template.md has it, and write under it what the template's comment asks for.") $may_expand"
+
+# Bodies that a command in $( ) or backticks prints. The hook asks for the body in a file, and checks neither the
+# command's text nor the title. The text of this printf would fail the checks, though the body it prints passes them.
+from_command="Blocked: this hook can't run the command in \$( ) or backticks that prints the body, so it can't check the pull request's body. Write the body to a file in a command of its own first, and give the file with --body-file."
+printf_body="\"\$(printf '%s\n' 'Closes #12.' '' '## What changed and why' '' 'The app skips the expenses.')\""
+expect_block Bash "gh pr create --title '$title' --body $printf_body" "$from_command"
+expect_block Bash "gh pr create --title 'skip the expenses that were already imported' --body=$printf_body" "$from_command"
+expect_block Bash "gh pr create --title '$title' --body \"\$(cat ../body.md)\"" "$from_command"
+expect_block Bash "gh pr create --title '$title' -b \"\`cat ../body.md\`\"" "$from_command"
 
 # Commands that give no title or no body, or a body file that the hook can't read before the command runs
 expect_block Bash "gh pr create --fill" "Blocked: the command gives no title, so this hook can't check it. Give the title with --title."

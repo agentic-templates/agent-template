@@ -7,9 +7,9 @@
 #   sets the body or changes the type label. So an edit that changes neither goes ahead, such as one that assigns the
 #   issue, and so does removing needs-triage from an issue that the bug form opened, whose headings differ.
 # - gh label create, gh label edit, gh label delete and gh label clone, because scripts/configure-github sets the labels
-# It reads the body as the command writes it: from --body, from the file that --body-file names, or from a
-# here-document, without running $( ) or filling in variables. It asks gh for the labels and body of each issue that
-# an edit changes, and allows the edit when gh fails, such as without a network.
+# It reads the body as read_body in helpers.bash reads it, as the command writes it, without running $( ) or filling in
+# variables. It asks gh for the labels and body of each issue that an edit changes, and allows the edit when gh fails,
+# such as without a network.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 # shellcheck source=scripts/issue-labels

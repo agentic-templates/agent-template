@@ -167,6 +167,33 @@ expect_block Bash "cat notes.md | gh issue comment 7 --body-file -" \
 expect_block Bash "gh pr comment 5 --body-file missing.md" \
   "Blocked: this hook checks the body file before the command runs, and missing.md doesn't exist yet or the command writes it. Write the file in a command of its own first, and give its path without variables."
 
+# Text that a command in $( ) or backticks prints, unless the command is cat alone, reading a here-document. The hook
+# asks for a body in a file, and for a comment in quotes or a here-document, without checking the command's text. A
+# $( ) in single quotes is text, which the hook checks.
+from_command="Blocked: this hook can't run the command in \$( ) or backticks that prints the body, so it can't check the body for paths into a home folder, semicolons and dashes. Write the body to a file in a command of its own first, and give the file with --body-file."
+expect_block Bash "gh issue comment 7 --body \"\$(printf '%s\n' '$semicolon_line')\"" "$from_command"
+expect_block Bash "gh pr review 5 --approve -b \"\`cat notes.md\`\"" "$from_command"
+here_document=$'<<\'EOF\'\n'"$change_body"$'\nEOF\n'
+for substitution in \
+  "\$(cat $here_document)\$(cat notes.md)" \
+  "\$(cat notes.md)\$(cat $here_document)" \
+  "\$(cat notes.md) \$HOME" \
+  "\$(cat ${here_document}cat notes.md)" \
+  "\$(cat ${here_document}echo 'More text.')" \
+  "\$(sed 's/x/;/' $here_document)" \
+  "\$(printf '%s\n' \"\$(cat $here_document)\" \"\$(cat notes.md)\")"; do
+  expect_block Bash "gh pr comment 5 --body \"$substitution\"" "$from_command"
+done
+expect_block Bash "gh pr comment 5 --body \"\`cat<<'EOF'
+$semicolon_line
+EOF
+\`\"" "$(blocked "gh pr comment" "$(semicolon "The line \"$semicolon_line\"")")"
+comment_from_command="Blocked: this hook can't run the command in \$( ) or backticks that prints the comment, so it can't check the comment. Give the comment in quotes, or from a here-document, as in --comment \"\$(cat <<'EOF' ... EOF)\"."
+expect_block Bash "gh issue close 7 --comment \"\$(printf '%s\n' '$semicolon_line')\"" "$comment_from_command"
+expect_block Bash "gh pr reopen 5 -c \"\`cat notes.md\`\"" "$comment_from_command"
+expect_block Bash "gh issue comment 7 --body 'Run \$(date) daily; it logs the total.'" \
+  "$(blocked "gh issue comment" "$(semicolon "The line \"Run \$(date) daily; it logs the total.\"")")"
+
 # Commands that give no text
 expect_allow Bash 'gh issue edit 7 --add-label ready'
 expect_allow Bash 'gh issue comment 7 --editor'

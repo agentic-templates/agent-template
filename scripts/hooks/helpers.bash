@@ -586,7 +586,9 @@ for_each_simple_command() {
 # Redirections, such as "< .env" or "2>/dev/null", aren't words. Before each call, the array redirections
 # holds them as pairs: the operator, such as < or 2>, then its target. The array simple_command_words holds the
 # words, which block logs. block can't read the array words, because some checks have a local array of that name.
-# It leaves substitution text in the surrounding word, because body checks inspect the original text.
+# It leaves substitution text in the surrounding word, because body checks inspect the original text. The array
+# words_may_expand holds, for each word, command when it has a $( ) or backticks that runs a command other than cat
+# alone, reading a here-document, yes when it has other expansion syntax outside single quotes, or empty.
 # A cd between ( and ) changes the folder that follow_cd keeps only until the ), because the commands between them run
 # in a shell of their own.
 split_simple_commands() {
@@ -626,12 +628,17 @@ split_simple_commands() {
       fi
     fi
 
-    if [[ $quote != "'" ]] && starts_expansion "$char" "$next"; then
+    if [[ $quote != "'" && $word_may_expand != command ]] && starts_expansion "$char" "$next"; then
       word_may_expand=yes
     fi
 
     if [[ $quote != "'" && ($char == '`' || ($char == '$' && $next == '(')) ]]; then
       read_substitution "$text" "$i"
+      # read_body reads the here-document that cat prints in place of the output, because they're the same text.
+      # $(( )) is arithmetic, and runs no command.
+      if [[ ${text:i:3} != '$((' && ! $substitution_body =~ $cat_heredoc ]]; then
+        word_may_expand=command
+      fi
       split_substitution "$function" "$substitution_body"
       word+=${text:i:substitution_end-i+1}
       has_word=true
@@ -738,6 +745,8 @@ heredoc_operator="<<(-?)[[:blank:]]*(([^[:space:]<>;&|()'\"\\\\]|'[^']*'|\"[^\"]
 # split_heredocs puts this character around a here-document's number. Commands don't contain it.
 marker=$'\037'
 heredoc_reference="$marker([0-9]+)$marker"
+# The command of a $( ) or backticks that prints a here-document and nothing else, as split_heredocs leaves it
+cat_heredoc="^[[:space:]]*cat[[:space:]]*<<-?$heredoc_reference[[:space:]]*\$"
 
 # Takes the bodies of the here-documents out of a command, because a body holds text and not commands, and a quote in
 # the text would end the word that holds it, such as the --body word in --body "$(cat <<'EOF' ... EOF)":
@@ -859,9 +868,12 @@ give_the_body="Give the body with --body, or write it to a file and give the fil
 
 # Sets body to the text that a gh command gives, and body_may_expand to yes for active expansion syntax in it.
 # Blocks when the hook can't read the body: read_body <what the hook checks, such as: the issue's headings>
-# It reads the body as the command writes it, without running $( ) or filling in variables: from --body, from the
-# file that --body-file names, or from a here-document. It reads what the check found in the command's words:
-# body_source (empty, text or file), body_word and body_file. Run split_heredocs on the command first.
+# It reads the body as the command writes it, without running $( ) or filling in variables: from --body or --comment,
+# from the file that --body-file names, or from a here-document. It blocks a body that a command in $( ) or backticks
+# prints, unless the command is cat alone, reading a here-document, because the hook would check the command's text in
+# place of the body. It reads what the check found in the command's words: body_source (empty, text, comment or file),
+# body_word, body_file and body_may_expand, as the array words_may_expand of split_simple_commands holds it. Run
+# split_heredocs on the command first.
 read_body() {
   local rest i index
   body=""
@@ -869,7 +881,14 @@ read_body() {
     "")
       block "Blocked: the command gives no body, so this hook can't check $1. $give_the_body"
       ;;
-    text)
+    text | comment)
+      if [[ $body_may_expand == command ]]; then
+        # gh takes a comment only as text, with no flag for a file.
+        if [[ $body_source == comment ]]; then
+          block "Blocked: this hook can't run the command in \$( ) or backticks that prints the comment, so it can't check the comment. Give the comment in quotes, or from a here-document, as in --comment \"\$(cat <<'EOF' ... EOF)\"."
+        fi
+        block "Blocked: this hook can't run the command in \$( ) or backticks that prints the body, so it can't check $1. Write the body to a file in a command of its own first, and give the file with --body-file."
+      fi
       if [[ ! $body_word =~ $heredoc_reference ]]; then
         body=$body_word
         return 0

@@ -43,6 +43,11 @@ for word in "${active_words[@]}" "${literal_words[@]}"; do
   for active in "${active_words[@]}"; do
     if [[ $word == "$active" ]]; then expected=yes; fi
   done
+  # A body that a command in $( ) prints, here printf, gets the message that asks for a body file, which has no note.
+  body_expected=$expected
+  if [[ $word == *printf* ]]; then
+    body_expected=no
+  fi
   body_flags=('--body ')
   title_flags=('--title ')
   if [[ $word == "${active_words[0]}" || $word == "${literal_words[0]}" ]]; then
@@ -50,9 +55,9 @@ for word in "${active_words[@]}" "${literal_words[@]}"; do
     title_flags+=('-t ' '--title=')
   fi
   for flag in "${body_flags[@]}"; do
-    expect_note posted-text "gh issue comment 7 $flag$word" "$expected"
-    expect_note issues-and-labels "gh issue create --label bug $flag$word" "$expected"
-    expect_note pull-request-rules "gh pr create --title bad $flag$word" "$expected"
+    expect_note posted-text "gh issue comment 7 $flag$word" "$body_expected"
+    expect_note issues-and-labels "gh issue create --label bug $flag$word" "$body_expected"
+    expect_note pull-request-rules "gh pr create --title bad $flag$word" "$body_expected"
   done
   for flag in "${title_flags[@]}"; do
     expect_note posted-text "gh issue edit 7 $flag$word" "$expected"
@@ -65,8 +70,8 @@ for word in "${active_words[@]}" "${literal_words[@]}"; do
       done
     done
   fi
-  expect_note posted-text "gh pr comment 7 -b $word" "$expected"
-  expect_note posted-text "gh pr review 7 -b $word" "$expected"
+  expect_note posted-text "gh pr comment 7 -b $word" "$body_expected"
+  expect_note posted-text "gh pr review 7 -b $word" "$body_expected"
 done
 
 # Quotes inside an unquoted here-document do not protect its expansions.
