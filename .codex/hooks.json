@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "root=$(git rev-parse --show-toplevel 2>/dev/null) && [ -x \"$root/scripts/hooks/before-tool\" ] && exec \"$root/scripts/hooks/before-tool\"; exit 0"
+            "command": "input=$(cat); root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; hook=$root/scripts/hooks/before-tool; [ -x \"$hook\" ] || exit 0; printf '%s\\n' \"$input\" | \"$hook\" && exit 0; status=$?; [ $status -eq 2 ] || exit $status; main=$(git -C \"$root\" worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p'); main_hook=$main/scripts/hooks/before-tool; [ -n \"$main\" ] && [ -x \"$main_hook\" ] && [ ! \"$main_hook\" -ef \"$hook\" ] || exit 2; reason=$(printf '%s\\n' '{\"tool_name\": \"Bash\", \"tool_input\": {\"command\": \"true\"}}' | \"$hook\" 2>&1 >/dev/null) && exit 2; note=\"$hook can't run, so the main checkout's copy checked this action instead.\"; printf '%s Fix the file that the error above names.\\n' \"$note\" >&2; printf '%s\\n' \"$input\" | \"$main_hook\" || exit $?; jq -n --arg note \"$note Fix the file that this error names: $reason\" '{hookSpecificOutput: {hookEventName: \"PreToolUse\", additionalContext: $note}}'"
           }
         ]
       }
