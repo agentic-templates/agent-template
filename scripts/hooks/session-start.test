@@ -56,8 +56,8 @@ new_folders() {
 # Arguments such as CLAUDE_CODE_REMOTE=true set more variables: run_session_start [<name>=<value>...]
 run_session_start() {
   hook_status=0
-  hook_output=$(cd "$work" && env -u CLAUDE_CODE_REMOTE -u CLAUDE_ENV_FILE HOME="$home" CLAUDECODE=1 PATH="$stand_in:$PATH" "$@" \
-    "$hooks_folder/session-start" <"$input_file") || hook_status=$?
+  hook_output=$(cd "$work" && env -u CLAUDE_CODE_REMOTE -u CLAUDE_ENV_FILE -u CLAUDE_PID HOME="$home" CLAUDECODE=1 \
+    PATH="$stand_in:$PATH" "$@" "$hooks_folder/session-start" <"$input_file") || hook_status=$?
 }
 
 # Checks the hook's output: expect_output <description> <text the output holds, or "" for no output>
@@ -253,5 +253,280 @@ if ((hook_status != 0)); then
 fi
 expect_output "With CLAUDE_CODE_REMOTE=true and an install that fails" "The check tools shellcheck, actionlint and zizmor are missing"
 expect_install "With CLAUDE_CODE_REMOTE=true and an install that fails" called ""
+
+# The orchestrator's state file. The hook asks git where the main checkout is, so these cases run in git repositories,
+# with none of the person's git settings. The repository's folder name has characters of two bytes, so that the cases
+# of a long state file check that the hook counts bytes, not characters.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com
+export GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
+work=$above/dépôt
+state_file=$work/.loop/state.md
+state_text="Ship the importer."
+
+# A process that runs, which is this test's own, and one that has ended
+running_process=$$
+true &
+ended_process=$!
+wait "$ended_process"
+# The process of another session, or of the orchestrator after claude --resume, which differs from the other two
+if ((running_process > ended_process)); then
+  new_process=$((running_process + 1))
+else
+  new_process=$((ended_process + 1))
+fi
+
+# Prints a state file with a session line and a pid line: state_lines <session id> <process id>
+state_lines() {
+  printf '# Loop state\n\nsession: %s\npid: %s\n\n## Next\n%s\n' "$1" "$2" "$state_text"
+}
+
+# Gives each case a git repository whose state file names the session owner-1 and the process that runs.
+new_state_file() {
+  new_folders
+  git init --quiet "$work"
+  mkdir -p "$work/.loop"
+  state_lines owner-1 "$running_process" >"$state_file"
+}
+
+# Writes the input that Claude Code sends when a session starts: session_input <source> <session id>
+session_input() {
+  printf '{"source": "%s", "session_id": "%s"}\n' "$1" "$2" >"$input_file"
+}
+
+owner_note="You are this repository's orchestrator. Continue the loop from your state file, $state_file, which follows."
+other_note="Session owner-1 is this repository's orchestrator, and keeps the loop's state in $state_file."
+long_note="The file is too long to show here in full. Read the rest of it from $state_file."
+
+# Prints the note for the orchestrator in a new session or process: new_lines_note <session id> <process id>
+new_lines_note() {
+  echo "You are this repository's orchestrator, in a new session or process. Write \"session: $1\" and \"pid: $2\" as the session and pid lines of your state file, $state_file. Then continue the loop from the file, which follows."
+}
+
+# Prints the note for a session that can take over the loop: take_over_note <session id> <process id>
+take_over_note() {
+  echo "The Claude Code process of this repository's orchestrator has ended. If the maintainer asks you to continue its work, take over the loop: write \"session: $1\" and \"pid: $2\" as the session and pid lines of its state file, $state_file, and continue the loop from the file, which follows."
+}
+
+new_state_file
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_output "After a compaction of the orchestrator, the state file follows the note about the compaction" \
+  "$compacted"$'\n'"$owner_note"$'\n\n'"$(<"$state_file")"
+
+new_state_file
+session_input clear new-2
+run_session_start CLAUDE_PID="$running_process"
+expect_output "After /clear in the orchestrator's process" "$(new_lines_note new-2 "$running_process")"$'\n\n'"$(<"$state_file")"
+state_lines new-2 "$running_process" >"$state_file"
+session_input compact new-2
+run_session_start CLAUDE_PID="$running_process"
+expect_output "After /clear and a compaction, once the orchestrator wrote both lines" "$owner_note"
+
+new_state_file
+state_lines owner-1 "$ended_process" >"$state_file"
+session_input resume owner-1
+run_session_start CLAUDE_PID="$new_process"
+expect_output "After claude --resume starts the orchestrator in a new process" \
+  "$(new_lines_note owner-1 "$new_process")"$'\n\n'"$(<"$state_file")"
+state_lines owner-1 "$new_process" >"$state_file"
+session_input clear new-3
+run_session_start CLAUDE_PID="$new_process"
+expect_output "After /clear in the resumed orchestrator, once it wrote both lines" "$(new_lines_note new-3 "$new_process")"
+
+new_state_file
+state_lines owner-1 "$ended_process" >"$state_file"
+session_input startup new-4
+run_session_start CLAUDE_PID="$new_process"
+expect_output "For a new session in the main checkout, after the orchestrator's process ended" \
+  "$(take_over_note new-4 "$new_process")"$'\n\n'"$(<"$state_file")"
+
+# A pid line that holds no positive number names no process that runs.
+for pid_line in "pid: 0" "pid: -1" "pid: none" ""; do
+  new_state_file
+  printf 'session: owner-1\n%s\n\n%s\n' "$pid_line" "$state_text" >"$state_file"
+  session_input startup new-4
+  run_session_start CLAUDE_PID="$new_process"
+  expect_output "For a new session in the main checkout, with \"$pid_line\" in place of the pid line" \
+    "$(take_over_note new-4 "$new_process")"
+done
+
+for source in startup resume clear compact; do
+  new_state_file
+  session_input "$source" someone-else
+  run_session_start CLAUDE_PID="$new_process"
+  expect_output "With the source $source, for another session while the orchestrator's process runs" "$other_note"
+  expect_output_without "With the source $source, for another session while the orchestrator's process runs" "$state_text"
+done
+
+for source in resume clear compact; do
+  new_state_file
+  state_lines owner-1 "$ended_process" >"$state_file"
+  session_input "$source" someone-else
+  run_session_start CLAUDE_PID="$new_process"
+  expect_output "With the source $source, for another session after the orchestrator's process ended" "$other_note"
+  expect_output_without "With the source $source, for another session after the orchestrator's process ended" "$state_text"
+done
+
+# Makes the working folder a worktree of a main checkout elsewhere, whose state file names the session owner-1 and a
+# process: new_worktree <process id>
+main_checkout=$base/main
+new_worktree() {
+  new_folders
+  rm -rf "$work" "$main_checkout"
+  git init --quiet "$main_checkout"
+  git -C "$main_checkout" commit --quiet --allow-empty -m Start
+  git -C "$main_checkout" worktree add --quiet --detach "$work"
+  mkdir -p "$main_checkout/.loop"
+  state_lines owner-1 "$1" >"$main_checkout/.loop/state.md"
+}
+builder_note="Session owner-1 is this repository's orchestrator, and keeps the loop's state in $main_checkout/.loop/state.md."
+
+# A builder that runs as a subagent has the orchestrator's pid, and its input can hold the orchestrator's session id.
+new_worktree "$running_process"
+echo '{"source": "compact", "session_id": "owner-1", "agent_id": "agent-7"}' >"$input_file"
+run_session_start CLAUDE_PID="$running_process"
+expect_output "After a compaction of a builder that runs as a subagent in a worktree" "$builder_note"
+expect_output_without "After a compaction of a builder that runs as a subagent in a worktree" "$state_text"
+
+new_worktree "$running_process"
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_output "After a compaction of a builder in a worktree, whose input has no agent_id" "$builder_note"
+expect_output_without "After a compaction of a builder in a worktree, whose input has no agent_id" "$state_text"
+
+new_state_file
+echo '{"source": "compact", "session_id": "owner-1", "agent_id": "agent-7"}' >"$input_file"
+run_session_start CLAUDE_PID="$running_process"
+expect_output "After a compaction of a subagent whose hook runs in the main checkout" "$other_note"
+expect_output_without "After a compaction of a subagent whose hook runs in the main checkout" "$state_text"
+
+new_worktree "$running_process"
+session_input startup builder-5
+run_session_start CLAUDE_PID="$new_process"
+expect_output "For a builder in a worktree with a process of its own, while the orchestrator's process runs" "$builder_note"
+expect_output_without "For a builder in a worktree with a process of its own, while the orchestrator's process runs" \
+  "$state_text"
+
+new_worktree "$ended_process"
+session_input startup builder-5
+run_session_start CLAUDE_PID="$new_process"
+expect_output "For a builder in a worktree with a process of its own, after the orchestrator's process ended" "$builder_note"
+expect_output_without "For a builder in a worktree with a process of its own, after the orchestrator's process ended" \
+  "$state_text"
+
+new_state_file
+rm -rf "$work/.git"
+git init --quiet --separate-git-dir "$base/elsewhere.git" "$work"
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_output "With the git folder outside the repository, the state file is in the repository's folder" "$owner_note"
+
+new_state_file
+echo '{"source": "startup"}' >"$input_file"
+run_session_start CLAUDE_PID="$running_process"
+expect_output "With a state file, and no session id in the input" ""
+
+new_state_file
+session_input startup owner-1
+run_session_start
+expect_output "With a state file, and no CLAUDE_PID" ""
+case_count=$((case_count + 1))
+if ((hook_status != 0)); then
+  echo "error: With a state file, and no CLAUDE_PID, the hook must exit with code 0, but it exited with code $hook_status." >&2
+  failed_cases=$((failed_cases + 1))
+fi
+
+new_state_file
+rm "$state_file"
+session_input startup owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_output "Without a state file" ""
+
+new_state_file
+printf 'pid: %s\n\n%s\n' "$running_process" "$state_text" >"$state_file"
+session_input startup someone-else
+run_session_start CLAUDE_PID="$new_process"
+expect_output "For another session, with a state file that has no session line" ""
+
+# A line of 40 characters of two bytes each, so that a cut by bytes alone could split a character
+wide_line=$(printf 'é%.0s' $(seq 40))
+wide_line_bytes=$(($(printf '%s\n' "$wide_line" | wc -c)))
+
+# Writes a state file of a size in bytes: the orchestrator's lines, wide lines, and a last line of x's that ends with
+# "last" and fills the size: long_state_file <bytes>
+long_state_file() {
+  local start start_bytes wide_lines filler line
+  start="session: owner-1"$'\n'"pid: $running_process"$'\n'
+  start_bytes=$(($(printf '%s' "$start" | wc -c)))
+  # The last line takes at least the 5 bytes of "last" and its line break.
+  wide_lines=$((($1 - start_bytes - 5) / wide_line_bytes))
+  filler=$(($1 - start_bytes - 5 - wide_lines * wide_line_bytes))
+  {
+    printf '%s' "$start"
+    for ((line = 0; line < wide_lines; line++)); do
+      printf '%s\n' "$wide_line"
+    done
+    printf '%*s' "$filler" '' | tr ' ' x
+    printf 'last\n'
+  } >"$state_file"
+}
+
+# Claude Code keeps at most 10,000 characters of a hook's output. Checks that the output has at most 10,000 bytes, and
+# so at most 10,000 characters: expect_output_fits <description>
+expect_output_fits() {
+  local description=$1 bytes
+  case_count=$((case_count + 1))
+  # The command substitution in run_session_start drops the line break at the end of the output.
+  bytes=$(($(printf '%s\n' "$hook_output" | wc -c)))
+  if ((bytes > 10000)); then
+    echo "error: $description, the hook's output must have at most 10,000 bytes, but it has $bytes." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks how the hook's output ends: expect_output_end <description> <text>
+expect_output_end() {
+  local description=$1 text=$2
+  case_count=$((case_count + 1))
+  if [[ $hook_output != *"$text" ]]; then
+    echo "error: $description, the hook's output must end with \"$text\", but it ends with \"${hook_output: -200}\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# The size of a state file that makes the output 10,000 bytes, after the orchestrator's note and a blank line
+fitting_bytes=$((10000 - $(printf '%s\n\n' "$owner_note" | wc -c)))
+
+new_state_file
+long_state_file "$fitting_bytes"
+session_input startup owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_output "With a state file that makes the output exactly 10,000 bytes" "$owner_note"$'\n\n'"$(<"$state_file")"
+expect_output_without "With a state file that makes the output exactly 10,000 bytes" "$long_note"
+expect_output_fits "With a state file that makes the output exactly 10,000 bytes"
+
+long_state_file "$((fitting_bytes + 1))"
+run_session_start CLAUDE_PID="$running_process"
+expect_output "With a state file one byte too long" "$owner_note"$'\n'"$long_note"$'\n\n'"session: owner-1"
+expect_output_end "With a state file one byte too long, the output ends with a whole line" $'\n'"$wide_line"
+expect_output_fits "With a state file one byte too long"
+
+long_state_file "$fitting_bytes"
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_output "After a compaction, with a state file that fits only without the note about the compaction" \
+  "$compacted"$'\n'"$owner_note"$'\n'"$long_note"
+expect_output_end "After a compaction, with a state file that fits only without the note about the compaction" \
+  $'\n'"$wide_line"
+expect_output_fits "After a compaction, with a state file that fits only without the note about the compaction"
+
+new_state_file
+printf 'session: owner-1\npid: %s\n%*s\nShip the importer.\n' "$running_process" 10000 '' >"$state_file"
+session_input startup owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_output_end "With a state file whose third line alone is too long, the output ends before it" \
+  "$owner_note"$'\n'"$long_note"$'\n\n'"session: owner-1"$'\n'"pid: $running_process"
+expect_output_fits "With a state file whose third line alone is too long"
 
 finish_tests
