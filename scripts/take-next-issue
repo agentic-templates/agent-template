@@ -16,6 +16,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=scripts/ready-issues
 source scripts/ready-issues
+# shellcheck source=scripts/issue-branches
+source scripts/issue-branches
 
 # Prints an error and stops: stop <message>
 stop() {
@@ -40,19 +42,19 @@ issues_to_consider() {
   done <<<"$(ready_issue_numbers)"
 }
 
-# Succeeds if a worktree has a branch of the issue checked out. The builder's scripts/start-issue couldn't check
-# that branch out, because git lets only one worktree check out a branch: is_held_by_worktree <issue>
+# Succeeds if a worktree has a branch of the issue checked out, as issue_branches in scripts/issue-branches lists the
+# issue's branches. The builder's scripts/start-issue couldn't check that branch out, because git lets only one
+# worktree check out a branch: is_held_by_worktree <issue>
 is_held_by_worktree() {
-  local linked_branches branch url
-  if ! linked_branches=$(gh issue develop --list "$1" 2>&1); then
-    stop "can't list the branches of issue #$1, because gh failed: $linked_branches"
+  local branches branch
+  if ! branches=$(issue_branches "$1" 2>&1); then
+    stop "can't list the branches of issue #$1, because gh failed: $branches"
   fi
-  # gh prints each branch, a tab and the branch's URL.
-  while IFS=$'\t' read -r branch url; do
-    if [[ -n $branch && -n $url && -n $(git for-each-ref --format='%(worktreepath)' "refs/heads/$branch") ]]; then
+  while IFS= read -r branch; do
+    if [[ -n $branch && -n $(git for-each-ref --format='%(worktreepath)' "refs/heads/$branch") ]]; then
       return 0
     fi
-  done <<<"$linked_branches"
+  done <<<"$branches"
   return 1
 }
 

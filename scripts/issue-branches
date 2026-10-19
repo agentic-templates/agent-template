@@ -1,0 +1,35 @@
+# shellcheck shell=bash
+# The function that lists an issue's branches, for scripts/start-issue, scripts/take-next-issue,
+# scripts/clear-worktrees, scripts/check-pull-request and scripts/loop/run-builder. It asks gh about the repository of
+# this checkout, or the one in GH_REPO.
+
+# Prints the name of each branch of an issue in this repository, one to a line: issue_branches <issue>
+# An issue's branches are those that gh issue develop linked to it, and those of the pull requests that GitHub linked to
+# it, open or merged. GitHub moves the link from a branch to the pull request from it once the pull request opens, so
+# the branch is in one list or the other, and gh issue develop --list lists only the first. The function leaves out
+# the branches in other repositories, such as forks, and the pull requests of other repositories. A pull request's
+# number gives no branch. When gh fails, gh prints its error, and the function fails.
+issue_branches() {
+  local query filter
+  # shellcheck disable=SC2016 # The $ words are the query's variables, which GitHub fills in, not the shell's.
+  query='query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    nameWithOwner
+    issueOrPullRequest(number: $number) {
+      ... on Issue {
+        linkedBranches(first: 100) { nodes { ref { name repository { nameWithOwner } } } }
+        closedByPullRequestsReferences(first: 100, userLinkedOnly: true) {
+          nodes { headRefName isCrossRepository repository { nameWithOwner } }
+        }
+      }
+    }
+  }
+}'
+  # A linked branch that was deleted has no ref.
+  # shellcheck disable=SC2016 # $repository is a jq variable, which jq expands.
+  filter='.data.repository.nameWithOwner as $repository | .data.repository.issueOrPullRequest
+    | (.linkedBranches.nodes[]?.ref | select(.repository.nameWithOwner == $repository) | .name),
+      (.closedByPullRequestsReferences.nodes[]?
+        | select(.isCrossRepository == false and .repository.nameWithOwner == $repository) | .headRefName)'
+  gh api graphql -F owner='{owner}' -F repo='{repo}' -F number="$1" -f query="$query" --jq "$filter"
+}

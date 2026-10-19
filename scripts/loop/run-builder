@@ -207,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
         if is_test:
             outcome = test_build(settings, kind, account, issue, options.test, folders)
         else:
-            outcome = build(options.tool, settings, kind, account, issue, repository, folders)
+            outcome = build(options.tool, settings, kind, account, issue, folders)
     except Stop as stop:
         outcome = Outcome(f"failed: {stop}", is_ok=False)
     minutes = (time.monotonic() - begun) / 60
@@ -258,12 +258,11 @@ def build(
     kind: str,
     account: Account,
     issue: dict[str, Any],
-    repository: str,
     folders: Folders,
 ) -> Outcome:
     """Runs the builder in its worktree, saves the changes that it left on the issue's branch, and removes the
     worktree. Returns how the run ended, with the worktree's size before its removal."""
-    branch = issue_branch(issue["number"], repository, folders)
+    branch = issue_branch(issue["number"], folders)
     try:
         add_worktree(branch, folders)
         if tool == "claude":
@@ -503,14 +502,14 @@ def label_names(issue: dict[str, Any]) -> list[str]:
     return [label["name"] for label in issue["labels"]]
 
 
-def issue_branch(issue: int, repository: str, folders: Folders) -> str:
+def issue_branch(issue: int, folders: Folders) -> str:
     """The issue's branch on origin, which the script creates if the issue has none."""
     git(["fetch", "--prune", "--quiet", "origin"], folders.checkout, folders.hooks)
-    branch = newest_linked_branch(issue, repository, folders.checkout)
+    branch = newest_issue_branch(issue, folders.checkout)
     if branch is None:
         run_ok(["gh", "issue", "develop", str(issue)], folders.checkout)
         git(["fetch", "--quiet", "origin"], folders.checkout, folders.hooks)
-        branch = newest_linked_branch(issue, repository, folders.checkout)
+        branch = newest_issue_branch(issue, folders.checkout)
     if branch is None:
         raise Stop(f"gh issue develop created no branch for issue #{issue} that origin has.")
     return branch
@@ -521,19 +520,27 @@ def add_worktree(branch: str, folders: Folders) -> None:
     git(["merge", "--ff-only", "--quiet", f"refs/remotes/origin/{branch}"], folders.worktree, folders.hooks)
 
 
-def newest_linked_branch(issue: int, repository: str, checkout: Path) -> str | None:
-    """Of the branches that gh lists for the issue in the repository and that origin has, the one whose latest commit
-    is newest, as scripts/start-issue picks it."""
+def newest_issue_branch(issue: int, checkout: Path) -> str | None:
+    """Of the issue's branches that origin has, the one whose latest commit is newest, as scripts/start-issue picks
+    it."""
     newest: tuple[int, str] | None = None
-    # gh prints each branch, a tab and the branch's URL.
-    for line in run_ok(["gh", "issue", "develop", "--list", str(issue)], checkout).splitlines():
-        branch, _, url = line.partition("\t")
+    for branch in issue_branches(issue, checkout):
         commit_time = run(["git", "log", "-1", "--format=%ct", f"refs/remotes/origin/{branch}", "--"], checkout)
-        if f"/{repository}/".lower() not in url.lower() or commit_time.returncode != 0:
+        if commit_time.returncode != 0:
             continue
         candidate = (int(commit_time.stdout), branch)
         newest = max(newest or candidate, candidate)
     return newest[1] if newest else None
+
+
+def issue_branches(issue: int, checkout: Path) -> list[str]:
+    """The issue's branches, as issue_branches in scripts/issue-branches lists them, which include the branch of the
+    issue's open pull request."""
+    script = TRUSTED_ROOT / "scripts" / "issue-branches"
+    done = run(["bash", "-c", 'source "$0" && issue_branches "$1"', str(script), str(issue)], checkout)
+    if done.returncode != 0:
+        raise Stop(f"can't list the branches of issue #{issue}, because gh failed: {one_line(done.stderr)}")
+    return done.stdout.splitlines()
 
 
 def write_brief(issue: dict[str, Any], kind: str, run_brief: str, folders: Folders) -> str:
