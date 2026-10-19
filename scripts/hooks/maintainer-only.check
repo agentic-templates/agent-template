@@ -618,11 +618,9 @@ check_gh_api() {
   if [[ $argument =~ $security_endpoint ]]; then
     block "$security_change"
   fi
-  for ((i = 0; i < ${#flags[@]}; i++)); do
-    case ${flags[i]} in
+  for ((i = 0; i < ${#last_flags[@]}; i++)); do
+    case ${last_flags[i]} in
       -f | -F | --field | --raw-field) field=${flag_values[i]} ;;
-      --field=* | --raw-field=*) field=${flags[i]#*=} ;;
-      -f?* | -F?*) field=${flags[i]:2} ;;
       *) continue ;;
     esac
     case $field in
@@ -699,7 +697,7 @@ find_destination() {
 
 # Sets destination to the repository that the words of a gh command other than gh api name, or to empty.
 find_named_repository() {
-  local i word
+  local i word flag value value_is_next_word flags_before
   destination=""
   for ((i = 2; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
@@ -713,7 +711,8 @@ find_named_repository() {
         return 0
         ;;
       -R?*)
-        destination=${word#-R}
+        split_flag_word "$word" " -R "
+        destination=$value
         return 0
         ;;
     esac

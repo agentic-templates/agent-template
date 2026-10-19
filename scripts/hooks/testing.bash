@@ -151,7 +151,7 @@ expect_from() {
 # helpers.bash, so these cases also cover the flag in that place.
 expect_repository_flags() {
   local status=$1 message=$2 group=$3 subcommand=$4 rest=$5 repository command
-  for repository in '-R jtmpl/other' '--repo jtmpl/other' '--repo=jtmpl/other'; do
+  for repository in '-R jtmpl/other' -Rjtmpl/other -R=jtmpl/other '--repo jtmpl/other' --repo=jtmpl/other; do
     command="gh $group $repository $subcommand $rest"
     run_hook "$(sample_input claude-code Bash "$command")"
     expect_result "The hook for $command" "$status" "$message"
