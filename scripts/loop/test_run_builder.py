@@ -394,6 +394,18 @@ class WorktreeTest(RunBuilderTest):
         self.assertEqual(self.calls("claude")[0]["head"], "ref: refs/heads/12-newer")
         self.assertEqual(self.calls("gh", "issue develop"), [])
 
+    def test_builds_on_the_branch_whose_name_sorts_last_of_two_equally_new(self) -> None:
+        # scripts/start-issue picks the same branch, as its test "When the issue has two branches whose latest commits
+        # have the same time" checks, so the builder stays on the branch of its worktree.
+        for branch in ("12-fix-totals", "12-round-totals"):
+            with mock.patch.dict(os.environ, {"GIT_COMMITTER_DATE": "2026-10-01T12:00:00Z"}):
+                commit = self.git("commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", branch)
+            self.git("push", "--quiet", "origin", f"{commit}:refs/heads/{branch}")
+        self.answer("gh", "api graphql", {"stdout": branch_lines("12-fix-totals", "12-round-totals")})
+        status, printed, _ = self.run_builder("--tool", "claude")
+        self.assertEqual(status, 0, printed)
+        self.assertEqual(self.calls("claude")[0]["head"], "ref: refs/heads/12-round-totals")
+
     def test_builds_on_the_branch_of_the_open_pull_request_of_the_issue(self) -> None:
         # GitHub links the pull request to the issue in place of the branch, and gh issue develop --list lists no
         # branch. The stand-in for gh answers no other gh issue develop command.

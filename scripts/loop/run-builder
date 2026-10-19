@@ -521,8 +521,8 @@ def add_worktree(branch: str, folders: Folders) -> None:
 
 
 def newest_issue_branch(issue: int, checkout: Path) -> str | None:
-    """Of the issue's branches that origin has, the one whose latest commit is newest, as scripts/start-issue picks
-    it."""
+    """Of the issue's branches that origin has, the one whose latest commit is newest, and of two equally new, the one
+    whose name sorts last, as scripts/start-issue picks it."""
     newest: tuple[int, str] | None = None
     for branch in issue_branches(issue, checkout):
         commit_time = run(["git", "log", "-1", "--format=%ct", f"refs/remotes/origin/{branch}", "--"], checkout)
@@ -534,8 +534,8 @@ def newest_issue_branch(issue: int, checkout: Path) -> str | None:
 
 
 def issue_branches(issue: int, checkout: Path) -> list[str]:
-    """The issue's branches, as issue_branches in scripts/issue-branches lists them, which include the branch of the
-    issue's open pull request."""
+    """The issue's branches, as issue_branches in scripts/issue-branches lists them, which include the branches of the
+    issue's pull requests, open, merged or closed without a merge."""
     script = TRUSTED_ROOT / "scripts" / "issue-branches"
     done = run(["bash", "-c", 'source "$0" && issue_branches "$1"', str(script), str(issue)], checkout)
     if done.returncode != 0:

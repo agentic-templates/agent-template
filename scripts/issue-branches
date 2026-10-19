@@ -5,10 +5,13 @@
 
 # Prints the name of each branch of an issue in this repository, one to a line: issue_branches <issue>
 # An issue's branches are those that gh issue develop linked to it, and those of the pull requests that GitHub linked to
-# it, open or merged. GitHub moves the link from a branch to the pull request from it once the pull request opens, so
-# the branch is in one list or the other, and gh issue develop --list lists only the first. The function leaves out
-# the branches in other repositories, such as forks, and the pull requests of other repositories. A pull request's
-# number gives no branch. When gh fails, gh prints its error, and the function fails.
+# it, open, merged or closed without a merge. GitHub moves the link from a branch to the pull request from it once the
+# pull request opens, and gh issue develop --list lists only the branches that still have the link. A builder that
+# gives an issue back closes its pull request and keeps the branch for the next builder, as "Build one issue" in
+# docs/building.md describes, so the function lists the branches of closed pull requests too. It lists each branch
+# once, such as a branch that two pull requests came from. The function leaves out the branches in other
+# repositories, such as forks, and the pull requests of other repositories. A pull request's number gives no branch.
+# When gh fails, gh prints its error, and the function fails.
 issue_branches() {
   local query filter
   # shellcheck disable=SC2016 # The $ words are the query's variables, which GitHub fills in, not the shell's.
@@ -18,7 +21,7 @@ issue_branches() {
     issueOrPullRequest(number: $number) {
       ... on Issue {
         linkedBranches(first: 100) { nodes { ref { name repository { nameWithOwner } } } }
-        closedByPullRequestsReferences(first: 100, userLinkedOnly: true) {
+        closedByPullRequestsReferences(first: 100, userLinkedOnly: true, includeClosedPrs: true) {
           nodes { headRefName isCrossRepository repository { nameWithOwner } }
         }
       }
@@ -28,8 +31,10 @@ issue_branches() {
   # A linked branch that was deleted has no ref.
   # shellcheck disable=SC2016 # $repository is a jq variable, which jq expands.
   filter='.data.repository.nameWithOwner as $repository | .data.repository.issueOrPullRequest
-    | (.linkedBranches.nodes[]?.ref | select(.repository.nameWithOwner == $repository) | .name),
-      (.closedByPullRequestsReferences.nodes[]?
-        | select(.isCrossRepository == false and .repository.nameWithOwner == $repository) | .headRefName)'
+    | [(.linkedBranches.nodes[]?.ref | select(.repository.nameWithOwner == $repository) | .name),
+        (.closedByPullRequestsReferences.nodes[]?
+          | select(.isCrossRepository == false and .repository.nameWithOwner == $repository) | .headRefName)]
+    | reduce .[] as $branch ([]; if any(.[]; . == $branch) then . else . + [$branch] end)
+    | .[]'
   gh api graphql -F owner='{owner}' -F repo='{repo}' -F number="$1" -f query="$query" --jq "$filter"
 }

@@ -27,7 +27,7 @@ reopen_flags_with_value=" -c --comment -R --repo "
 # expansion syntax in each checked field. It fails when the command asks for help, because gh then posts nothing.
 # Only a flag that takes a value gives text, so the -c of gh pr review, which takes none, gives none.
 read_text() {
-  local flags_with_value=$1 i word flag value value_is_next_word
+  local flags_with_value=$1 i word flag value value_is_next_word flags_before
   title="" has_title="" title_may_expand="" body_source="" body_word="" body_file="" body_may_expand=""
   for ((i = 3; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}

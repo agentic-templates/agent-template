@@ -284,19 +284,55 @@ drop_command_prefixes() {
   command_word_may_expand=(${words_may_expand[@]+"${words_may_expand[@]:i}"})
 }
 
-# Reads the -C options at the start of a git command, and sets these variables:
-# - git_folder: the -C options that make git work in the same folder as the command, starting from the agent's folder
+# The options of git before its subcommand that take the next word as their value, as handle_options in git's git.c
+# reads them. git reads each of its options only in full, and fails on an option that it doesn't know.
+git_options_with_value=" -C -c --git-dir --work-tree --namespace --config-env --attr-source --shallow-file "
+
+# Reads the options at the start of a git command, before its subcommand, and sets these variables:
+# - git_folder: the options that make git work in the same repository as the command, starting from the agent's folder:
+#   each -C, --git-dir and --work-tree
+# - git_setting_names: the name of each setting that -c <name>=<value> or --config-env=<name>=<variable> gives
 # - git_subcommand: the index of the word after the options, such as push
 read_git_options() {
-  local i=1
-  git_folder=(-C "${cwd:-.}")
-  # git takes each -C relative to the folder before it, so a check that asks git about the command's folder passes
-  # on every -C.
-  while [[ ${command_words[i]:-} == -C ]]; do
-    git_folder+=(-C "${command_words[i + 1]:-}")
-    i=$((i + 2))
+  local i=1 word option value
+  git_folder=(-C "${cwd:-.}") git_setting_names=()
+  while [[ ${command_words[i]:-} == -* ]]; do
+    word=${command_words[i]}
+    # git runs these as its subcommand help or version, with the words after them as its arguments.
+    case $word in
+      -h | --help | -v | --version) break ;;
+    esac
+    option=$word value=""
+    if [[ $git_options_with_value == *" $word "* ]]; then
+      i=$((i + 1))
+      value=${command_words[i]:-}
+    elif [[ $word == --*=* ]]; then
+      option=${word%%=*} value=${word#*=}
+    fi
+    case $option in
+      # git takes each -C relative to the folder before it, and a relative --git-dir or --work-tree relative to the
+      # folder after every -C, so a check that asks git about the command's repository passes these on in their order.
+      -C | --git-dir | --work-tree) git_folder+=("$option" "$value") ;;
+      -c | --config-env) git_setting_names+=("${value%%=*}") ;;
+    esac
+    i=$((i + 1))
   done
   git_subcommand=$i
+}
+
+# Succeeds if a -c or --config-env option that read_git_options read gives a setting: gives_git_setting <name>
+# It compares the names in any case, because git reads the section and the key of a name, as in core.hooksPath, in any
+# case.
+gives_git_setting() {
+  local name gives=1
+  shopt -s nocasematch
+  for name in ${git_setting_names[@]+"${git_setting_names[@]}"}; do
+    if [[ $name == "$1" ]]; then
+      gives=0
+    fi
+  done
+  shopt -u nocasematch
+  return $gives
 }
 
 # The flags of git push that take a value, as git push -h lists them.
