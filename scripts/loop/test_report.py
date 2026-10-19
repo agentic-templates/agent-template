@@ -251,15 +251,16 @@ class OrchestratorTest(ReportTest):
 class BlockTest(ReportTest):
     def test_counts_the_blocks_after_the_time_by_rule(self) -> None:
         log = [
-            f"{at(-1)}\tforbidden-commands\tgit push --force",
-            f"{at(0)}\tsecret-files\tcat .env",
-            f"{at(1)}\tforbidden-commands\tgit reset --hard",
-            f"{at(2)}\tforbidden-commands\trm -rf /",
-            f"{at(3)}\tposted-text\tgh pr create",
+            f"{at(-1)} forbidden-commands.check git push --force",
+            f"{at(0)} secret-files.check cat .env",
+            f"{at(1)} forbidden-commands.check git reset --hard",
+            f"{at(2)} forbidden-commands.check rm -rf /",
+            f"{at(3)} posted-text.check",
         ]
         (self.loop / "blocks.log").write_text("\n".join(log) + "\n")
         self.assertEqual(
-            self.line("Hook blocks"), "Hook blocks: 4 | forbidden-commands 2 | posted-text 1 | secret-files 1"
+            self.line("Hook blocks"),
+            "Hook blocks: 4 | forbidden-commands.check 2 | posted-text.check 1 | secret-files.check 1",
         )
 
 

@@ -236,11 +236,11 @@ def count_once(transcripts: list[Transcript], since: dt.datetime) -> list[Agent]
 
 
 def count_blocks(log: str, since: dt.datetime) -> Counter[str]:
-    """The blocks after the time per rule, from the block log's lines: the time, the rule, and the matched text,
-    separated by tabs."""
+    """The blocks after the time per rule, from the block log's lines: the time, the rule's check, and the words that
+    it matched, separated by spaces."""
     blocks: Counter[str] = Counter()
     for line in log.splitlines():
-        time, rule = line.split("\t")[:2]
+        time, rule = line.split()[:2]
         if dt.datetime.fromisoformat(time) >= since:
             blocks[rule] += 1
     return blocks
