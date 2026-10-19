@@ -9,12 +9,24 @@ if [[ -z ${LOOP_HEAVY_COMMAND:-} ]] && command -v uv >/dev/null; then
   exec scripts/loop/run-heavy scripts/check "$@"
 fi
 
+# Codex's sandbox sets CODEX_SANDBOX_NETWORK_DISABLED to 1. It denies TCP ports, so there the Python tests that open
+# one skip themselves, and the script skips the coverage report, which fails without them. A run there records no pass,
+# so that the skipped tests never count as passed.
+is_in_codex_sandbox=""
+if [[ ${CODEX_SANDBOX_NETWORK_DISABLED:-} == 1 ]]; then
+  is_in_codex_sandbox=yes
+fi
+
 # When the checks pass, the script records the tree of the files it checked, which a hook compares with the files
 # of a pull request. It takes the tree before the checks start, so that a file changed during the checks doesn't
 # count as checked. If git can't give the tree, the checks still run, and the script fails at the end.
 # shellcheck source=scripts/hooks/check-passed.bash
 source scripts/hooks/check-passed.bash
-checked_tree=$(tree_on_disk) || checked_tree=""
+checked_tree=""
+# tree_on_disk writes to the git folder, which Codex's sandbox can't write.
+if [[ -z $is_in_codex_sandbox ]]; then
+  checked_tree=$(tree_on_disk) || checked_tree=""
+fi
 
 # The repository's settings require each action to be pinned to a full commit SHA, which doesn't show which version
 # of the action runs. So a comment after the SHA gives the version, as in "# v5.0.0".
@@ -448,12 +460,17 @@ if [[ -z "${CHECK_UNDER_TEST:-}" || ${CHECK_UNDER_TEST:-} == python ]]; then
         has_shfmt=yes
       fi
       if ((${#python_files[@]} > 0)); then
-        # Each Python process of the tests writes its own coverage data, which combine merges.
-        coverage_file=$(git rev-parse --git-path coverage)
-        COVERAGE_FILE=$coverage_file uv run --locked --quiet coverage erase
+        # Each Python process of the tests writes its own coverage data, which combine merges. The data go to a folder
+        # of their own, which Codex's sandbox can write, unlike the git folder. mktemp -d alone ignores TMPDIR on macOS.
+        coverage_folder=$(mktemp -d "${TMPDIR:-/tmp}/check-coverage.XXXXXX")
+        trap 'rm -rf "$coverage_folder"' EXIT
+        coverage_file=$coverage_folder/coverage
         COVERAGE_FILE=$coverage_file uv run --locked --quiet coverage run scripts/loop/run-tests
         COVERAGE_FILE=$coverage_file uv run --locked --quiet coverage combine --quiet
-        if [[ -n $has_shfmt ]]; then
+        if [[ -n $is_in_codex_sandbox ]]; then
+          echo "Skipped the coverage report, because the Python tests that open a TCP port skip themselves in Codex's sandbox, and the report fails without them. The lines above that start with \"Skipped test_\" name the tests." >&2
+          skipped="${skipped:+$skipped, }the Python tests that open a TCP port, the coverage report"
+        elif [[ -n $has_shfmt ]]; then
           COVERAGE_FILE=$coverage_file uv run --locked --quiet coverage report
         else
           # Without shfmt, the tests of scripts/check-complexity skip their bash cases, so the lines of those cases and
@@ -495,10 +512,14 @@ else
       scripts/test-scripts
     fi
   fi
-  record=$(pass_record_path)
-  if [[ -z $checked_tree ]] || ! printf '%s\n' "$checked_tree" > "$record"; then
-    echo "error: the checks passed, but scripts/check can't record the pass in $record, and a hook blocks opening a pull request without that record. Fix the error above, and run scripts/check again." >&2
-    exit 1
+  if [[ -n $is_in_codex_sandbox ]]; then
+    echo "The checks ran in Codex's sandbox, so scripts/check records no pass." >&2
+  else
+    record=$(pass_record_path)
+    if [[ -z $checked_tree ]] || ! printf '%s\n' "$checked_tree" > "$record"; then
+      echo "error: the checks passed, but scripts/check can't record the pass in $record, and a hook blocks opening a pull request without that record. Fix the error above, and run scripts/check again." >&2
+      exit 1
+    fi
   fi
 fi
 

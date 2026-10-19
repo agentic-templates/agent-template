@@ -19,13 +19,17 @@ worktree exists already, or when the issue has needs-triage.
 A Claude builder builds the issue as "Build one issue" in docs/building.md describes. It sends the tokens of its
 requests to .loop/requests.jsonl, as scripts/loop/claude-with-events does.
 
-A Codex builder runs in a sandbox that can't reach the network or write the git folder, so it only edits files, and
-it builds only the kinds research and other. When it ends, the script commits its changes and pushes them, unless a file's
-name suggests a secret, or scripts/leak-scan or the main checkout's git hooks refuse the commit. If the branch has no
-pull request yet, the script opens one with the builder's report as its description, and turns on auto-merge unless
-scripts/check-main-rules fails. If scripts/loop/consequential lists a file that the branch changes, the pull request
-is a draft without auto-merge instead, also when the branch had it already. If the builder changed no file, its
-report becomes a comment on the issue.
+A Codex builder runs in a sandbox that can't reach the network or write the git folder, so it only edits files and runs
+scripts/check, and it builds only the kinds research and other. Before it starts, the script fills a uv cache of the
+run's own with the packages of the main checkout's uv.lock, and the builder's uv installs them from there. So in the
+sandbox, scripts/check fails on a package that the branch's uv.lock adds. The builder's heavy commands don't wait their
+turn in scripts/loop/run-heavy, because the sandbox can't write the loop folder, where run-heavy keeps the line. If it
+could, the builder could change files that run-heavy outside the sandbox trusts. When the builder ends, the script
+commits its changes and pushes them, unless a file's name suggests a secret, or scripts/leak-scan or the main
+checkout's git hooks refuse the commit. If the branch has no pull request yet, the script opens one with the builder's
+report as its description, and turns on auto-merge unless scripts/check-main-rules fails. If scripts/loop/consequential
+lists a file that the branch changes, the pull request is a draft without auto-merge instead, also when the branch had
+it already. If the builder changed no file, its report becomes a comment on the issue.
 
 The last line gives the issue, the tool and the account, how the run ended, its minutes, and where the builder's
 report is. The run folder, .loop/runs/<issue>-<time>, keeps the brief, the builder's events and report, and
@@ -50,6 +54,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -84,6 +89,11 @@ CLAUDE_INPUT_FIELDS = ("inputTokens", "cacheReadInputTokens", "cacheCreationInpu
 CLAUDE_OUTPUT_FIELD = "outputTokens"
 # The items of a Codex run that are tool calls, as codex exec --json lists them
 CODEX_TOOL_ITEMS = ("command_execution", "file_change", "mcp_tool_call", "web_search", "todo_list")
+# Fills the uv cache that Codex's sandbox uses, outside the sandbox, in the main checkout. The worktree's files can be a
+# builder's, from an earlier run on the branch, and uv runs code that a project's files name, such as a build backend
+# or the Python of a .python-version or a .venv, and fetches the URLs in its uv.lock. --no-build keeps uv from building
+# a dependency from its source, and the other two options keep it from building the project and its workspace members.
+UV_SYNC = ["uv", "sync", "--locked", "--no-build", "--no-install-project", "--no-install-workspace"]
 # Codex runs without the variables whose names match, because they can hold a credential, which it can't use in its
 # sandbox, or choose another account, such as CODEX_HOME. What it prints ends up in the run folder and on GitHub.
 CREDENTIAL_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE", re.IGNORECASE)
@@ -119,8 +129,8 @@ CHANGES_FILE = "changes.diff"
 # The environment variable that tells scripts/hooks/hand-off that a session is a builder that may hand off its work
 HAND_OFF_VARIABLE = "LOOP_HAND_OFF"
 CODEX_BRIEF = """Your sandbox can't write the git folder or reach the network, so don't run git or gh. Edit the files in
-this worktree, which is on the issue's branch. scripts/check stops with an error where it writes to the git folder or
-to uv's cache. CI runs every check on the pull request.
+this worktree, which is on the issue's branch. Run scripts/check, and fix each failure that your change causes. In the
+sandbox, it skips the tests that open a TCP port and the coverage report, and CI runs every check on the pull request.
 
 When you end, the script that started you commits your changes, pushes them and opens a pull request, with your last
 message under "What changed and why" in its description. Write that message for a developer who joins the project
@@ -606,32 +616,64 @@ def claude_problem(result: dict[str, Any], exit_code: int) -> str | None:
 
 
 def run_codex(brief: str, account: Account, folders: Folders) -> None:
-    """Runs codex until it ends. Codex writes its last message to report.md in the run folder."""
-    command = [
-        "codex",
-        "exec",
-        "--sandbox",
-        "workspace-write",
-        "--cd",
-        str(folders.worktree),
-        "--json",
-        "--output-last-message",
-        str(folders.run / "report.md"),
-        brief,
-    ]
-    with (folders.run / "events.jsonl").open("w") as events, (folders.run / "stderr.log").open("w") as errors:
-        done = subprocess.run(
-            command,
-            cwd=folders.worktree,
-            env=codex_environment(account),
-            stdin=subprocess.DEVNULL,
-            stdout=events,
-            stderr=errors,
-            check=False,
-        )
+    """Fills a uv cache of the run's own, and runs codex with it until codex ends. Codex writes its last message to
+    report.md in the run folder."""
+    environment = codex_environment(account)
+    # uv in the sandbox uses a cache of the run's own, which --add-dir lets the sandbox write. Writing uv's shared cache
+    # would let the builder change the files that every later uv command on the machine uses. The cache lies in the run
+    # folder, which no sandbox can write, so that no other builder can change it, also while uv outside the sandbox
+    # fills it.
+    with tempfile.TemporaryDirectory(prefix="uv-cache-", dir=folders.run) as uv_cache:
+        environment["UV_CACHE_DIR"] = uv_cache
+        fill_uv_cache(folders, environment)
+        command = [
+            "codex",
+            "exec",
+            "--sandbox",
+            "workspace-write",
+            "--add-dir",
+            uv_cache,
+            "--cd",
+            str(folders.worktree),
+            "--json",
+            "--output-last-message",
+            str(folders.run / "report.md"),
+            brief,
+        ]
+        with (folders.run / "events.jsonl").open("w") as events, (folders.run / "stderr.log").open("w") as errors:
+            done = subprocess.run(
+                command,
+                cwd=folders.worktree,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=events,
+                stderr=errors,
+                check=False,
+            )
     problem = codex_problem(read_events(folders.run / "events.jsonl"), done.returncode)
     if problem:
         raise Stop(problem)
+
+
+def fill_uv_cache(folders: Folders, environment: dict[str, str]) -> None:
+    """Puts the packages of the main checkout's uv.lock, which scripts/check needs, in the uv cache that the environment
+    names, because the sandbox can't download them. uv installs them in a folder that the function then deletes, so
+    that the main checkout's .venv stays as it is."""
+    # The folder lies in the run folder, which no sandbox can write, because uv runs the Python of the folder that it
+    # installs in.
+    with tempfile.TemporaryDirectory(prefix="uv-environment-", dir=folders.run) as installed:
+        done = subprocess.run(
+            UV_SYNC,
+            cwd=folders.checkout,
+            env=environment | {"UV_PROJECT_ENVIRONMENT": installed},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    if done.returncode != 0:
+        raise Stop(
+            f"uv sync failed in the main checkout, so codex didn't start: {one_line(done.stderr or done.stdout)}"
+        )
 
 
 def codex_environment(account: Account) -> dict[str, str]:
