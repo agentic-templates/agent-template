@@ -16,7 +16,8 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 2
-    # scripts/check-pull-request reads the issues that the body closes.
+    # scripts/check-pull-request reads the issues that the body closes, and the branches that link to the issue that
+    # the pull request's branch was created for.
     permissions:
       contents: read
       issues: read
@@ -40,6 +41,7 @@ jobs:
         env:
           TITLE: ${{ github.event.pull_request.title }}
           BODY: ${{ github.event.pull_request.body }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: scripts/check-pull-request HEAD^1 HEAD^2

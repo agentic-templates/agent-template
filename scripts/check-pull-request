@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Checks a pull request's body, the prose of its title, and its commits: scripts/check-pull-request <base> <head>
 # <base> is the latest commit of the branch that the pull request merges into, and <head> the pull request's latest
-# commit. The title job in .github/workflows/pr-title.yml passes the title in TITLE and the body in BODY, and so does
-# the hook scripts/hooks/pull-request-rules.check before gh pr create. Run it in the repository's folder.
+# commit. The title job in .github/workflows/pr-title.yml passes the title in TITLE, the body in BODY and the name of
+# the pull request's branch in BRANCH, and so does the hook scripts/hooks/pull-request-rules.check before gh pr create.
+# Run it in the repository's folder.
 # - The body has a line that closes an issue, such as "Closes #12", and no line that closes another issue. The issue,
 #   which gh looks up, is open, is in this repository, and has neither the label research nor sub-issues.
+# - If the pull request's branch was created for an issue, the body closes no other issue. scripts/start-issue creates
+#   each branch with gh issue develop, which names the branch after the issue's number, as in
+#   12-skip-imported-expenses, and links it to the issue. A branch that no issue links to, such as one that a
+#   maintainer created by hand, has no issue that the body must close.
 # - No word that closes an issue comes right before an issue's number in the middle of a line, as in
 #   "the pull request that fixed #12", because GitHub closes that issue too.
 # - The body has the heading of .github/pull_request_template.md, "What changed and why", at any level, with text
@@ -32,6 +37,7 @@ for commit in "$base" "$head"; do
 done
 
 title=${TITLE:-}
+branch=${BRANCH:-}
 # The browser's editor ends each line of the body with \r\n.
 body=${BODY:-}
 body=${body//$'\r'/}
@@ -118,6 +124,45 @@ if [[ -z $closed_numbers ]]; then
 elif [[ $closed_numbers == *" "* ]]; then
   report "The body closes more than one issue: #${closed_numbers// /, #}. A pull request closes one issue, so keep the line for the issue that it builds, and build each other issue in a pull request of its own."
 fi
+
+# gh issue develop names each branch that it creates after the issue's number, as in 12-skip-imported-expenses.
+# Group 1 holds the number.
+issue_branch_name='^([1-9][0-9]*)-'
+
+# Reports the issues that the body closes, other than the one that the pull request's branch was created for:
+# check_branch_issue
+check_branch_issue() {
+  local number closed_number other_issues="" answer listed
+  if [[ ! $branch =~ $issue_branch_name ]]; then
+    return 0
+  fi
+  number=${BASH_REMATCH[1]}
+  for closed_number in $closed_numbers; do
+    if [[ $closed_number != "$number" ]]; then
+      other_issues+="${other_issues:+, }#$closed_number"
+    fi
+  done
+  if [[ -z $other_issues ]]; then
+    return 0
+  fi
+  if ! answer=$(gh issue develop --list "$number" 2>&1); then
+    # gh fails with this error when no issue has the number, as when a pull request has it. Then no issue links to
+    # the branch.
+    if [[ $answer != *"Could not resolve to an "* ]]; then
+      report "Can't list the branches of issue #$number, because gh failed: $answer. Try again once gh can reach GitHub."
+    fi
+    return 0
+  fi
+  # gh prints each branch that links to the issue, a tab and the branch's URL.
+  while IFS=$'\t' read -r listed _; do
+    if [[ $listed == "$branch" ]]; then
+      report "The body closes $other_issues, but the branch $branch was created for #$number. Edit the body to close #$number instead."
+      return 0
+    fi
+  done <<<"$answer"
+}
+
+check_branch_issue
 
 # The body without its HTML comments, which hold no headings or sentences that count.
 text=$(without_html_comments "$body")

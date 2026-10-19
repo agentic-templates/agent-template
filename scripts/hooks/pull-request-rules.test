@@ -16,17 +16,29 @@ export GIT_CEILING_DIRECTORIES=$base
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
 
-# A stand-in for gh, first on the PATH, that answers the command that looks up an issue: #12 is an open issue, and no
-# other number exists. scripts/check-pull-request.test checks the command that the script runs.
+# A stand-in for gh, first on the PATH, that answers the commands that look up an issue and list the branches that
+# link to it: #12 and #20 are open issues, the branch 20-show-the-totals links to #20, and no other number exists.
+# scripts/check-pull-request.test checks the commands that the script runs.
 mkdir "$base/bin"
 cat >"$base/bin/gh" <<'STAND_IN'
 #!/usr/bin/env bash
+if [[ ${1:-} == issue && ${2:-} == develop && ${3:-} == --list ]]; then
+  case ${4:-} in
+    12) ;;
+    20) printf '20-show-the-totals\thttps://github.com/owner/repo/tree/20-show-the-totals\n' ;;
+    *)
+      echo "GraphQL: Could not resolve to an issue or pull request with the number of ${4:-}. (repository.issue)" >&2
+      exit 1
+      ;;
+  esac
+  exit 0
+fi
 if [[ ${1:-} != api || ${2:-} != "repos/{owner}/{repo}/issues/"* ]]; then
   echo "The stand-in for gh doesn't answer: gh $*" >&2
   exit 1
 fi
 case ${2##*/} in
-  12) printf 'open\tfalse\tfalse\t0\n' ;;
+  12 | 20) printf 'open\tfalse\tfalse\t0\n' ;;
   *)
     echo "gh: Not Found (HTTP 404)" >&2
     exit 1
@@ -134,6 +146,16 @@ co_authored_commit=$(git rev-parse --short co-authored)
 co_authored="Commit $co_authored_commit \"feat: export the totals\" has a Co-authored-by trailer, for Claude <noreply@anthropic.com>. Rewrite the commit without the trailer, such as with git commit --amend when it's the latest commit, and push the branch again with --force-with-lease."
 expect_block Bash "gh pr create --head co-authored --title '$title' --body-file ../body.md" "$(blocked "$co_authored")"
 expect_block Bash "gh pr create -H jtmpl:co-authored --title '$title' --body-file ../body.md" "$(blocked "$co_authored")"
+
+# The branch that --head names, or the one that HEAD points to, was created for #20, though the body closes #12. The
+# branch holds the commit of work.
+git branch 20-show-the-totals work
+not_the_branch_issue="The body closes #12, but the branch 20-show-the-totals was created for #20. Edit the body to close #20 instead."
+expect_block Bash "gh pr create --head 20-show-the-totals --title '$title' --body-file ../body.md" \
+  "$(blocked "$not_the_branch_issue")"
+git switch --quiet 20-show-the-totals
+expect_block Bash "gh pr create --title '$title' --body-file ../body.md" "$(blocked "$not_the_branch_issue")"
+git switch --quiet work
 
 # Bodies from here-documents and standard input, with quotes in the text, which would end a quoted word
 quoted_body=${body/"skips the expenses"/skips the \"imported\" expenses}

@@ -482,7 +482,8 @@ opens_pull_request() {
 # Sets base_commit and head_commit to the commits that the pull request of opens_pull_request compares, in the
 # repository of the current folder, or fails when it can't find them. The pull request's commits are those on its
 # branch, the one that --head names or HEAD, that aren't on the base branch on GitHub. The base branch is the one that
-# --base names, or the one that origin/HEAD points to, and the function fetches it from origin first.
+# --base names, or the one that origin/HEAD points to, and the function fetches it from origin first. It also sets
+# head_branch to the name of the pull request's branch, which is empty when HEAD points to no branch.
 find_commits() {
   local base_branch head_ref=HEAD
   base_branch=$pr_base
@@ -497,7 +498,10 @@ find_commits() {
   base_commit=$(git rev-parse --verify --quiet "refs/remotes/origin/$base_branch^{commit}") || return 1
   # --head can name the branch as <user>:<branch>.
   if [[ -n $pr_head ]]; then
-    head_ref=refs/heads/${pr_head#*:}
+    head_branch=${pr_head#*:}
+    head_ref=refs/heads/$head_branch
+  else
+    head_branch=$(git symbolic-ref --quiet --short HEAD) || true
   fi
   head_commit=$(git rev-parse --verify --quiet "$head_ref^{commit}") || return 1
 }
