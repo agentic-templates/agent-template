@@ -3,9 +3,10 @@
 ## Review a pull request
 
 - Compare the change with its issue's "Done when" list and the definition of done in AGENTS.md.
-- Report only what needs to change: wrong behavior, a missing test, a security problem, or text and code that break the guides. For each one, say what to change and why.
-- Don't ask for changes that a formatter would make, or for work outside the issue.
-- Write the review to a file outside the repository with your tool for writing files, not with a shell command. Post it with `gh pr review <number> --comment --body-file <file>`.
+- Report only errors: a missing item of the "Done when" list, wrong behavior, a missing test, a security problem, or text or code that breaks AGENTS.md or a guide in `docs/`. Don't report what a formatter would change.
+- Give each error a case that shows it, such as an input and the wrong result it gives, or a sentence and the rule it breaks. Then say what to change and why.
+- If an error shows only with an input that someone would have to craft on purpose, and nobody outside the project can give that input, report the error as a note after the other errors, because it needn't block the merge.
+- Report to whoever asked for the review. Don't change files or labels, make commits, or post comments or reviews. If you find no errors, say so in one line.
 
 ## Review the code for security problems
 
