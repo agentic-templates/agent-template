@@ -309,6 +309,23 @@ done
 for command in 'gh pr close 7' 'gh pr close 7 --comment "Giving it back"' 'gh pr close 7 --delete-branch=false'; do
   expect_allow Bash "$command"
 done
+# gh reads -d in a word of several short flags, before the first flag that takes a value, which the rest of the word
+# or the next word gives.
+for command in "gh pr close 7 -dc'Giving it back'" "gh pr close 7 -dc 'Giving it back'" 'gh pr close 7 -dRjtmpl/other'; do
+  expect_block Bash "$command" "$delete_branch"
+done
+for command in 'gh pr close 7 -cd' 'gh pr close 7 -c-d' 'gh pr close 7 --comment=-d'; do
+  expect_allow Bash "$command"
+done
+# gh reads a value after = as Go's strconv.ParseBool does.
+for value in 1 t T true TRUE True; do
+  expect_block Bash "gh pr close 7 --delete-branch=$value" "$delete_branch"
+  expect_block Bash "gh pr close 7 -d=$value" "$delete_branch"
+done
+for value in 0 f F false FALSE False; do
+  expect_allow Bash "gh pr close 7 --delete-branch=$value"
+  expect_allow Bash "gh pr close 7 -d=$value"
+done
 
 expect_repository_flags 2 "$delete_branch" pr close '7 --delete-branch'
 expect_repository_flags 0 "" pr close '7 --delete-branch=false'
