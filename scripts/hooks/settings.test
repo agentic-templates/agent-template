@@ -127,7 +127,7 @@ mkdir "$checkouts/plain"
 # the other tools send no such event. For PostToolUse, the matcher picks the commands: Bash, Edit|Write,
 # Edit|Write|CronCreate or *.
 expect_hook() {
-  local event=$1 tool=$2 checkout=$4 matcher=${5:-} input expected encoded_command command output commands=0
+  local event=$1 tool=$2 checkout=$4 matcher=${5:-} input expected
   test_cwd=$3
   if [[ $event == SessionStart ]]; then
     input=$(jq -n --arg cwd "$test_cwd" '{session_id: "abc123", cwd: $cwd, hook_event_name: "SessionStart", source: "startup"}')
@@ -151,6 +151,13 @@ expect_hook() {
     input=$(sample_input "$tool" Bash ls)
     expected=$checkout/scripts/hooks/before-tool
   fi
+  expect_commands "$event" "$tool" "$matcher" "$input" "$expected"
+}
+
+# Runs each command for an event in .claude/settings.json with an input, and counts a failed case for each command
+# that doesn't run the expected hook: expect_commands <event> <tool> <matcher or ""> <input> <expected hook>
+expect_commands() {
+  local event=$1 tool=$2 matcher=$3 input=$4 expected=$5 encoded_command command output commands=0
   while IFS= read -r encoded_command; do
     command=$(jq -r . <<<"$encoded_command")
     commands=$((commands + 1))
