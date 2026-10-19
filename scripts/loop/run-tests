@@ -1,0 +1,91 @@
+#!/usr/bin/env -S uv run --script --quiet
+"""Runs the Python tests in scripts/loop, or in another folder, in parts at the same time, each part in a process of its
+own:
+
+  scripts/loop/run-tests [--part <part>/<parts>] [<folder>]
+
+The script prints the outputs of the parts in order, so that they don't mix. A failure in any part fails the script.
+With --part, as in --part 2/3, it runs only every third test of the folder, starting with the second, in its own
+process.
+"""
+
+import argparse
+import contextlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from collections.abc import Iterator
+from pathlib import Path
+
+# The checks on a pull request should take about a minute, as "Commands" in AGENTS.md says, and in one process the
+# tests took 48 of the linux job's 77 seconds in CI. The tests spend about half their time waiting for the processes
+# that they start, so the parts outnumber the 4 cores of CI's runner.
+PARTS = 8
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="scripts/loop/run-tests", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("--part", type=part_argument, metavar="PART/PARTS", help="the part to run, such as 2/3")
+    parser.add_argument(
+        "folder", nargs="?", type=Path, default=Path(__file__).resolve().parent, help="the folder of the tests"
+    )
+    options = parser.parse_args()
+    if options.part is None:
+        return run_parts(options.folder)
+    part, parts = options.part
+    return run_part(options.folder, part, parts)
+
+
+def part_argument(text: str) -> tuple[int, int]:
+    match = re.fullmatch(r"([1-9][0-9]*)/([1-9][0-9]*)", text)
+    if match is None:
+        raise argparse.ArgumentTypeError(f"takes a part such as 2/3, and got {text}")
+    part, parts = int(match[1]), int(match[2])
+    if part > parts:
+        raise argparse.ArgumentTypeError(f"{text} names part {part} of {parts}. Give a part from 1 to {parts}.")
+    return part, parts
+
+
+def run_parts(folder: Path) -> int:
+    with contextlib.ExitStack() as stack:
+        runs = []
+        for part in range(1, PARTS + 1):
+            output = stack.enter_context(tempfile.TemporaryFile())
+            errors = stack.enter_context(tempfile.TemporaryFile())
+            command = [sys.executable, __file__, "--part", f"{part}/{PARTS}", str(folder)]
+            runs.append((subprocess.Popen(command, stdout=output, stderr=errors), output, errors))
+        status = 0
+        for process, output, errors in runs:
+            if process.wait() != 0:
+                status = 1
+            output.seek(0)
+            shutil.copyfileobj(output, sys.stdout.buffer)
+            sys.stdout.buffer.flush()
+            errors.seek(0)
+            shutil.copyfileobj(errors, sys.stderr.buffer)
+            sys.stderr.buffer.flush()
+        return status
+
+
+def run_part(folder: Path, part: int, parts: int) -> int:
+    tests = list(each_test(unittest.defaultTestLoader.discover(str(folder), top_level_dir=str(folder))))
+    # Taking every parts-th test keeps the tests of each module and class in a part together, so that the part sets up
+    # their fixtures, such as a module's setUpModule, once.
+    result = unittest.TextTestRunner().run(unittest.TestSuite(tests[part - 1 :: parts]))
+    return 0 if result.wasSuccessful() else 1
+
+
+def each_test(suite: unittest.TestSuite) -> Iterator[unittest.TestCase]:
+    for test in suite:
+        if isinstance(test, unittest.TestSuite):
+            yield from each_test(test)
+        else:
+            yield test
+
+
+sys.exit(main())

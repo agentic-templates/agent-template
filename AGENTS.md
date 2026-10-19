@@ -47,7 +47,7 @@ When a request doesn't fit this direction, say so, and ask the maintainer whethe
 - `scripts/loop/run-builder <issue> <kind> --tool claude --type <agent type>`, or `--tool codex`: starts a builder for the issue on an account that `.loop/accounts.json` lists, in a worktree of its own, and says where the builder's report is. `<issue> <kind>` is the line that `scripts/take-next-issue` printed. A Claude builder runs at the model and effort of its type. `scripts/loop/run-builder --help` says which account it picks and what a Codex builder can do.
 - `scripts/loop/consequential`: lists the files of the branch's change that a reviewer reads before the change merges: the rules, the scripts and the files that keep agents safe.
 - `scripts/loop/run-heavy <command> [<argument>...]`: runs a heavy command, such as a build or tests, once the machine has room for it, so that parallel builders don't crowd the machine. `scripts/check`, `scripts/test-scripts` and `scripts/test-check` run through it by themselves. `scripts/loop/run-heavy --help` says how it decides.
-- `scripts/loop/run-heavy uv run --locked python -m unittest discover -s scripts/loop -t scripts/loop`: runs the tests of the Python scripts, which `scripts/check` runs too.
+- `scripts/loop/run-heavy scripts/loop/run-tests`: runs the tests of the Python scripts, which `scripts/check` runs too.
 
 The Python scripts, `scripts/leak-scan` and those in `scripts/loop`, need [uv](https://docs.astral.sh/uv/getting-started/installation/). When uv first runs one, it installs the Python version in `.python-version` and the packages in `uv.lock`.
 
