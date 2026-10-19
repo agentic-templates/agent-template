@@ -41,9 +41,10 @@ account's advice is stop. Run it in the background, so that its end wakes the or
   {"accounts": [{"name": "claude", "tool": "claude"},
                 {"name": "codex", "tool": "codex", "env": {"CODEX_HOME": "~/.codex"}}]}
 
-Without the file, the meter reads the Claude account that this machine is signed in to. It adds each reading to
-.loop/meter.jsonl, with the machine's numbers at that time under "machine", as scripts/loop/machine.py describes them.
-A number that the machine doesn't give is null. The meter exits with code 1 when an account gives no reading. It reads
+Without the file, the meter reads the Claude account that this machine is signed in to. It adds each reading of an
+account to .loop/meter.jsonl. Each time it reads the accounts, it first adds a line with no account and the
+machine's numbers under "machine", as scripts/loop/machine.py describes them. A number that the machine doesn't give
+is null. The meter exits with code 1 when an account gives no reading. It reads
 the orchestrator's context size from the transcript of the session that the session: line of .loop/state.md names.
 """
 
@@ -66,6 +67,7 @@ from accounts import Account, AccountsError, claude_environment, load_accounts
 from github import GitHubError, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, note_files
 from machine import Machine, read_machine
+from meter_waits import READ_EVERY_SECONDS, WAKE_EVERY
 from usage import Meter, parse_usage
 
 WATCH_PERCENT = 80.0
@@ -86,14 +88,11 @@ WEEK_NEAR_MARGIN_PERCENT = 1.0
 # Waiting at a stop wakes the orchestrator every 50 minutes, and each wake spends some of the week. So a weekly stop
 # further than this from its reset parks the account instead.
 LONGEST_STOP = dt.timedelta(hours=10)
-READ_EVERY_SECONDS = {"go": 30 * 60, "watch": 10 * 60, "near": 150}
 SHORTEST_WAIT_SECONDS = 60
 # A wait for a reset ends this long after it, so that the next reading sees the new window.
 AFTER_RESET_SECONDS = 60
 UNKNOWN_RESET_WAIT_SECONDS = 10 * 60
 LATEST_TIME = dt.datetime.max.replace(tzinfo=dt.UTC)
-# Less than an hour, so that the orchestrator wakes while a prompt cache that lasts an hour still holds its context.
-WAKE_EVERY = dt.timedelta(minutes=50)
 CLAUDE_TIMEOUT_SECONDS = 120
 # A Codex snapshot from before this is from an earlier weekly window, so the meter doesn't read older session files.
 CODEX_SNAPSHOT_AGE = dt.timedelta(days=8)
@@ -218,7 +217,10 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
     advice: dict[str, str] = {}
     waits: list[int] = []
     has_every_account = True
-    machine: Machine | None = None
+    machine_time = now()
+    machine = read_machine(log.parent)
+    with log.open("a") as handle:
+        handle.write(json.dumps({"at": machine_time.isoformat(timespec="seconds"), "machine": machine}) + "\n")
     for account in accounts:
         reading_time = now()
         try:
@@ -227,12 +229,10 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
             lines.append(f"{account['name']} | no reading: {problem}")
             has_every_account = False
             continue
-        machine = read_machine(log.parent)
         reading: dict[str, Any] = {
             "at": reading_time.isoformat(timespec="seconds"),
             "account": account["name"],
             "meters": meters,
-            "machine": machine,
         }
         previous = last_reading(log, account["name"])
         rate = rate_per_minute(previous, reading)
@@ -248,7 +248,7 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
         advice,
         min(waits, default=UNKNOWN_RESET_WAIT_SECONDS),
         has_every_account,
-        machine or read_machine(log.parent),
+        machine,
     )
 
 
@@ -343,11 +343,9 @@ def codex_meter(window: dict[str, Any], reading_time: dt.datetime) -> Meter:
 
 
 def last_reading(log: Path, account: str) -> dict[str, Any] | None:
-    if not log.exists():
-        return None
     for line in reversed(log.read_text().splitlines()):
         entry: dict[str, Any] = json.loads(line)
-        if entry["account"] == account:
+        if entry.get("account") == account:
             return entry
     return None
 

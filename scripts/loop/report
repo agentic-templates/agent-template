@@ -60,13 +60,17 @@ The lines are:
   Machine                   A line for each number of the machine that scripts/loop/meter records in
                             .loop/meter.jsonl: free disk, free memory, swap in use, GPU use, GPU memory in use and
                             load. Each gives the median and the worst: the lowest of free disk and free memory, and
-                            the highest of the others. Then the median of the readings while one, two, and three or
-                            more agents worked. An agent in .loop/agents.jsonl worked in the periods that
+                            the highest of the others. Free disk also gives its change from the first reading to the
+                            last. Swap in use also gives the share of the time between readings in which it grew,
+                            leaving out a gap longer than the meter waits while the loop runs. The load also gives
+                            the share of the readings with a load above the number of cores. A number that no reading
+                            gives says so. Then a line for each number of agents, from one to the most that worked at a
+                            reading: how many readings they worked at, and the median of each number in those
+                            readings. An agent in .loop/agents.jsonl worked in the periods that
                             scripts/loop/agent_log.py gives it: from each prompt or message that it received to its
                             last call before the next one, so the time it waited for a message doesn't count. An
                             agent without an end line worked until the last line of its transcript. The test builds
-                            of a retrospective count here, because they use the machine too. Free disk also gives its
-                            change from the first reading to the last. A number that no reading gives says so.
+                            of a retrospective count here, because they use the machine too.
 
 With --issues, the report also gives a line for each agent that built an issue, of the kinds other and left behind,
 with its numbers, those of its pull request, its peak context, the context added per tool call in the steps that
@@ -88,6 +92,7 @@ for.
 
 import argparse
 import datetime as dt
+import itertools
 import json
 import math
 import statistics
@@ -104,6 +109,7 @@ import request_events
 from agent_log import AgentRun, Period, agent_output_tokens, agent_transcripts, read_runs, started, working_periods
 from github import GitHubError, gh_api, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, hook_threshold, note_files
+from meter_waits import LONGEST_READING_GAP
 from transcripts import Call, Message, person_messages, read_transcript
 
 CI_WORKFLOW = "ci.yml"
@@ -191,21 +197,21 @@ class PullRequestResult(NamedTuple):
 class MachineNumber(NamedTuple):
     key: str
     name: str
+    # The name in the line for each number of agents
+    short_name: str
     # Whether the lowest value is the one to watch, as for free memory, rather than the highest
     is_lowest_worst: bool
 
 
 # The numbers of a machine reading that the report gives, as scripts/loop/machine.py names them
 MACHINE_NUMBERS = (
-    MachineNumber("disk_free_gb", "Free disk, GB", True),
-    MachineNumber("memory_free_gb", "Free memory, GB", True),
-    MachineNumber("swap_used_gb", "Swap in use, GB", False),
-    MachineNumber("gpu_percent", "GPU use, %", False),
-    MachineNumber("gpu_memory_used_gb", "GPU memory in use, GB", False),
-    MachineNumber("load", "Load", False),
+    MachineNumber("disk_free_gb", "Free disk, GB", "free disk", True),
+    MachineNumber("memory_free_gb", "Free memory, GB", "free memory", True),
+    MachineNumber("swap_used_gb", "Swap in use, GB", "swap in use", False),
+    MachineNumber("gpu_percent", "GPU use, %", "GPU use", False),
+    MachineNumber("gpu_memory_used_gb", "GPU memory in use, GB", "GPU memory in use", False),
+    MachineNumber("load", "Load", "load", False),
 )
-# The groups of the readings by how many agents ran: each group's label, and the fewest and the most agents in it
-AGENT_GROUPS: tuple[tuple[str, int, int | None], ...] = (("1 agent", 1, 1), ("2 agents", 2, 2), ("3 or more", 3, None))
 
 
 class ReportError(Exception):
@@ -824,27 +830,62 @@ def machine_lines(readings: list[MachineReading], periods: list[Period]) -> list
     if not readings:
         return ["Machine: no readings"]
     running = [agents_running(reading.at, periods) for reading in readings]
-    return [machine_line(number, readings, running) for number in MACHINE_NUMBERS]
+    lines = [machine_line(number, readings) for number in MACHINE_NUMBERS]
+    for count in range(1, max(running) + 1):
+        lines.append(agents_line(count, [reading for reading, n in zip(readings, running, strict=True) if n == count]))
+    return lines
 
 
-def machine_line(number: MachineNumber, readings: list[MachineReading], running: list[int]) -> str:
-    values = [reading.machine[number.key] for reading in readings]
-    known = [value for value in values if value is not None]
+def machine_line(number: MachineNumber, readings: list[MachineReading]) -> str:
+    known = known_values(number, readings)
     if not known:
         return f"{number.name}: no readings"
     worst = f"lowest {min(known):.1f}" if number.is_lowest_worst else f"highest {max(known):.1f}"
     parts = [f"median {statistics.median(known):.1f}", worst]
     if number.key == "disk_free_gb":
         parts.append(f"net change {known[-1] - known[0]:+.1f}")
-    groups = []
-    for label, fewest, most in AGENT_GROUPS:
-        group = [
-            value
-            for value, count in zip(values, running, strict=True)
-            if value is not None and fewest <= count and (most is None or count <= most)
-        ]
-        groups.append(f"{label} {statistics.median(group):.1f}" if group else f"{label} none")
-    return f"{number.name}: {', '.join(parts)} | median with " + ", ".join(groups)
+    if number.key == "swap_used_gb":
+        parts.append(swap_growth(readings))
+    if number.key == "load":
+        machines = [reading.machine for reading in readings if reading.machine["load"] is not None]
+        above = sum(1 for machine in machines if machine["load"] > machine["cores"])
+        parts.append(f"above the cores in {above / len(machines):.0%} of the readings")
+    return f"{number.name}: {', '.join(parts)}"
+
+
+def swap_growth(readings: list[MachineReading]) -> str:
+    """The share of the time between readings in which the swap in use grew. Swap stays in use after the memory frees
+    up again, so only its growth shows that the machine ran out of memory. The share counts time rather than readings,
+    because the meter reads more often near a stop, and two meters can read seconds apart."""
+    counted = dt.timedelta()
+    grew = dt.timedelta()
+    for before, after in itertools.pairwise(readings):
+        swap_before, swap_after = before.machine["swap_used_gb"], after.machine["swap_used_gb"]
+        gap = after.at - before.at
+        if swap_before is None or swap_after is None or gap > LONGEST_READING_GAP:
+            continue
+        counted += gap
+        if swap_after > swap_before:
+            grew += gap
+    if not counted:
+        return "no two readings in a row to compare"
+    return f"grew in {grew / counted:.0%} of the time between readings"
+
+
+def known_values(number: MachineNumber, readings: list[MachineReading]) -> list[float]:
+    return [reading.machine[number.key] for reading in readings if reading.machine[number.key] is not None]
+
+
+def agents_line(count: int, readings: list[MachineReading]) -> str:
+    label = f"Median with {count} agent{'' if count == 1 else 's'}"
+    if not readings:
+        return f"{label}: no readings"
+    medians = []
+    for number in MACHINE_NUMBERS:
+        known = known_values(number, readings)
+        medians.append(f"{number.short_name} {statistics.median(known):.1f}" if known else f"{number.short_name} none")
+    plural = "" if len(readings) == 1 else "s"
+    return f"{label}, {len(readings)} reading{plural}: {', '.join(medians)}"
 
 
 if __name__ == "__main__":
