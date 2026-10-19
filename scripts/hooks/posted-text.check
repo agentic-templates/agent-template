@@ -51,7 +51,8 @@ read_text() {
     fi
     case $flag in
       -t | --title) title=$value has_title=yes title_may_expand=${command_word_may_expand[i]:-} ;;
-      -b | --body | -c | --comment) body_source=text body_word=$value body_may_expand=${command_word_may_expand[i]:-} ;;
+      -b | --body) body_source=text body_word=$value body_may_expand=${command_word_may_expand[i]:-} ;;
+      -c | --comment) body_source=comment body_word=$value body_may_expand=${command_word_may_expand[i]:-} ;;
       -F | --body-file) body_source=file body_file=$value ;;
     esac
   done
