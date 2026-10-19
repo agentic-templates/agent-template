@@ -221,9 +221,10 @@ for command in 'git push' 'git push origin' 'git push -u origin HEAD' 'git push 
   'git push origin dependabot-notes' 'git -C ../other push'; do
   expect_allow Bash "$command"
 done
-# Without a refspec, or with HEAD, git pushes the current branch.
+# Without a refspec, or with HEAD, git pushes the current branch, and git reads @ as HEAD.
 git -C "$test_cwd" symbolic-ref HEAD "refs/heads/$dependabot_branch"
-for command in 'git push' 'git push origin' 'git push -u origin HEAD' 'git push -o ci.skip origin' 'git push --force-with-lease origin'; do
+for command in 'git push' 'git push origin' 'git push -u origin HEAD' 'git push origin @' 'git push -o ci.skip origin' \
+  'git push --force-with-lease origin'; do
   expect_block Bash "$command" "$to_dependabot"
 done
 expect_allow Bash 'git push origin main'

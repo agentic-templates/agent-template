@@ -220,20 +220,9 @@ check_git_push() {
 
 # Run read_push_arguments first.
 check_push_to_dependabot() {
-  local refspec branch
-  local -a refspecs=(HEAD)
-  # Without a refspec, git pushes the current branch.
-  if ((${#push_refspecs[@]} > 0)); then
-    refspecs=("${push_refspecs[@]}")
-  fi
-  for refspec in "${refspecs[@]}"; do
-    # A refspec is [+]<source>[:<branch>]. Without a colon, it pushes to the branch with the source's name.
-    branch=${refspec#+}
-    branch=${branch#*:}
-    if [[ $branch == HEAD ]]; then
-      branch=$(git "${git_folder[@]}" symbolic-ref --quiet --short HEAD 2>/dev/null) || continue
-    fi
-    branch=${branch#refs/heads/}
+  local branch
+  read_push_branches "${git_folder[@]}"
+  for branch in ${push_branches[@]+"${push_branches[@]}"}; do
     if [[ $branch == dependabot/* ]]; then
       block "Blocked: $branch is the branch of one of Dependabot's pull requests, and Dependabot stops rebasing a pull request once someone else pushes to it. Make the update in a pull request of your own instead, as \"Stuck pull requests\" in docs/loop.md describes."
     fi

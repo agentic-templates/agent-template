@@ -233,32 +233,10 @@ is_push_let_through() {
   return 1
 }
 
-# Checks the branch that a refspec of a git push updates, as check_pushed_branch describes. A refspec without a colon
-# gives the branch of the same name, and HEAD gives HEAD's branch: check_refspec <refspec>
-check_refspec() {
-  local spec=${1#+} source branch
-  source=${spec%%:*}
-  # git reads @ as HEAD in the source of a refspec, though not after its colon.
-  if [[ $source == @ ]]; then
-    source=HEAD
-  fi
-  branch=$source
-  if [[ $spec == *:* ]]; then
-    branch=${spec#*:}
-  fi
-  if [[ $branch == HEAD ]]; then
-    branch=$(git symbolic-ref --quiet --short HEAD) || return 0
-  fi
-  # A refspec with nothing before its colon, as in :feature, deletes the branch.
-  if [[ -n $source ]]; then
-    check_pushed_branch "$source" "${branch#refs/heads/}"
-  fi
-}
-
-# Checks each branch that a git push updates, as check_refspec describes. A push without a refspec pushes HEAD, as
-# git's default push.default, simple, does.
+# Checks each branch that a git push updates, as read_push_branches in helpers.bash finds them, and as
+# check_pushed_branch describes. A refspec that deletes its branch sends no pages.
 check_git_push() {
-  local spec
+  local i
   if [[ ${command_words[0]##*/} != git ]]; then
     return 0
   fi
@@ -270,11 +248,11 @@ check_git_push() {
   if is_push_let_through; then
     return 0
   fi
-  if ((${#push_refspecs[@]} == 0)); then
-    push_refspecs=(HEAD)
-  fi
-  for spec in "${push_refspecs[@]}"; do
-    check_refspec "$spec"
+  read_push_branches -C "$PWD"
+  for ((i = 0; i < ${#push_branches[@]}; i++)); do
+    if [[ -n ${push_sources[i]} ]]; then
+      check_pushed_branch "${push_sources[i]}" "${push_branches[i]}"
+    fi
   done
 }
 

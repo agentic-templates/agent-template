@@ -353,6 +353,37 @@ read_push_arguments() {
   fi
 }
 
+# Sets push_sources and push_branches to the source and the branch of each refspec, [+]<source>[:<branch>], that
+# read_push_arguments found, in the same order. A refspec without a colon pushes to the branch of the source's name, and
+# a push without a refspec pushes HEAD, as git's default push.default, simple, does. git reads @ as HEAD in the source,
+# though not after the colon. For HEAD, the branch is HEAD's, which git gives with these options, such as -C <folder>,
+# and a refspec is left out when HEAD has no branch. A refspec with nothing before its colon, as in :feature, deletes
+# the branch, and its source is empty: read_push_branches [<git option>...]
+read_push_branches() {
+  local refspec source branch
+  local -a refspecs=(HEAD)
+  push_sources=() push_branches=()
+  if ((${#push_refspecs[@]} > 0)); then
+    refspecs=("${push_refspecs[@]}")
+  fi
+  for refspec in "${refspecs[@]}"; do
+    refspec=${refspec#+}
+    source=${refspec%%:*}
+    if [[ $source == @ ]]; then
+      source=HEAD
+    fi
+    branch=$source
+    if [[ $refspec == *:* ]]; then
+      branch=${refspec#*:}
+    fi
+    if [[ $branch == HEAD ]]; then
+      branch=$(git "$@" symbolic-ref --quiet --short HEAD 2>/dev/null) || continue
+    fi
+    push_sources+=("$source")
+    push_branches+=("${branch#refs/heads/}")
+  done
+}
+
 # Moves repository flags between a gh command group and its subcommand just after the subcommand,
 # so that the checks read the same words and flags in either position. Other flags and groups stay as written.
 # A repository flag gives the repository in the next word, as in -R jtmpl/other, or in the same word, as in
