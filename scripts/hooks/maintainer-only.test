@@ -71,6 +71,7 @@ security="Blocked: this changes the repository's rules or security settings, and
 expect_block Bash 'sudo ls' "$(sudo_message sudo)"
 expect_block Bash 'FOO=1 sudo -n true' "$(sudo_message sudo)"
 expect_block Bash 'env sudo make install' "$(sudo_message sudo)"
+expect_block Bash 'env -u CLAUDECODE sudo ls' "$(sudo_message sudo)"
 expect_block Bash '/usr/bin/sudo ls' "$(sudo_message sudo)"
 expect_block Bash 'git status && doas ls' "$(sudo_message doas)"
 expect_block Bash 'su -c whoami' "$(sudo_message su)"
@@ -211,16 +212,24 @@ expect_block Bash '/usr/bin/env' "$environment"
 expect_block Bash 'printenv' "$environment"
 # cut prints the later lines of a value that spans several lines.
 expect_block Bash 'env | cut -d= -f1' "$environment"
+expect_block Bash 'env -u CLAUDECODE' "$environment"
+expect_block Bash 'env -0u CLAUDECODE FOO=1' "$environment"
+expect_block Bash 'env --unset CLAUDECODE' "$environment"
+expect_block Bash 'env --env0-from variables' "$environment"
 expect_allow Bash 'printenv HOME'
 expect_allow Bash "$list_names"
 expect_allow Bash 'env FOO=1 make test'
 expect_allow Bash 'env -u GH_TOKEN make test'
+expect_allow Bash 'env -u CLAUDECODE claude -p hello'
+expect_allow Bash "env -S 'claude -p hello'"
 # shellcheck disable=SC2016 # The command is the text that the agent sends, so $PATH stays as written.
 expect_allow Bash 'echo "$PATH"'
 
 # Pushing without the pre-push hook, or to a URL
 expect_block Bash 'git push --no-verify origin main' "$no_verify"
 expect_block Bash 'git -C . push --no-verify' "$no_verify"
+expect_block Bash 'env -u CLAUDECODE git push --no-verify' "$no_verify"
+expect_block Bash '/usr/bin/env -C build git push --no-verify' "$no_verify"
 expect_block Bash 'git push https://github.com/someone/else.git main' "$push_to_url"
 expect_block Bash 'git push git@github.com:someone/else.git HEAD' "$push_to_url"
 expect_block Bash 'git push -o ci.skip ssh://git@github.com/jtmpl/project.git HEAD' "$push_to_url"

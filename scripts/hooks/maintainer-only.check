@@ -113,26 +113,20 @@ changes_machine() {
   esac
 }
 
-# Succeeds if the simple command prints the whole environment: printenv without a name, or env without a command.
-# drop_command_prefixes drops env and its NAME=value words: prints_environment <the words before the command's name>...
+# Succeeds if the simple command prints the whole environment: env without a command, or printenv without a name.
+# Run drop_command_prefixes first.
 prints_environment() {
-  local word printer=""
-  local -a rest=(${command_words[@]+"${command_words[@]}"})
-  for word in "$@"; do
-    if [[ $word == env ]]; then
-      printer="env"
-    fi
-  done
-  if ((${#rest[@]} > 0)) && is_one_of "${rest[0]##*/}" env printenv; then
-    printer=${rest[0]##*/}
-    rest=("${rest[@]:1}")
+  local word
+  if ((${#command_words[@]} == 0)); then
+    [[ $runs_through_env == true ]]
+    return
   fi
-  if [[ -z $printer ]]; then
+  if [[ ${command_words[0]##*/} != printenv ]]; then
     return 1
   fi
-  # Any other word is a command that env runs, or a variable that printenv prints.
-  for word in ${rest[@]+"${rest[@]}"}; do
-    if [[ $word != -* && ! ($printer == env && $word =~ ^[A-Za-z_][A-Za-z0-9_]*=) ]]; then
+  # Any other word is a variable that printenv prints.
+  for word in "${command_words[@]:1}"; do
+    if [[ $word != -* ]]; then
       return 1
     fi
   done
@@ -698,7 +692,7 @@ check_simple_command() {
   for file in ${written_files[@]+"${written_files[@]}"}; do
     block_if_settings_file "$file" "$command_folder"
   done
-  if prints_environment "${@:1:prefix_count}"; then
+  if prints_environment; then
     # bash -c, because zsh has no compgen.
     block "Blocked: this command prints the whole environment, which holds tokens. Print only the variables you need, by name, as in printenv PATH. To list the variables' names without their values, run bash -c 'compgen -e'."
   fi

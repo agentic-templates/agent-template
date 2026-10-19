@@ -248,18 +248,36 @@ follow_cd() {
   fi
 }
 
-# Sets the array command_words to a simple command's words from the command's name on, without the sudo,
-# env and NAME=value words before it: drop_command_prefixes <word>...
+# The options of env that take the next word as their value, alone or after options that take none, as in -iu NAME,
+# as env --help in GNU coreutils and man env on macOS list them. -S is left out: env splits its value into more words
+# of its own, but the hook reads the value as one word, the command's name, so the checks don't see the command in it.
+env_option_with_value='^(-[0iv]*[aCPu]|--(argv0|chdir|env0-from|unset))$'
+
+# Sets the array command_words to a simple command's words from the command's name on, without the sudo, env and
+# NAME=value words before it, and without env's options and their values. Sets runs_through_env to true if env is among
+# the words it drops: drop_command_prefixes <word>...
 drop_command_prefixes() {
-  command_words=("$@")
-  command_word_may_expand=(${words_may_expand[@]+"${words_may_expand[@]}"})
-  while ((${#command_words[@]} > 0)); do
-    if [[ ${command_words[0]} != sudo && ${command_words[0]} != env && ! ${command_words[0]} =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-      return 0
+  local -a prefixed=("$@")
+  local i=0 word is_after_env=false
+  runs_through_env=false
+  while ((i < ${#prefixed[@]})); do
+    word=${prefixed[i]}
+    if [[ $word == sudo || $word =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      is_after_env=false
+    elif [[ ${word##*/} == env ]]; then
+      is_after_env=true
+      runs_through_env=true
+    elif [[ $is_after_env == true && $word == -* ]]; then
+      if [[ $word =~ $env_option_with_value ]]; then
+        i=$((i + 1))
+      fi
+    else
+      break
     fi
-    command_words=("${command_words[@]:1}")
-    command_word_may_expand=("${command_word_may_expand[@]:1}")
+    i=$((i + 1))
   done
+  command_words=(${prefixed[@]+"${prefixed[@]:i}"})
+  command_word_may_expand=(${words_may_expand[@]+"${words_may_expand[@]:i}"})
 }
 
 # Reads the -C options at the start of a git command, and sets these variables:

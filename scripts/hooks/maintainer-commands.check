@@ -123,7 +123,7 @@ is_configure_github() {
 }
 
 # Blocks a run of scripts/configure-github on a repository whose settings were applied before:
-# check_configure_github [<sudo, env or NAME=value word before the command's name>]...
+# check_configure_github [<word that drop_command_prefixes dropped, such as GH_REPO=owner/name>]...
 check_configure_github() {
   local word repository sets_gh_repo=false gh_repo="" program=${command_words[0]}
   # bash or sh can run the script too.
