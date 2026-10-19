@@ -8,10 +8,10 @@ Ask the maintainer before you do any of these:
 
 - Spend money, such as on a paid plan or service.
 - Create, change or share a credential, such as a token or a login.
-- Make anything public other than this repository and the repositories that agents make from it to try it out.
+- Make anything public other than this project and the repositories that agents create from this template to test it.
 - Delete anything outside the repository, unless an agent of this project created it.
 - Change the machine's settings or security.
-- Make a choice of taste that the maintainer's goal leaves open, such as a name.
+- Make a choice of direction or taste that the maintainer's goal leaves open, such as a name.
 
 Decide everything else yourself, and write the decision where the next reader needs it, such as in the issue. Put your questions in one short message, each with the option you recommend.
 
@@ -34,7 +34,7 @@ Read each guide before you first do its kind of work in a session, even when the
 
 ## What this project is
 
-agent-template gives a new GitHub project an orchestrator: one agent that the maintainer talks to. The orchestrator turns the maintainer's goals into issues, builds them with agents that work in parallel, merges their pull requests through CI and the merge queue, and publishes a release when a goal is done. agent-template aims for a project that stays easy to change over many changes, with a simple design that lasts, code that reads clearly, tests that guard behavior, clear writing, safety from security problems and risky actions, and little for an agent to read in each change. It aims to keep its rules few, and to enforce them with hooks, checks and settings where it can. It works with any language. Each project adds its own language tools during setup.
+agent-template gives a new GitHub project an orchestrator: one agent that the maintainer talks to. The orchestrator turns the maintainer's goals into issues, builds them with agents that work in parallel, merges their pull requests through CI and the merge queue, and publishes a release when a goal is done. It keeps working through usage limits and the compaction of its context, and it improves its own rules, checks and agent types from what it measures. agent-template aims for a project that stays easy to change over many changes, with a simple design that lasts, code that reads clearly, tests that guard behavior, clear writing, safety from security problems and risky actions, and little for an agent to read in each change. It aims to keep its rules few, and to enforce them with hooks, checks and settings where it can. It works with any language. Each project adds its own language tools during setup. The orchestrator runs in Claude Code, and its builders run in Claude Code or Codex.
 
 When a request doesn't fit this direction, say so, and ask the maintainer whether to change the request or the direction.
 

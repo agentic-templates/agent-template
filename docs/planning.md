@@ -19,7 +19,7 @@ Triage is for ideas: anything a maintainer wants judged before deciding whether 
    - **Accept:** the idea becomes an issue in the backlog, with `needs-breakdown` if it's too big for one pull request. If an open issue covers it, add the idea's new details to that issue instead. If a closed issue covered it, mention that issue in the new one.
    - **Research first:** the idea can't be judged until a question is answered. It becomes an issue with `needs-decision`, blocked by a new research issue for the question.
    - **Drop:** it doesn't fit the project's direction, can't be built, isn't worth its cost, or was closed as not planned before. Nothing is created.
-   - **Ask:** only the maintainer can settle it, such as an idea too vague to judge, or one that needs a decision on taste or risk.
+   - **Ask:** only the maintainer can settle it, such as an idea too vague to judge, or one that needs a decision that "Decide or ask" in AGENTS.md leaves to the maintainer.
 4. Show the maintainer a table of the ideas, verdicts and reasons, one line each. Carry out **Accept** and **Research first** right away. In the same message, ask about each **Drop** and **Ask**, with the answer you recommend. Then carry out what the maintainer decides.
 
 Write each new issue in your own words. Leave out private details from the input. If part of the input comes from a public source, link that source instead of copying it.
