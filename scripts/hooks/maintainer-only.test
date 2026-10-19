@@ -35,6 +35,7 @@ chmod +x "$base/bin/gh"
 PATH=$base/bin:$PATH
 
 ask="Ask the maintainer, and go on with the other work."
+test_repositories="If it's a repository that agents created from this template to test it, add its owner/name to .loop/allowed-repositories in the main checkout first. Otherwise, ask the maintainer, and go on with the other work."
 
 # The messages that block an action: sudo_message <command>, machine <command>, settings_file <path as written>,
 # git_config <option>, deleting <command> <what it deletes>, public <repository> and other_repository <repository>
@@ -54,10 +55,10 @@ deleting() {
   echo "Blocked: $1 would delete $2, and only the maintainer may delete outside the repository, its worktrees and the temporary folders. Delete only inside them, or ask the maintainer."
 }
 public() {
-  echo "Blocked: this makes $1 public, and only the maintainer makes a repository public, unless .loop/allowed-repositories in the main checkout lists it. $ask"
+  echo "Blocked: this makes $1 public, and only the maintainer may make a repository public. $test_repositories"
 }
 other_repository() {
-  echo "Blocked: this posts to $1, which isn't this repository, and only the maintainer posts to another repository, unless .loop/allowed-repositories in the main checkout lists it. $ask"
+  echo "Blocked: this posts to $1, which isn't this repository, and only the maintainer may post to another repository. $test_repositories"
 }
 environment="Blocked: this command prints the whole environment, which holds tokens. Print only the variables you need, by name, as in printenv PATH."
 no_verify="Blocked: --no-verify skips the pre-push hook, which scans the push for leaks. Push without it. If the scan finds a leak, take it out of the commits."

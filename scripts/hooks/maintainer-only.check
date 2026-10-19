@@ -26,7 +26,8 @@ repo_edit_flags_with_value=" --add-topic --default-branch -d --description -h --
 security_endpoint='rulesets|/protection|/collaborators|/keys|/hooks|actions/permissions|/environments|vulnerability-alerts|automated-security-fixes|private-vulnerability-reporting|code-scanning/default-setup'
 
 ask="Ask the maintainer, and go on with the other work."
-allowed_list=".loop/allowed-repositories in the main checkout"
+# AGENTS.md lets agents make public the repositories that they create from this template to test it.
+test_repositories="If it's a repository that agents created from this template to test it, add its owner/name to .loop/allowed-repositories in the main checkout first. Otherwise, ask the maintainer, and go on with the other work."
 security_change="Blocked: this changes the repository's rules or security settings, and only the maintainer may do that. $ask"
 
 # The physical path of the home folder, and the folders inside which an agent may delete, which is_settings_file and
@@ -453,7 +454,7 @@ block_if_public_unless_allowed() {
     read_name_with_owner "$1"
     name=$name_with_owner
   fi
-  block "Blocked: this makes $name public, and only the maintainer makes a repository public, unless $allowed_list lists it. $ask"
+  block "Blocked: this makes $name public, and only the maintainer may make a repository public. $test_repositories"
 }
 
 check_repo_create() {
@@ -618,7 +619,7 @@ check_destination() {
     return 0
   fi
   read_name_with_owner "$destination"
-  block "Blocked: this posts to $name_with_owner, which isn't this repository, and only the maintainer posts to another repository, unless $allowed_list lists it. $ask"
+  block "Blocked: this posts to $name_with_owner, which isn't this repository, and only the maintainer may post to another repository. $test_repositories"
 }
 
 # check_gh <the words before the command's name, such as GH_REPO=owner/name>...
