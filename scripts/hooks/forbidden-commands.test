@@ -276,6 +276,14 @@ releases=(
   'gh api repos/{owner}/{repo}/git/refs -f ref=refs/tags/v1.0.0 -f sha=0123abc'
   'gh api -X PATCH repos/{owner}/{repo}/git/refs/tags/v1.0.0 -f sha=0123abc -F force=true'
   'gh api graphql -f query="mutation { createRef(input: {repositoryId: \"R_1\", name: \"refs/tags/v1.0.0\", oid: \"0123abc\"}) { clientMutationId } }"'
+  # gh reads -X and -f after other short flags in one word, as split_flag_word in helpers.bash does. Its -i takes no
+  # value.
+  'gh api -i -X DELETE repos/{owner}/{repo}/releases/123'
+  'gh api -iX DELETE repos/{owner}/{repo}/releases/123'
+  'gh api -iXDELETE repos/{owner}/{repo}/releases/123'
+  'gh api -i -f tag_name=v1.0.0 repos/{owner}/{repo}/releases'
+  'gh api -if tag_name=v1.0.0 repos/{owner}/{repo}/releases'
+  'gh api -iftag_name=v1.0.0 repos/{owner}/{repo}/releases'
 )
 for command in "${releases[@]}"; do
   expect_from abc123 "" "$command" 2 "$publishes_release"
@@ -303,6 +311,8 @@ not_releases=(
   'gh release edit v1.0.0 --draft=true'
   'gh release upload v1.0.0 app.tar'
   'gh api repos/{owner}/{repo}/releases'
+  'gh api -iX GET repos/{owner}/{repo}/releases/123'
+  'gh api -iq .tag_name repos/{owner}/{repo}/releases/123'
   'gh api -X POST repos/{owner}/{repo}/releases/generate-notes -f tag_name=v1.0.0'
   'gh api repos/{owner}/{repo}/git/refs/tags/v1.0.0'
   'gh api repos/{owner}/{repo}/git/refs -f ref=refs/heads/fix-12 -f sha=0123abc'
