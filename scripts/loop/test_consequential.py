@@ -14,7 +14,15 @@ import test_paths
 SCRIPT = Path(__file__).with_name("consequential")
 # The script's file name has no .py, so the tests load it by its path.
 consequential = types.ModuleType("consequential")
+consequential.__file__ = str(SCRIPT)
 importlib.machinery.SourceFileLoader("consequential", str(SCRIPT)).exec_module(consequential)
+
+
+class ReadPatternsTest(unittest.TestCase):
+    def test_reads_each_line_but_the_comments(self) -> None:
+        path = Path(self.enterContext(tempfile.TemporaryDirectory())) / "consequential-paths"
+        path.write_text("# The rules\nAGENTS.md\n# The scripts\nscripts/*\n")
+        self.assertEqual(consequential.read_patterns(path), ("AGENTS.md", "scripts/*"))
 
 
 class ConsequentialFilesTest(unittest.TestCase):

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Blocks opening a pull request with gh pr create, or its alias gh pr new, when the title job in
 # .github/workflows/pr-title.yml would fail on it: when scripts/check-title fails on its title, or
-# scripts/check-pull-request on its title, body and commits. The message gives the scripts' errors.
+# scripts/check-pull-request on its title, body and commits. The message gives the scripts' errors. It also blocks a
+# pull request that isn't a draft and changes a file that scripts/consequential-paths lists, because a reviewer reads
+# that change before it merges, and the after-tool hook turns on auto-merge for every pull request that isn't a draft.
 # - The hook reads the title from --title, and the body as read_body in helpers.bash reads it, as the command writes
 #   them, without running $( ) or filling in variables. It blocks a command that gives no title or no body, such as
 #   one with --fill.
@@ -12,8 +14,8 @@
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 
-# The folder of scripts/check-title and scripts/check-pull-request, as an absolute path, because the hook changes
-# to the folder that the agent works in.
+# The folder of scripts/check-title, scripts/check-pull-request and scripts/consequential-paths, as an absolute path,
+# because the hook changes to the folder that the agent works in.
 scripts_folder=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
 
 no_title="Blocked: the command gives no title, so this hook can't check it. Give the title with --title."
@@ -37,8 +39,29 @@ find_commits() {
   head_commit=$(git rev-parse --verify --quiet "$head_ref^{commit}") || return 1
 }
 
+# Prints each file that the pull request changes and scripts/consequential-paths lists, one to a line.
+consequential_files() {
+  local pattern file
+  local -a patterns=()
+  while IFS= read -r pattern; do
+    if [[ $pattern != '#'* ]]; then
+      patterns+=("$pattern")
+    fi
+  done <"$scripts_folder/consequential-paths"
+  # --no-renames lists a renamed file by its old path too, as scripts/loop/consequential does.
+  git diff --name-only --no-renames -z "$base_commit...$head_commit" | while IFS= read -r -d '' file; do
+    for pattern in "${patterns[@]}"; do
+      # shellcheck disable=SC2053 # The pattern stays unquoted, so that its * matches any characters.
+      if [[ $file == $pattern ]]; then
+        printf '%s\n' "$file"
+        break
+      fi
+    done
+  done
+}
+
 check_gh_pr_create() {
-  local problems="" output message
+  local problems="" output message files
   if ! opens_pull_request; then
     return 0
   fi
@@ -48,6 +71,12 @@ check_gh_pr_create() {
   read_body "the pull request's body"
   if ! find_commits; then
     return 0
+  fi
+  if [[ -z $pr_is_draft ]]; then
+    files=$(consequential_files)
+    if [[ -n $files ]]; then
+      block "Blocked: this pull request changes files that a reviewer reads before the change merges: ${files//$'\n'/, }. Run gh pr create again with --draft, so that it waits for the review, and say in your report that it's a draft."
+    fi
   fi
   # The subshells drop the trap, which would otherwise turn every exit code of the scripts into 1.
   if ! output=$(trap - ERR && TITLE=$pr_title "$scripts_folder/check-title" 2>&1); then

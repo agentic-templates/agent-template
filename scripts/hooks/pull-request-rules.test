@@ -39,6 +39,12 @@ blocked() {
   printf '%s\n' "Blocked: the checks on pull requests in CI would fail on this one:" "$@" "Fix each problem, and run gh pr create again."
 }
 
+# Prints the message that blocks a pull request that changes files that scripts/consequential-paths lists, and isn't a
+# draft: draft_needed <the files, separated by commas>
+draft_needed() {
+  printf '%s\n' "Blocked: this pull request changes files that a reviewer reads before the change merges: $1. Run gh pr create again with --draft, so that it waits for the review, and say in your report that it's a draft."
+}
+
 # Makes a folder the one that the agent works in. Cursor doesn't send that folder, so the hook uses its own,
 # which is this script's: work_in <folder>
 work_in() {
@@ -156,6 +162,42 @@ expect_allow Bash "gh pr create --fill --dry-run"
 expect_allow Bash "gh pr create --help"
 expect_allow Bash "gh pr view 7 --json title"
 expect_allow Bash "echo gh pr create --fill"
+
+# Branches that change files that scripts/consequential-paths lists, which open only as drafts: rules changes some
+# of the rules and README.md, and moved moves scripts/configure-github away. A renamed file counts by its old path.
+git switch --quiet -c rules main
+mkdir -p docs src/app
+for file in AGENTS.md README.md docs/code.md src/app/AGENTS.md; do
+  echo "Rules" >"$file"
+done
+git add --all
+git commit --quiet -m "docs: write the rules"
+record_pass
+rules_need_draft=$(draft_needed "AGENTS.md, docs/code.md, src/app/AGENTS.md")
+expect_block Bash "gh pr create --title '$title' --body-file ../body.md" "$rules_need_draft"
+expect_block Bash "gh pr new --title '$title' --body-file ../body.md" "$rules_need_draft"
+expect_block Bash "gh pr create --draft=false --title '$title' --body-file ../body.md" "$rules_need_draft"
+expect_block Bash "gh pr create --draft --title '$title' --body-file ../body.md --draft=false" "$rules_need_draft"
+expect_allow Bash "gh pr create --draft --title '$title' --body-file ../body.md"
+expect_allow Bash "gh pr create -d --title '$title' --body-file ../body.md"
+expect_allow Bash "gh pr new --title '$title' --body-file ../body.md --draft=true"
+git switch --quiet -c moved main
+mkdir tools
+git mv scripts/configure-github tools/configure-github
+git commit --quiet -m "refactor: move the settings script"
+record_pass
+expect_block Bash "gh pr create --title '$title' --body-file ../body.md" "$(draft_needed scripts/configure-github)"
+
+# A branch whose paths look like listed ones but aren't, which opens without --draft
+git switch --quiet -c look-alikes main
+mkdir -p src/scripts
+for file in src/scripts/check src/xAGENTS.md AGENTS.md.old; do
+  echo "Notes" >"$file"
+done
+git add --all
+git commit --quiet -m "feat: add the notes"
+record_pass
+expect_allow Bash "gh pr create --title '$title' --body-file ../body.md"
 
 # A branch from a main that has moved on since the clone last fetched it. The commit on main that the clone hasn't
 # fetched changes scripts/configure-github and has a Co-authored-by trailer, and it's no part of the pull request.

@@ -432,7 +432,8 @@ pr_create_flags_with_value=" -a --assignee --attach -B --base -b --body -F --bod
 # Succeeds if command_words opens a pull request with gh pr create, or its alias gh pr new, rather than show the
 # command's help or do a dry run. It sets pr_base, pr_head and pr_title to the values of --base, --head and --title,
 # or to empty when the command doesn't give the flag, and pr_has_title to yes when it gives --title, whose value can
-# be empty. It also records expansion syntax in the title and body, and sets the body source for read_body.
+# be empty. It sets pr_is_draft to yes when the command opens a draft. It also records expansion syntax in the title
+# and body, and sets the body source for read_body.
 # The word after a flag that takes a value is that value, even if it starts with a dash.
 opens_pull_request() {
   local i word flag value
@@ -442,7 +443,8 @@ opens_pull_request() {
   if [[ ${command_words[2]:-} != create && ${command_words[2]:-} != new ]]; then
     return 1
   fi
-  pr_base="" pr_head="" pr_title="" pr_has_title="" pr_title_may_expand="" body_source="" body_word="" body_file="" body_may_expand=""
+  pr_base="" pr_head="" pr_title="" pr_has_title="" pr_title_may_expand="" pr_is_draft=""
+  body_source="" body_word="" body_file="" body_may_expand=""
   for ((i = 3; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
     case $word in
@@ -467,6 +469,13 @@ opens_pull_request() {
       -t | --title) pr_title=$value pr_has_title=yes pr_title_may_expand=${command_word_may_expand[i]:-} ;;
       -b | --body) body_source=text body_word=$value body_may_expand=${command_word_may_expand[i]:-} ;;
       -F | --body-file) body_source=file body_file=$value ;;
+      -d | --draft)
+        # gh reads the value of --draft=<value> as Go's strconv.ParseBool does, so --draft=false opens no draft.
+        case $value in
+          "" | 1 | t | T | true | TRUE | True) pr_is_draft=yes ;;
+          *) pr_is_draft="" ;;
+        esac
+        ;;
     esac
   done
 }

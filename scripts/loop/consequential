@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script --quiet
 """Lists the files of a change that a reviewer reads before the change merges: the rules, the scripts and the files
-that keep agents safe, such as the hooks, the settings and the checks.
+that keep agents safe, such as the hooks, the settings and the checks. scripts/consequential-paths holds their paths.
 
 RANGE is a git revision range, and it is origin/main...HEAD by default. When RANGE ends at HEAD, or names a single
 commit, the change includes the changes that aren't committed yet and the new files that git doesn't ignore. A renamed
@@ -17,23 +17,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-# A mistake in one of these files can let a secret out, weaken a check, or change the rules that every later change
-# follows. In a pattern, * matches any characters, / too.
-CONSEQUENTIAL_PATTERNS = (
-    # The rules
-    "AGENTS.md",
-    "*/AGENTS.md",
-    "docs/*",
-    # The files that keep agents safe, and the files that decide what git ignores and what scripts/check runs
-    ".claude/*",
-    ".codex/*",
-    ".github/workflows/*",
-    "scripts/*",
-    ".gitignore",
-    ".python-version",
-    "pyproject.toml",
-    "uv.lock",
-)
+
+def read_patterns(path: Path) -> tuple[str, ...]:
+    """The lines of a file like scripts/consequential-paths that aren't comments."""
+    return tuple(line for line in path.read_text(encoding="utf-8").splitlines() if not line.startswith("#"))
+
+
+# The patterns of the files that a reviewer reads, from the file that the hooks read too.
+CONSEQUENTIAL_PATTERNS = read_patterns(Path(__file__).resolve().parents[1] / "consequential-paths")
 DEFAULT_RANGE = "origin/main...HEAD"
 
 
