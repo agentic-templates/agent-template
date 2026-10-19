@@ -177,7 +177,6 @@ expect_gh_call 'gh pr close -R jtmpl/other 7' "pr view 7 --repo jtmpl/other --js
 expect_repository_flags 2 "Blocked: pull request 7 $from_dependabot" pr close '7'
 for repository in '-R jtmpl/other' '--repo jtmpl/other' '--repo=jtmpl/other'; do
   expect_gh_call "gh pr $repository close 7" "pr view 7 --repo jtmpl/other --json author"
-  expect_gh_call "gh pr close $repository 7" "pr view 7 --repo jtmpl/other --json author"
 done
 expect_allow Bash 'gh pr view 7'
 expect_allow Bash 'gh pr comment 7 --body "@dependabot rebase"'
@@ -248,7 +247,6 @@ expect_gh_call 'gh issue develop 12 -R jtmpl/other' "issue view 12 --repo jtmpl/
 expect_repository_flags 2 "${needs_triage/edit 12/edit 12 --repo jtmpl/other}" issue develop '12 --checkout'
 for repository in '-R jtmpl/other' '--repo jtmpl/other' '--repo=jtmpl/other'; do
   expect_gh_call "gh issue $repository develop 12" "issue view 12 --repo jtmpl/other --json labels"
-  expect_gh_call "gh issue develop $repository 12" "issue view 12 --repo jtmpl/other --json labels"
 done
 expect_allow Bash 'gh issue view 12'
 expect_allow Bash 'gh issue edit 12 --remove-label needs-triage'

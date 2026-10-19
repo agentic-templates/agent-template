@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Tests scripts/hooks/instruction-files.check through scripts/hooks/before-tool, with a sample input from each tool.
+# Tests scripts/hooks/instruction-files.check through scripts/hooks/before-tool.
 set -euo pipefail
 # shellcheck source=scripts/hooks/testing.bash
 source "${BASH_SOURCE[0]%/*}/testing.bash"
-every_tool=yes
 
 # The hook checks the paths against the repository it runs in, which is this one.
 root=$(cd "$hooks_folder/../.." && pwd -P)
@@ -15,8 +14,11 @@ patch_adding() {
   printf '*** Begin Patch\n*** Add File: %s\n+Rules\n*** End Patch\n' "$1"
 }
 
-# A write to a file that makes a tool skip AGENTS.md, in each tool's file-writing tool
-for path in CLAUDE.md docs/CLAUDE.md claude.md .cursorrules; do
+# A write to a file that makes a tool skip AGENTS.md, in each tool's file-writing tool, and to the other such files
+expect_block_in_each_tool Write "$root/CLAUDE.md" "Blocked: CLAUDE.md $reason"
+expect_block_in_each_tool Edit "$root/CLAUDE.md" "Blocked: CLAUDE.md $reason"
+expect_block apply_patch "$(patch_adding CLAUDE.md)" "Blocked: CLAUDE.md $reason"
+for path in docs/CLAUDE.md claude.md .cursorrules; do
   expect_block Write "$root/$path" "Blocked: $path $reason"
   expect_block Edit "$root/$path" "Blocked: $path $reason"
   expect_block apply_patch "$(patch_adding "$path")" "Blocked: $path $reason"

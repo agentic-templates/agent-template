@@ -106,50 +106,44 @@ expect_result() {
   fi
 }
 
-# Every tool's input goes through read_input in helpers.bash, so a case runs only in the first tool that sends its action,
-# unless the test file sets every_tool to yes. The tests for secret files and instruction files do, to cover each
-# tool's form of input.
-every_tool=""
-
-# Prints the tools that a case runs in: case_tools <tool name>
-case_tools() {
+# Checks that the hook blocks an action in the first tool that sends it, which is enough because every tool's input
+# goes through read_input in helpers.bash: expect_block <tool name> <command, patch or path> <message>
+expect_block() {
   local tools
   tools=$(tools_for "$1")
-  if [[ -n $every_tool ]]; then
-    echo "$tools"
-  else
-    echo "${tools%% *}"
-  fi
+  run_hook "$(sample_input "${tools%% *}" "$1" "$2")"
+  expect_result "In ${tools%% *}, the hook for $1 \"$2\"" 2 "$3"
 }
 
-# Checks that the hook blocks an action in the tools that case_tools prints:
-# expect_block <tool name> <command, patch or path> <message>
-expect_block() {
+# Checks that the hook blocks an action in each tool that sends it:
+# expect_block_in_each_tool <tool name> <command, patch or path> <message>
+expect_block_in_each_tool() {
   local tool
-  for tool in $(case_tools "$1"); do
+  for tool in $(tools_for "$1"); do
     run_hook "$(sample_input "$tool" "$1" "$2")"
     expect_result "In $tool, the hook for $1 \"$2\"" 2 "$3"
   done
 }
 
-# Checks that the hook allows an action in the tools that case_tools prints: expect_allow <tool name> <command, patch or path>
+# Checks that the hook allows an action in the first tool that sends it:
+# expect_allow <tool name> <command, patch or path>
 expect_allow() {
-  local tool
-  for tool in $(case_tools "$1"); do
-    run_hook "$(sample_input "$tool" "$1" "$2")"
-    expect_result "In $tool, the hook for $1 \"$2\"" 0 ""
-  done
+  local tools
+  tools=$(tools_for "$1")
+  run_hook "$(sample_input "${tools%% *}" "$1" "$2")"
+  expect_result "In ${tools%% *}, the hook for $1 \"$2\"" 0 ""
 }
 
-# Checks all repository flag forms on either side of a subcommand against a fixed result:
+# Checks each form of the repository flag before a subcommand against a fixed result:
 # expect_repository_flags <exit code> <message> <group> <subcommand> <remaining command words>
+# Each check moves the flag to just after the subcommand before it reads the command, with move_gh_repository_flags in
+# helpers.bash, so these cases also cover the flag in that place.
 expect_repository_flags() {
   local status=$1 message=$2 group=$3 subcommand=$4 rest=$5 repository command
   for repository in '-R jtmpl/other' '--repo jtmpl/other' '--repo=jtmpl/other'; do
-    for command in "gh $group $repository $subcommand $rest" "gh $group $subcommand $repository $rest"; do
-      run_hook "$(sample_input claude-code Bash "$command")"
-      expect_result "The hook for $command" "$status" "$message"
-    done
+    command="gh $group $repository $subcommand $rest"
+    run_hook "$(sample_input claude-code Bash "$command")"
+    expect_result "The hook for $command" "$status" "$message"
   done
 }
 
