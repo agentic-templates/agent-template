@@ -129,9 +129,14 @@ jobs:
     if: needs.changes.outputs.script_tests == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # The Docker library's image of the tag bash:3.2, which is bash 3.2.57 on Alpine 3.22.
+    # The Docker library's image of the tag bash:3.2.
     container:
       image: bash:3.2@sha256:0fd7cb8499c63a3c9345e7088a9cd83bb69f6e895e83833859aff838a0312091
+    # A container job's steps run with sh unless the job names a shell, and scripts/ci.test runs the test step with
+    # bash.
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -139,7 +144,8 @@ jobs:
     steps:
       # Alpine keeps only the newest build of each package, so a pinned version would stop installing at its next
       # update. The image's digest fixes the Alpine release that the packages come from.
-      # Some tests run scripts with PATH=/usr/bin:/bin, where macOS and Ubuntu have a bash.
+      # scripts/hooks/after-edit.test runs a hook with a PATH that has /usr/bin and /bin, where macOS and Ubuntu have a
+      # bash, and not /usr/local/bin, where the image has it.
       - name: Install git and jq, and make /bin/bash bash 3.2
         run: |
           apk add --no-cache git jq
@@ -160,8 +166,7 @@ jobs:
           PART: ${{ matrix.part }}
 
   # Runs the tests of the scripts and hooks on macOS, with its /bin/bash 3.2 and the tools that it ships, which differ
-  # from the GNU tools of Ubuntu and the BusyBox tools of the bash-3-2 job. For example, sed -i takes a backup suffix,
-  # date has no -d, stat has -f in place of -c, wc pads its counts with spaces, and mktemp -d ignores TMPDIR.
+  # from the GNU tools of Ubuntu and the BusyBox tools of the bash-3-2 job. For example, macOS's date has no -d.
   # It runs only in the merge queue, because GitHub's free plan runs at most 5 macOS jobs at once, and pull requests
   # whose checks ran at the same time waited for each other's macOS jobs. On a pull request it's skipped, so the
   # required checks don't wait for it.
