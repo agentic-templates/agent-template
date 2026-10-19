@@ -391,6 +391,12 @@ expect_block Bash 'gh api repos/jtmpl/project/hooks --input hook.json' "$securit
 expect_block Bash 'gh api --method DELETE "repos/{owner}/{repo}/rulesets/12"' "$security"
 expect_block Bash 'gh api -X DELETE "repos/{owner}/{repo}/vulnerability-alerts"' "$security"
 expect_block Bash 'gh api -X PATCH "repos/{owner}/{repo}" -f "security_and_analysis[secret_scanning][status]=disabled"' "$security"
+# gh reads -f and -F after other short flags in one word, as split_flag_word in helpers.bash does, with the field in
+# the same word or the next. Its -i takes no value.
+for field in '-i -f ' '-if ' -if -iF= -f=; do
+  expect_block Bash "gh api ${field}security_and_analysis[secret_scanning][status]=disabled -X PATCH repos/{owner}/{repo}" \
+    "$security"
+done
 expect_block Bash 'gh repo edit --enable-secret-scanning-push-protection=false' "$security"
 expect_block Bash 'gh repo edit jtmpl/project --enable-advanced-security=false' "$security"
 expect_allow Bash 'gh pr merge 5 --squash'
@@ -410,6 +416,7 @@ publishing=(
   'gh repo edit jtmpl/listed --visibility public --accept-visibility-change-consequences'
   'gh api -X PATCH repos/jtmpl/listed -F private=false'
   'gh api -X PATCH repos/jtmpl/listed --field=visibility=public'
+  'gh api -iX PATCH repos/jtmpl/listed -iF private=false'
 )
 for command in "${publishing[@]}"; do
   expect_block Bash "$command" "$(public jtmpl/listed)"
@@ -476,6 +483,7 @@ expect_block Bash 'gh issue comment https://github.com/someone/else/issues/5 --b
   "$(other_repository someone/else)"
 expect_block Bash 'gh api -X POST repos/someone/else/issues -f title=Bug -f body=Description' \
   "$(other_repository someone/else)"
+expect_block Bash 'gh api -if body=Thanks repos/someone/else/issues/5/comments' "$(other_repository someone/else)"
 expect_block Bash 'gh repo edit someone/else --description "A project"' "$(other_repository someone/else)"
 expect_block Bash 'gh repo archive someone/else --yes' "$(other_repository someone/else)"
 expect_block Bash 'gh pr comment --body Thanks https://github.com/someone/else/pull/5' "$(other_repository someone/else)"
