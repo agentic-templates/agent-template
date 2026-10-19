@@ -44,53 +44,78 @@ read_input() {
 # The part is the simple command that the check reads, unless the check gives another, such as a file's path.
 block() {
   printf '%s\n' "$1" >&2
-  # A log that can't be written, such as on a full disk, must not end the check with an error, which would allow the
-  # action.
+  # The log's errors go to /dev/null, because the agent reads the check's errors as the reason. A log that can't be
+  # written, such as on a full disk, must not end the check with an error either, because that allows the action.
   if (($# > 1)); then
-    log_block "$2" || true
+    log_block "$2" 2>/dev/null || true
   else
-    log_block ${simple_command_words[@]+"${simple_command_words[@]}"} || true
+    log_block ${simple_command_words[@]+"${simple_command_words[@]}"} 2>/dev/null || true
   fi
   exit 2
 }
 
-# The names that say that a value is a secret, in any case, as in --token, GH_TOKEN= or "Authorization: Bearer".
-secret_name='(secret|token|passw(or)?d|api[_-]?key|access[_-]?key|private[_-]?key|auth[_-]?key|credential|authorization)'
-# A secret's name and the = or colon after it, as in GH_TOKEN=, "api_key": or Authorization:
-named_secret="${secret_name}[A-Za-z0-9_.-]*[\"']?[[:blank:]]*[:=][[:blank:]]*"
-# The user and password in a URL, as in https://someone:password@example.com
-url_credentials='://[^/@[:space:]]+@'
+# The parts of a name that say that its value could be a secret, in any case. Names of other values hold them too,
+# such as --path, but a list of whole names would miss some secrets.
+secret_name='(token|key|secret|pass|pwd|pat|cookie|auth|bearer|credential)'
+# A name that holds a secret's name, then an = or a colon, as in GH_TOKEN=, "api_key": or Cookie:
+named_secret="[A-Za-z0-9_.-]*${secret_name}[A-Za-z0-9_.-]*[\"']?[[:blank:]]*[:=][[:blank:]]*"
+# The word Bearer and the spaces after it, as in "Bearer abc"
+bearer='(^|[^A-Za-z0-9_.-])bearer[[:blank:]]*'
+# A URL up to its password, and the password, which can hold a /, as in https://someone:password@example.com
+url_password='(://[^:/@[:space:]]*:)[^[:space:]]*@'
 left_out='[left out]'
 
 # Prints the words, joined by spaces, with each value that could hold a secret left out:
-# - the word after a flag named for a secret, such as --token, unless that word is a flag too
-# - the rest of a word after a secret's name, such as GH_TOKEN= or Authorization:
-# - the user and password in a URL
+# - the word after a flag whose name holds a secret's name, such as --token or --pat, or after -p, unless that word is
+#   a flag too
+# - the password in user:password after -u or --user, and in a URL
+# - the rest of a word after a name that holds a secret's name and an = or a colon, as in GH_TOKEN= or Cookie:, or
+#   after Bearer, or the next word when nothing follows them
 # Line breaks and other control characters become spaces, so that the words take one line:
 # words_without_secrets <word>...
 words_without_secrets() {
-  local word text="" is_secret_flag follows_secret_flag=""
+  local word original follows="" leaves_out_next
+  local -a kept=()
   shopt -s nocasematch
-  for word in "$@"; do
-    is_secret_flag=""
-    if [[ $word == -* && $word != *=* && $word =~ $secret_name ]]; then
-      is_secret_flag=yes
-    fi
-    if [[ -n $follows_secret_flag && $word != -* ]]; then
+  for original in "$@"; do
+    word=$original
+    if [[ $follows == word && $word != -* ]]; then
       word=$left_out
+    elif [[ $follows == password && $word == *:* ]]; then
+      word=${word%%:*}:$left_out
     fi
-    if [[ $word =~ $url_credentials ]]; then
-      word=${word/"${BASH_REMATCH[0]}"/"://$left_out@"}
+    if [[ $word =~ $url_password ]]; then
+      word=${word/"${BASH_REMATCH[0]}"/"${BASH_REMATCH[1]}$left_out@"}
     fi
     if [[ $word =~ $named_secret ]]; then
-      word=${word%%"${BASH_REMATCH[0]}"*}${BASH_REMATCH[0]}$left_out
+      leave_out_after "${BASH_REMATCH[0]}"
+    elif [[ $word =~ $bearer ]]; then
+      leave_out_after "${BASH_REMATCH[0]}"
     fi
-    follows_secret_flag=$is_secret_flag
-    text+=" $word"
+    kept+=("$word")
+
+    leaves_out_next=""
+    if [[ $original == -p || ($original == -* && $original != *=* && $original =~ $secret_name) ]]; then
+      leaves_out_next=word
+    elif [[ $original =~ ${named_secret}$ || $original =~ ${bearer}$ ]]; then
+      leaves_out_next=word
+    elif [[ $original == -u || $original == --user ]]; then
+      leaves_out_next=password
+    fi
+    follows=$leaves_out_next
   done
   shopt -u nocasematch
-  text=${text# }
-  printf '%s\n' "${text//[[:cntrl:]]/ }"
+  # tr, because bash 3.2 takes minutes to replace the characters in a text of 60 KB with line breaks.
+  printf '%s' "${kept[*]}" | tr '[:cntrl:]' ' '
+}
+
+# Leaves out the text in word after the first time that a part appears in it, unless nothing follows the part, because
+# then the value is the next word: leave_out_after <part>
+leave_out_after() {
+  local before=${word%%"$1"*}
+  if ((${#before} + ${#1} < ${#word})); then
+    word=$before$1$left_out
+  fi
 }
 
 # Adds a line to blocks.log in the loop's folder of this hook's repository, which is the one whose rules blocked the
@@ -98,21 +123,19 @@ words_without_secrets() {
 # The line holds the time, the check's file name and the words, with the values that could hold a secret left out, so
 # that its reader can tell a real block from a false alarm: log_block <word>...
 log_block() {
-  local log=${HOOK_BLOCK_LOG:-} git_folders shared_git_folder checkout line words
+  local log=${HOOK_BLOCK_LOG:-} git_folders shared_git_folder checkout line
   if [[ -z $log ]]; then
-    git_folders=$(git -C "$hooks_folder" rev-parse --path-format=absolute --git-common-dir --show-toplevel 2>/dev/null) || return 0
+    git_folders=$(git -C "$hooks_folder" rev-parse --path-format=absolute --git-common-dir --show-toplevel) || return 0
     shared_git_folder=${git_folders%%$'\n'*}
     checkout=${git_folders#*$'\n'}
     log=$(loop_folder "$shared_git_folder" "$checkout")/blocks.log
-    mkdir -p "${log%/*}" 2>/dev/null || return 0
+    mkdir -p "${log%/*}" || return 0
   fi
   line="$(date -u +%Y-%m-%dT%H:%M:%SZ) ${0##*/}"
-  words=$(words_without_secrets "$@")
-  if [[ -n $words ]]; then
-    line+=" $words"
+  if (($# > 0)); then
+    line+=" $(words_without_secrets "$@")"
   fi
-  # Any error goes to /dev/null, because the check's errors become the reason that the agent reads.
-  { printf '%s\n' "$line" >>"$log"; } 2>/dev/null
+  printf '%s\n' "$line" >>"$log"
 }
 
 # Sets the array command_words to a simple command's words from the command's name on, without the sudo,
