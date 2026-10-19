@@ -18,6 +18,7 @@ from typing import IO, Any
 from unittest import mock
 
 import heavy_log
+import paths
 import room
 from machine import CpuTicks, CpuTicksError
 from test_room import reading
@@ -90,7 +91,7 @@ class RunHeavyTest(unittest.TestCase):
         for patcher in patchers:
             patcher.start()
             self.addCleanup(patcher.stop)
-        for name in ("CI", run_heavy.HEAVY_VARIABLE):
+        for name in ("CI", run_heavy.HEAVY_VARIABLE, paths.CODEX_SANDBOX_VARIABLE):
             os.environ.pop(name, None)
         # A warning comes once in a process, and the tests share one.
         heavy_log.warn.cache_clear()
@@ -364,6 +365,20 @@ class AtOnceTest(RunHeavyTest):
         )
         self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "ci\n", ""))
         self.assertEqual(self.log(), [])
+
+    def test_runs_every_command_at_once_in_codex_sandbox_without_using_the_loop_folder(self) -> None:
+        # The loop folder is in a file, so each read or write there fails.
+        file = self.root / "file"
+        file.write_text("")
+        done = subprocess.run(
+            [PYTHON, str(RUN_HEAVY), "bash", "-c", "echo ran"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, paths.CODEX_SANDBOX_VARIABLE: "1", "LOOP_DIR": str(file / "loop")},
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "ran\n", ""))
 
     def test_says_when_it_cannot_run_a_command_at_once(self) -> None:
         missing = str(self.root / "missing")

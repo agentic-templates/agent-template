@@ -1,5 +1,4 @@
-"""Reads the log of the heavy commands that scripts/loop/run-heavy runs, which scripts/loop/report reads too, and names
-the files in the loop folder that run-heavy writes."""
+"""Reads the log of the heavy commands that scripts/loop/run-heavy runs, which scripts/loop/report reads too."""
 
 import functools
 import json
@@ -8,9 +7,6 @@ from pathlib import Path
 from typing import Any
 
 NAME = "heavy.jsonl"
-# Holds the line of commands, its lock, and a lock file for each command that waits or runs. The process of a command
-# holds its lock file until it ends, so the scheduler drops the command once the lock is free, even after a crash.
-FOLDER = "heavy"
 
 
 def read(log: Path) -> list[dict[str, Any]]:

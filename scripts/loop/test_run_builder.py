@@ -67,6 +67,9 @@ sys.exit(answer.get("status", 0))
 
 # The stand-in for uv runs the real uv for each call but uv sync, such as for scripts/leak-scan, which uv runs.
 REAL_UV = shutil.which("uv")
+# A project without packages, so that the real uv installs it without the network
+PROJECT = '[project]\nname = "project"\nversion = "0"\nrequires-python = ">=3.12"\n'
+PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}\n"
 GITHUB_URL = "https://github.com/owner/repo.git"
 BRANCH = "12-fix-the-importer"
 ISSUE = {"number": 12, "title": "Fix the importer", "body": "It drops rows.", "labels": [{"name": "bug"}]}
@@ -112,6 +115,18 @@ def git(*arguments: str, folder: Path) -> str:
         check=True,
     )
     return done.stdout.strip()
+
+
+@functools.cache
+def uv_lock(pyproject: str) -> str:
+    """The uv.lock that the real uv makes for a project without packages."""
+    with tempfile.TemporaryDirectory() as folder:
+        Path(folder, "pyproject.toml").write_text(pyproject)
+        Path(folder, ".python-version").write_text(PYTHON_VERSION)
+        environment = {**os.environ, "UV_CACHE_DIR": str(Path(folder, "cache")), "UV_OFFLINE": "1"}
+        assert REAL_UV
+        subprocess.run([REAL_UV, "lock", "--quiet"], cwd=folder, env=environment, check=True)
+        return Path(folder, "uv.lock").read_text()
 
 
 @functools.cache
@@ -588,15 +603,9 @@ class CodexTest(RunBuilderTest):
         self.assertRegex(printed, rf"^issue 12 \| codex work \| pull request #7 \| [0-9.]+ min \| report {report}\n$")
         [call] = self.calls("codex")
         brief = (self.run_folder() / "brief.md").read_text()
-        writable = json.dumps([str(self.loop / "heavy"), str(self.loop / "heavy.jsonl")])
-        command = [
-            "exec",
-            "--sandbox",
-            "workspace-write",
-            "--config",
-            f"sandbox_workspace_write.writable_roots={writable}",
-        ]
-        command += ["--cd", str(self.worktree), "--json", "--output-last-message", str(report)]
+        # The command adds no folder that the sandbox can write, such as one in the loop folder.
+        command = ["exec", "--sandbox", "workspace-write", "--cd", str(self.worktree), "--json"]
+        command += ["--output-last-message", str(report)]
         self.assertEqual(call["args"], [*command, brief])
         self.assertIn("so don't run git or gh.", brief)
         self.assertIn("Run scripts/check, and fix each failure that your change causes.", brief)
@@ -612,17 +621,22 @@ class CodexTest(RunBuilderTest):
         self.assertEqual(self.hooks_that_ran(), list(GIT_HOOKS))
         self.assertFalse(self.worktree.exists())
 
-    def test_installs_the_packages_of_the_worktree_into_a_uv_cache_of_its_own_before_codex_starts(self) -> None:
+    def test_fills_a_uv_cache_of_its_own_from_the_main_checkout_before_codex_starts(self) -> None:
         with mock.patch.dict(os.environ, {"GH_TOKEN": "a", "UV_CACHE_DIR": str(self.root / "shared-cache")}):
             status, _, errors = self.run_builder("--tool", "codex")
         self.assertEqual((status, errors), (0, ""))
         [sync] = self.calls("uv", "sync")
         [codex] = self.calls("codex")
-        self.assertEqual((sync["args"], sync["cwd"]), (["sync", "--locked", "--no-build"], str(self.worktree)))
+        options = ["--locked", "--no-build", "--no-install-project", "--no-install-workspace"]
+        self.assertEqual((sync["args"], sync["cwd"]), (["sync", *options], str(self.repo)))
         self.assertNotIn("GH_TOKEN", sync["env"])
         self.assertEqual(sync["env"]["UV_CACHE_DIR"], codex["env"]["UV_CACHE_DIR"])
         self.assertNotEqual(codex["env"]["UV_CACHE_DIR"], str(self.root / "shared-cache"))
         self.assertFalse(Path(codex["env"]["UV_CACHE_DIR"]).exists())
+        installed = Path(sync["env"]["UV_PROJECT_ENVIRONMENT"])
+        self.assertFalse(installed.is_relative_to(self.repo))
+        self.assertFalse(installed.exists())
+        self.assertNotIn("UV_PROJECT_ENVIRONMENT", codex["env"])
         log = (self.standins / "calls.jsonl").read_text().splitlines()
         order = [(call["tool"], call["start"]) for call in map(json.loads, log)]
         self.assertLess(order.index(("uv", "sync")), order.index(("codex", "")))
@@ -632,8 +646,8 @@ class CodexTest(RunBuilderTest):
         status, printed, _ = self.run_builder("--tool", "codex")
         self.assertEqual(status, 1)
         self.assertIn(
-            "| failed: uv sync failed in the worktree, so codex didn't start: error: The lockfile at `uv.lock` needs to "
-            "be updated. |",
+            "| failed: uv sync failed in the main checkout, so codex didn't start: error: The lockfile at `uv.lock` "
+            "needs to be updated. |",
             printed,
         )
         self.assertEqual(self.calls("codex"), [])
@@ -694,6 +708,63 @@ class CodexTest(RunBuilderTest):
         self.assertEqual(status, 0)
         self.assertIn("| pull request #7, auto-merge off: main no longer requires the title job,", printed)
         self.assertEqual(self.calls("gh", "pr merge"), [])
+
+
+class UvCacheTest(RunBuilderTest):
+    """A Codex run whose uv sync is the real uv without the network, in a main checkout that holds a project without
+    packages. An earlier run left the project on the branch with a file that makes uv run code when it syncs the
+    worktree. The code writes the file ran."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        pyproject = PROJECT + "[tool.uv]\npackage = false\n"
+        self.project = {"pyproject.toml": pyproject, "uv.lock": uv_lock(pyproject), ".python-version": PYTHON_VERSION}
+        for name, content in self.project.items():
+            (self.repo / name).write_text(content)
+        self.answer("uv", "sync", {"exec": REAL_UV})
+        environment = mock.patch.dict(os.environ, {"UV_OFFLINE": "1", "UV_PYTHON_DOWNLOADS": "never"})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.ran = self.root / "ran"
+        self.script = f"#!/bin/sh\ntouch '{self.ran}'\nexit 1\n"
+
+    def push_earlier_run(self, files: dict[str, str]) -> None:
+        """Pushes the files to the issue's branch, as the builder of an earlier run could. A file that starts with #!
+        can run."""
+        clone = self.root / "earlier-run"
+        self.git("clone", "--quiet", "--branch", BRANCH, str(self.origin), str(clone))
+        for name, content in files.items():
+            path = clone / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+            if content.startswith("#!"):
+                path.chmod(0o755)
+        self.git("add", "--all", folder=clone)
+        self.git("commit", "--quiet", "--message", "chore: an earlier run", folder=clone)
+        self.git("push", "--quiet", "origin", BRANCH, folder=clone)
+
+    def assert_ran_nothing_of_the_worktree(self) -> None:
+        status, printed, errors = self.run_builder("--tool", "codex")
+        self.assertEqual((status, errors), (0, ""), printed)
+        self.assertEqual(len(self.calls("codex")), 1)
+        self.assertFalse(self.ran.exists())
+
+    def test_runs_no_build_backend_of_the_worktree(self) -> None:
+        # uv builds a project that isn't marked package = false, even with --no-build.
+        pyproject = PROJECT + '[build-system]\nrequires = []\nbuild-backend = "backend"\nbackend-path = ["."]\n'
+        backend = f"open({str(self.ran)!r}, 'w').close()\n"
+        files = {"pyproject.toml": pyproject, "uv.lock": uv_lock(pyproject), "backend.py": backend}
+        self.push_earlier_run({**self.project, **files})
+        self.assert_ran_nothing_of_the_worktree()
+
+    def test_runs_no_python_that_the_python_version_of_the_worktree_names(self) -> None:
+        self.push_earlier_run({**self.project, ".python-version": "./python\n", "python": self.script})
+        self.assert_ran_nothing_of_the_worktree()
+
+    def test_runs_no_python_of_a_venv_in_the_worktree(self) -> None:
+        venv = {".venv/pyvenv.cfg": f"version_info = {PYTHON_VERSION}", ".venv/bin/python": self.script}
+        self.push_earlier_run({**self.project, **venv})
+        self.assert_ran_nothing_of_the_worktree()
 
 
 class CodexPushTest(RunBuilderTest):
