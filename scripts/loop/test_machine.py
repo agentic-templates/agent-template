@@ -98,6 +98,60 @@ class LinuxMemoryTest(unittest.TestCase):
         self.assertEqual(machine.linux_memory(""), machine.Memory(None, None))
 
 
+class CpuTicksTest(unittest.TestCase):
+    def test_counts_the_time_that_waits_for_the_disk_as_idle(self) -> None:
+        # user, nice, system, idle, iowait, irq, softirq, steal, guest and guest_nice
+        stat = "cpu  100 20 30 400 500 6 7 8 90 10\ncpu0 50 10 15 200 250 3 3 4 45 5\nintr 12345\n"
+        self.assertEqual(machine.linux_cpu_ticks(stat), machine.CpuTicks(171, 1071))
+
+    def test_reads_the_ticks_of_an_older_kernel_that_gives_fewer(self) -> None:
+        self.assertEqual(machine.linux_cpu_ticks("cpu 100 20 30 400\n"), machine.CpuTicks(150, 550))
+
+    def test_gives_no_ticks_without_the_line_of_all_the_cores(self) -> None:
+        self.assertIsNone(machine.linux_cpu_ticks(""))
+        self.assertIsNone(machine.linux_cpu_ticks("intr 12345\n"))
+
+    def test_gives_the_cores_that_were_busy_between_two_readings(self) -> None:
+        earlier, later = machine.CpuTicks(1000, 5000), machine.CpuTicks(1460, 6000)
+        self.assertEqual(machine.busy_cores(earlier, later, 10), 4.6)
+
+    def test_gives_no_busy_cores_without_two_readings_in_order(self) -> None:
+        later = machine.CpuTicks(1460, 6000)
+        self.assertIsNone(machine.busy_cores(None, later, 10))
+        self.assertIsNone(machine.busy_cores(later, None, 10))
+        self.assertIsNone(machine.busy_cores(later, later, 10))
+        # The counters of macOS start again from 0 after 49 days on 10 cores.
+        self.assertIsNone(machine.busy_cores(later, machine.CpuTicks(10, 7000), 10))
+
+    def test_reads_the_ticks_of_a_linux_machine_and_says_when_proc_stat_gives_none(self) -> None:
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(sys, "platform", "linux"):
+            stat = Path(folder) / "stat"
+            with mock.patch.object(machine, "PROC_STAT", stat):
+                for text in (None, "intr 12345\n"):
+                    if text is not None:
+                        stat.write_text(text)
+                    with self.subTest(stat=text), self.assertRaises(machine.CpuTicksError) as raised:
+                        machine.read_cpu_ticks()
+                    self.assertEqual(str(raised.exception), f"can't read the machine's CPU ticks from {stat}")
+                stat.write_text("cpu 100 20 30 400\n")
+                self.assertEqual(machine.read_cpu_ticks(), machine.CpuTicks(150, 550))
+
+    def test_counts_user_system_and_nice_time_of_a_mac_as_busy(self) -> None:
+        # user, system, idle and nice, in the order of host_statistics
+        load = [100, 50, 800, 10]
+        with mock.patch.object(sys, "platform", "darwin"), mock.patch.object(machine, "host_cpu_load", lambda: load):
+            self.assertEqual(machine.read_cpu_ticks(), machine.CpuTicks(160, 960))
+
+    def test_says_when_host_statistics_gives_no_ticks(self) -> None:
+        with (
+            mock.patch.object(sys, "platform", "darwin"),
+            mock.patch.object(machine, "host_cpu_load", lambda: None),
+            self.assertRaises(machine.CpuTicksError) as raised,
+        ):
+            machine.read_cpu_ticks()
+        self.assertEqual(str(raised.exception), "can't read the machine's CPU ticks from host_statistics")
+
+
 class NvidiaGpuTest(unittest.TestCase):
     def test_takes_the_busiest_gpu_and_the_memory_of_all_as_their_own(self) -> None:
         self.assertEqual(machine.nvidia_gpu(NVIDIA_SMI), machine.Gpu(81.0, 15100 * 1024 * 1024, False))

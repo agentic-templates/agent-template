@@ -1,0 +1,447 @@
+#!/usr/bin/env -S uv run --script --quiet
+"""Runs a heavy command, such as a build or a project's tests, once the machine has room for it:
+
+  scripts/loop/run-heavy <command> [<argument>...]
+
+scripts/check, scripts/test-scripts and scripts/test-check run through it by themselves. The heavy commands of all the
+worktrees of a clone wait in one line. Each reserves the most that the same command used in its last runs on this
+machine: its cores, its memory, and on a Mac with Apple silicon its share of the GPU. A command that hasn't run yet
+reserves the most that the commands that share the most leading words with it used, the program at least, so that
+cargo test bar reserves what cargo test foo used. A command starts as soon as the machine's readings leave room for
+it, after the reservations of the commands that run and the room that the scheduler keeps free. A number that the
+command doesn't use, such as the GPU for most commands, never keeps it waiting. The readings count the cores that were
+busy, not the load, which counts the processes that wait for the disk too. A first run, of a program that no command
+in the log ran, starts once the readings show some free cores and memory, and nothing else starts until it ends, so
+that it measures what the command uses.
+
+A command starts ahead of the first in line only if the first still gets its room once the commands that run now end.
+When no heavy command runs, the first in line starts even if the machine has no room for it. A heavy command that
+another one starts runs at once, and so does every command in CI.
+
+The script adds a line to .loop/heavy.jsonl in the main checkout when a command starts to wait, when it starts, when
+a signal, such as Ctrl-C, stops it while it waits, and when it ends. Each line gives the machine's readings, as
+scripts/loop/machine.py describes them, and the cores that were busy since the reading before, or null without a
+recent one. A start line and a stop line give the seconds that the command waited, and how many of them the readings
+showed room for it, before the reservations of the commands that ran and the room that the scheduler keeps free. A
+stop line gives the readings of the command's last look for room. An end line gives the command's exit code, negative
+for a signal that ended it, its seconds, what it used, and the highest swap in use while it ran. A run that a signal
+ended doesn't count for the reservation. scripts/loop/room.py holds the scheduler's numbers, such as the room that it
+keeps free.
+"""
+
+import argparse
+import contextlib
+import datetime as dt
+import fcntl
+import json
+import os
+import resource
+import shlex
+import signal
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from types import FrameType
+from typing import Any, NamedTuple
+
+import heavy_log
+import paths
+import room
+from machine import (
+    GIGABYTE,
+    CpuTicks,
+    CpuTicksError,
+    Machine,
+    busy_cores,
+    is_apple_silicon,
+    peak_memory_bytes,
+    read_cpu_ticks,
+    read_machine,
+)
+from processes import Sampler, gpu_percent
+
+# Marks the commands that a heavy command starts, which run at once
+HEAVY_VARIABLE = "LOOP_HEAVY_COMMAND"
+# Holds the line of commands, its lock, and a lock file for each command that waits or runs. The process of a command
+# holds its lock file until it ends, so the scheduler drops the command once the lock is free, even after a crash.
+FOLDER = "heavy"
+# How often a waiting command looks for room, and a running one measures its processes
+SAMPLE_SECONDS = 2.0
+# Commands that look within this time share one reading, so that ten commands that wait read the machine once.
+READING_SECONDS = 1.0
+# The busy cores come from the CPU ticks since the reading before, unless that reading is older than this.
+LONGEST_CPU_SECONDS = 10.0
+# The exit code that a shell gives a command that it can't run
+CANNOT_RUN = 127
+
+
+class Turn(NamedTuple):
+    folder: Path
+    log: Path
+    id: str
+    command: str
+    arrived: float
+
+
+class Reading(NamedTuple):
+    machine: Machine
+    # The cores that were busy since the reading before, or None if it's too old
+    busy_cores: float | None
+
+
+class Stopped(Exception):
+    """A signal stopped the command while it waited."""
+
+    def __init__(self, number: int) -> None:
+        super().__init__(number)
+        self.number = number
+
+
+class Look(NamedTuple):
+    """A waiting command's look for room."""
+
+    at: float
+    reading: Reading
+    # Whether the readings showed room for the command, before the reservations of the commands that ran and the room
+    # that the scheduler keeps free
+    has_room: bool
+
+
+class Wait:
+    """The seconds that a command has waited, and how many of them the readings showed room for it."""
+
+    def __init__(self, arrived: float) -> None:
+        self.arrived = arrived
+        self.with_room = 0.0
+        self.last_look: Look | None = None
+
+    def look(self, look: Look) -> None:
+        self.with_room += self.with_room_since_last_look(look.at)
+        self.last_look = look
+
+    def seconds(self, ended: float, now: float) -> dict[str, float]:
+        """The fields of a start or a stop line, for a wait that ended at a time. A start can come before now, because
+        another command's look can start this one."""
+        waited = ended - self.arrived
+        with_room = min(self.with_room + self.with_room_since_last_look(now), waited)
+        return {"waited_seconds": round(waited, 1), "waited_with_room_seconds": round(with_room, 1)}
+
+    def with_room_since_last_look(self, now: float) -> float:
+        if self.last_look is None or not self.last_look.has_room:
+            return 0.0
+        return now - self.last_look.at
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="scripts/loop/run-heavy", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("command", nargs=argparse.REMAINDER, help="the command to run and its arguments")
+    command: list[str] = parser.parse_args(argv).command
+    if not command:
+        parser.error("give the command to run, as in scripts/loop/run-heavy make test")
+    if os.environ.get(HEAVY_VARIABLE) or os.environ.get("CI"):
+        return run_at_once(command)
+    loop_folder = paths.loop_dir()
+    turn = Turn(loop_folder / FOLDER, loop_folder / heavy_log.NAME, uuid.uuid4().hex, shlex.join(command), time.time())
+    turn.folder.mkdir(parents=True, exist_ok=True)
+    with holding_turn(turn):
+        try:
+            start_reading = wait_for_room(turn)
+        except Stopped as stop:
+            return 128 + stop.number
+        return run(command, turn, start_reading)
+
+
+def run_at_once(command: list[str]) -> int:
+    """Runs the command in place of this process, and makes the heavy commands that it starts run at once too."""
+    environment = {**os.environ, HEAVY_VARIABLE: os.environ.get(HEAVY_VARIABLE) or "ci"}
+    # Python ignores SIGPIPE, and a signal that a process ignores stays ignored in the program that exec starts.
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    try:
+        os.execvpe(command[0], command, environment)
+    except OSError as error:
+        return cannot_run(command, error)
+
+
+def cannot_run(command: list[str], error: OSError) -> int:
+    print(f"error: can't run {command[0]}: {error.strerror}.", file=sys.stderr)
+    return CANNOT_RUN
+
+
+@contextlib.contextmanager
+def holding_turn(turn: Turn) -> Iterator[None]:
+    """Puts the command in line, and takes it out when it ends, however it ends."""
+    lock_file = turn.folder / f"{turn.id}.lock"
+    with lock_file.open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        need = reservation(turn.command, measured_runs(turn.log))
+        entry = {"id": turn.id, "command": turn.command, "arrived": turn.arrived, "need": need, "started": None}
+        with locked_state(turn.folder) as state:
+            state["commands"].append({**entry, "using": room.NOTHING._asdict()})
+        try:
+            yield
+        finally:
+            with locked_state(turn.folder) as state:
+                state["commands"] = [other for other in state["commands"] if other["id"] != turn.id]
+            lock_file.unlink()
+
+
+def wait_for_room(turn: Turn) -> Reading:
+    """Waits until the scheduler starts the command, and returns the reading at its start. A signal that ends a
+    process, such as Ctrl-C, raises Stopped once a stop line logs the wait."""
+    wait = Wait(turn.arrived)
+    need = None
+    try:
+        with stopped_by_signals():
+            while True:
+                with locked_state(turn.folder) as state:
+                    now = time.time()
+                    now_reading = schedule(state, turn.folder, now)
+                    entry = own_entry(state, turn)
+                need = entry["need"]
+                if entry["started"] is not None:
+                    log(turn, now, "start", now_reading, need=need, **wait.seconds(entry["started"], now))
+                    return now_reading
+                if wait.last_look is None:
+                    log(turn, now, "wait", now_reading, need=need)
+                wait.look(Look(now, now_reading, room.has_room(need_in(entry), room.free_room(*now_reading))))
+                time.sleep(SAMPLE_SECONDS)
+    except Stopped:
+        if wait.last_look is not None:
+            now = time.time()
+            log(turn, now, "stop", wait.last_look.reading, need=need, **wait.seconds(now, now))
+        raise
+
+
+@contextlib.contextmanager
+def stopped_by_signals() -> Iterator[None]:
+    """Turns the signals that end a process into Stopped, so that the wait logs its end and takes the command out of
+    the line."""
+
+    def stop(number: int, _frame: FrameType | None) -> None:
+        raise Stopped(number)
+
+    with signal_handlers({number: stop for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}):
+        yield
+
+
+def schedule(state: dict[str, Any], folder: Path, now: float) -> Reading:
+    """Drops the commands whose process ended, starts each waiting command that has room, and returns the reading that
+    the decision used."""
+    state["commands"] = [entry for entry in state["commands"] if is_alive(folder / f"{entry['id']}.lock")]
+    now_reading = reading(state, folder, now)
+    commands = [command_of(entry) for entry in state["commands"]]
+    running = [command for command in commands if command.started is not None]
+    waiting = [command for command in commands if command.started is None]
+    alone = room.room_alone(room.free_room(*now_reading), running)
+    starting = room.commands_to_start(waiting, running, alone)
+    for entry in state["commands"]:
+        if entry["id"] in starting:
+            entry["started"] = now
+    return now_reading
+
+
+def is_alive(lock_file: Path) -> bool:
+    """Whether the process of a command still holds its lock file. A command whose process ended without taking it out
+    of the line, such as after a crash, leaves it free."""
+    try:
+        with lock_file.open() as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except FileNotFoundError:
+        return False
+    except BlockingIOError:
+        return True
+    lock_file.unlink()
+    return False
+
+
+def reading(state: dict[str, Any], folder: Path, now: float) -> Reading:
+    """A reading of the machine that is at most READING_SECONDS old."""
+    last = state.get("reading")
+    if last is not None and now - last["at"] < READING_SECONDS:
+        return Reading(last["machine"], last["busy_cores"])
+    machine = read_machine(folder)
+    ticks = cpu_ticks()
+    earlier = None
+    if last is not None and now - last["at"] <= LONGEST_CPU_SECONDS:
+        earlier = cpu_ticks_of(last["cpu_ticks"])
+    busy = busy_cores(earlier, ticks, machine["cores"])
+    state["reading"] = {"at": now, "machine": machine, "cpu_ticks": ticks, "busy_cores": busy}
+    return Reading(machine, busy)
+
+
+def cpu_ticks() -> CpuTicks | None:
+    """The machine's CPU ticks, or None with a warning that says what couldn't be read."""
+    try:
+        return read_cpu_ticks()
+    except CpuTicksError as error:
+        heavy_log.warn(f"{error}, so heavy commands start one at a time.")
+        return None
+
+
+def run(command: list[str], turn: Turn, start_reading: Reading) -> int:
+    """Runs the command, measures what it uses, takes it out of the line, and returns its exit code."""
+    started = time.monotonic()
+    try:
+        process = subprocess.Popen(command, env={**os.environ, HEAVY_VARIABLE: turn.id})
+    except OSError as error:
+        return cannot_run(command, error)
+    with signals_passed_to(process.pid):
+        sampler = Sampler(process.pid, is_apple_silicon(), started)
+        status, usage, highest_swap = wait_measuring(process, turn, sampler, start_reading.machine["swap_used_gb"])
+    seconds = time.monotonic() - started
+    exit_code = os.waitstatus_to_exitcode(status)
+    # Popen didn't wait for the process itself, so it would warn that the process still runs.
+    process.returncode = exit_code
+    used = {
+        "cores": round((usage.ru_utime + usage.ru_stime) / seconds, 2),
+        "memory_gb": round(max(sampler.peak_memory_bytes, peak_memory_bytes(usage)) / GIGABYTE, 2),
+        "gpu_percent": round(gpu_percent(sampler.gpu_total(), seconds), 1) if sampler.reads_gpu else None,
+    }
+    end(turn, exit_code, round(seconds, 1), used, highest_swap)
+    # A shell gives a command that a signal ended the exit code 128 plus the signal's number.
+    return exit_code if exit_code >= 0 else 128 - exit_code
+
+
+@contextlib.contextmanager
+def signals_passed_to(pid: int) -> Iterator[None]:
+    """Passes the signals that end a process on to the command, so that this process outlives it and takes it out of
+    the line. Ctrl-C reaches the command from the terminal, so this process only lets it pass."""
+
+    def pass_on(number: int, _frame: FrameType | None) -> None:
+        os.kill(pid, number)
+
+    def let_pass(_number: int, _frame: FrameType | None) -> None:
+        pass
+
+    with signal_handlers({signal.SIGTERM: pass_on, signal.SIGHUP: pass_on, signal.SIGINT: let_pass}):
+        yield
+
+
+@contextlib.contextmanager
+def signal_handlers(handlers: dict[int, Callable[[int, FrameType | None], None]]) -> Iterator[None]:
+    earlier = {number: signal.signal(number, handler) for number, handler in handlers.items()}
+    try:
+        yield
+    finally:
+        for number, handler in earlier.items():
+            signal.signal(number, handler)
+
+
+def wait_measuring(
+    process: subprocess.Popen[bytes], turn: Turn, sampler: Sampler, swap: float | None
+) -> tuple[int, resource.struct_rusage, float | None]:
+    """Waits for the command to end, and measures it while it runs. Returns its wait status, the resources that it and
+    the processes that it waited for used, and the highest swap in use."""
+    ended: list[tuple[int, int, resource.struct_rusage]] = []
+    has_ended = threading.Event()
+
+    def reap() -> None:
+        # wait4 gives the resources of this command alone, without those of the commands that measure it.
+        ended.append(os.wait4(process.pid, 0))
+        has_ended.set()
+
+    threading.Thread(target=reap, daemon=True).start()
+    while not has_ended.wait(SAMPLE_SECONDS):
+        using = sampler.sample(time.monotonic())
+        with locked_state(turn.folder) as state:
+            machine = reading(state, turn.folder, time.time()).machine
+            own_entry(state, turn)["using"] = using._asdict()
+        swap = highest(swap, machine["swap_used_gb"])
+    _, status, usage = ended[0]
+    return status, usage, swap
+
+
+def end(turn: Turn, exit_code: int, seconds: float, used: dict[str, Any], highest_swap: float | None) -> None:
+    """Takes the command out of the line, logs its end, and gives the commands that wait the reservations that this
+    run changes."""
+    with locked_state(turn.folder) as state:
+        now = time.time()
+        end_reading = reading(state, turn.folder, now)
+        state["commands"].remove(own_entry(state, turn))
+        swap = highest(highest_swap, end_reading.machine["swap_used_gb"])
+        log(turn, now, "end", end_reading, exit_code=exit_code, seconds=seconds, used=used, highest_swap_used_gb=swap)
+        runs = measured_runs(turn.log)
+        for other in state["commands"]:
+            if other["started"] is None:
+                other["need"] = reservation(other["command"], runs)
+
+
+def highest(first: float | None, second: float | None) -> float | None:
+    known = [value for value in (first, second) if value is not None]
+    return max(known) if known else None
+
+
+@contextlib.contextmanager
+def locked_state(folder: Path) -> Iterator[dict[str, Any]]:
+    """The line of commands, with the lock that lets one process change it at a time."""
+    with (folder / "lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        file = folder / "state.json"
+        state = json.loads(file.read_text()) if file.exists() else {"commands": []}
+        yield state
+        # A process that stops while it writes leaves the earlier state whole.
+        new_file = folder / "state.json.new"
+        new_file.write_text(json.dumps(state))
+        new_file.replace(file)
+
+
+def own_entry(state: dict[str, Any], turn: Turn) -> dict[str, Any]:
+    entry: dict[str, Any] = next(entry for entry in state["commands"] if entry["id"] == turn.id)
+    return entry
+
+
+def command_of(entry: dict[str, Any]) -> room.Command:
+    return room.Command(
+        id=entry["id"],
+        arrived=entry["arrived"],
+        need=need_in(entry),
+        started=entry["started"],
+        using=use_of(entry["using"]),
+    )
+
+
+def need_in(entry: dict[str, Any]) -> room.Use | None:
+    return None if entry["need"] is None else use_of(entry["need"])
+
+
+def use_of(numbers: dict[str, Any]) -> room.Use:
+    """The use in a log line or a reservation. A share of the GPU that the machine doesn't give counts as none."""
+    return room.Use(numbers["cores"], numbers["memory_gb"], numbers["gpu_percent"] or 0.0)
+
+
+def cpu_ticks_of(ticks: list[int] | None) -> CpuTicks | None:
+    return None if ticks is None else CpuTicks(*ticks)
+
+
+def as_dict(use: room.Use | None) -> dict[str, Any] | None:
+    return None if use is None else use._asdict()
+
+
+def measured_runs(log_file: Path) -> list[room.Run]:
+    """The runs that ended with an exit code, oldest first."""
+    return [
+        room.Run(shlex.split(entry["command"]), use_of(entry["used"]))
+        for entry in heavy_log.read(log_file)
+        if entry["event"] == "end" and entry["exit_code"] >= 0
+    ]
+
+
+def reservation(command: str, runs: list[room.Run]) -> dict[str, Any] | None:
+    return as_dict(room.need_of(shlex.split(command), runs))
+
+
+def log(turn: Turn, now: float, event: str, now_reading: Reading, **fields: Any) -> None:
+    at = dt.datetime.fromtimestamp(now).astimezone().isoformat(timespec="seconds")
+    line = {"at": at, "event": event, "id": turn.id, "command": turn.command, **fields, **now_reading._asdict()}
+    with turn.log.open("a") as handle:
+        handle.write(json.dumps(line) + "\n")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

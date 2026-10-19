@@ -9,6 +9,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Waits for room on the machine, as scripts/loop/run-heavy describes. run-heavy then runs this script again with
+# LOOP_HEAVY_COMMAND set. Without uv, which runs run-heavy, the script starts at once.
+if [[ -z ${LOOP_HEAVY_COMMAND:-} ]] && command -v uv >/dev/null; then
+  exec scripts/loop/run-heavy scripts/test-scripts "$@"
+fi
+
 part=1
 parts=1
 if (($# > 0)); then

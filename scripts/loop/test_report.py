@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import heavy_log
 import paths
 from test_agent_time import message_line
 from test_transcripts import START, at, call_line, command_line, prompt_line, result_line, typed_line
@@ -178,6 +179,7 @@ class EmptyPeriodTest(ReportTest):
                     "Orchestrator's share of the input tokens: none used",
                     "Hook blocks: 0",
                     "Agents' time: 0.0 min, from the transcripts of 0 agents, and 0 agents have none",
+                    "Heavy commands: none ran",
                     "Machine: no readings",
                 ],
                 "",
@@ -692,6 +694,85 @@ class BlockTest(ReportTest):
         self.assertEqual(
             self.line("Hook blocks"),
             "Hook blocks: 4 | forbidden-commands.check 2 | posted-text.check 1 | secret-files.check 1",
+        )
+
+
+def heavy_entry(minute: float, event: str, command: str = "scripts/check", **fields: Any) -> dict[str, Any]:
+    return {"at": at(minute), "event": event, "id": f"{command}-{minute}", "command": command, **fields}
+
+
+def heavy_end(minute: float, seconds: float, cores: float, memory_gb: float, swap: float | None) -> dict[str, Any]:
+    used = {"cores": cores, "memory_gb": memory_gb, "gpu_percent": None}
+    return heavy_entry(minute, "end", exit_code=0, seconds=seconds, used=used, highest_swap_used_gb=swap)
+
+
+class HeavyTest(ReportTest):
+    def log_heavy(self, *entries: dict[str, Any]) -> None:
+        (self.loop / "heavy.jsonl").write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+
+    def test_gives_the_runs_of_each_command_their_waits_and_the_swap_while_they_ran(self) -> None:
+        self.log_heavy(
+            heavy_entry(-5, "start", waited_seconds=600, waited_with_room_seconds=600),
+            heavy_end(-4, 90, 3.0, 1.0, 9.0),
+            heavy_entry(1, "start", waited_seconds=0, waited_with_room_seconds=0),
+            heavy_entry(2, "wait"),
+            heavy_entry(4, "start", waited_seconds=120, waited_with_room_seconds=30),
+            heavy_entry(5, "wait"),
+            heavy_entry(8, "start", waited_seconds=240, waited_with_room_seconds=60),
+            heavy_end(3, 120, 3.4, 1.2, 0.5),
+            heavy_end(6, 60, 2.0, 0.8, None),
+            heavy_end(10, 90, 3.0, 1.0, 2.5),
+            heavy_entry(9, "start", "make test", waited_seconds=0, waited_with_room_seconds=0),
+        )
+        status, lines, errors = self.run_report()
+        self.assertEqual(status, 0, errors)
+        heavy = [line for line in lines if "heavy" in line.lower()]
+        self.assertEqual(
+            heavy,
+            [
+                (
+                    "Heavy command make test: 1 started, 0 ended | 0 waited, 0.0 min in all, 0.0 min of it while the "
+                    "readings showed room"
+                ),
+                (
+                    "Heavy command scripts/check: 3 started, 3 ended, median 1.5 min, 3.0 cores and 1.0 GB | 2 waited, "
+                    "6.0 min in all, 1.5 min of it while the readings showed room"
+                ),
+                "Swap while heavy commands ran, the highest in each run, GB: median 1.5, highest 2.5",
+            ],
+        )
+
+    def test_says_when_no_run_gave_the_swap(self) -> None:
+        self.log_heavy(
+            heavy_entry(1, "start", waited_seconds=0, waited_with_room_seconds=0), heavy_end(2, 30, 1.0, 1.0, None)
+        )
+        self.assertEqual(self.line("Swap while heavy"), "Swap while heavy commands ran: no readings")
+
+    def test_counts_the_wait_of_a_command_that_a_signal_stopped_while_it_waited(self) -> None:
+        self.log_heavy(heavy_entry(1, "wait"), heavy_entry(3, "stop", waited_seconds=120, waited_with_room_seconds=90))
+        self.assertEqual(
+            self.line("Heavy command scripts/check"),
+            (
+                "Heavy command scripts/check: 0 started, 0 ended | 1 waited, 2.0 min in all, 1.5 min of it while the "
+                "readings showed room"
+            ),
+        )
+
+    def test_leaves_out_a_line_that_is_not_json_with_a_warning(self) -> None:
+        start = heavy_entry(1, "start", waited_seconds=60, waited_with_room_seconds=0)
+        log = self.loop / "heavy.jsonl"
+        log.write_text(json.dumps(start) + "\n" + '{"at": "2026-10-11T14:02:00+00:00", "event": "en\n')
+        # The warning comes once in a process, and the tests share one.
+        heavy_log.warn.cache_clear()
+        status, lines, errors = self.run_report()
+        self.assertEqual(status, 0, errors)
+        self.assertIn(
+            "Heavy command scripts/check: 1 started, 0 ended | 1 waited, 1.0 min in all, 0.0 min of it while the "
+            "readings showed room",
+            lines,
+        )
+        self.assertEqual(
+            errors, f"warning: line 2 of {log} isn't JSON, so it doesn't count. Delete the line to end this warning.\n"
         )
 
 
