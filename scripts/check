@@ -419,7 +419,7 @@ if [[ -z "${CHECK_UNDER_TEST:-}" ]]; then
   # The copies that scripts/test-check makes skip these checks, because the copies hold only the tracked files.
   # Keep this comment after setup, because a case in scripts/test-check finds the place by it.
 
-  # The Python files are the tracked files that is_python_file accepts. pyproject.toml holds the tools' settings.
+  # The Python files are the tracked and the untracked, not ignored files that is_python_file accepts. pyproject.toml holds the tools' settings.
   # uv runs the tools with the versions in uv.lock, and --locked stops it when uv.lock doesn't match pyproject.toml.
   if has uv https://docs.astral.sh/uv/getting-started/installation/; then
     # shellcheck source=scripts/python-files
@@ -430,7 +430,7 @@ if [[ -z "${CHECK_UNDER_TEST:-}" ]]; then
       if [[ -f $file ]] && is_python_file "$file"; then
         python_files+=("$file")
       fi
-    done < <(git ls-files -z)
+    done < <(git ls-files -z --cached --others --exclude-standard)
     if ((${#python_files[@]} > 0)); then
       uv run --locked --quiet ruff format --check --quiet -- "${python_files[@]}"
       uv run --locked --quiet ruff check --quiet -- "${python_files[@]}"
