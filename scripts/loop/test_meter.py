@@ -10,6 +10,7 @@ import sys
 import tempfile
 import types
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -92,11 +93,12 @@ def reading(at: dt.datetime, used: float, resets: str | None = "2026-10-18T04:30
 
 
 class FakeClock:
-    """The clock for the meter's waits: a sleep moves the time on at once."""
+    """The clock for the meter's waits: a sleep moves the time on at once, and then runs each alarm whose time came."""
 
     def __init__(self) -> None:
         self.time = NOW
         self.sleeps: list[float] = []
+        self.alarms: list[tuple[dt.datetime, Callable[[], None]]] = []
 
     def now(self) -> dt.datetime:
         return self.time
@@ -104,6 +106,9 @@ class FakeClock:
     def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
         self.time += dt.timedelta(seconds=seconds)
+        for alarm in [alarm for alarm in self.alarms if alarm[0] <= self.time]:
+            self.alarms.remove(alarm)
+            alarm[1]()
 
 
 class MeterTest(unittest.TestCase):
@@ -315,7 +320,7 @@ class AccountLineTest(MeterTest):
             self.assertTrue(self.run_meter()[1][0].endswith(f" | {advice}"), (since_now, advice))
         self.answer("claude", [usage_output(94, "5:12am")])
         self.assertTrue(self.run_meter("--wake")[1][0].endswith(" | stop"))
-        self.assertEqual(self.clock.sleeps, [3000])
+        self.assertEqual(sum(self.clock.sleeps), 3000)
         self.clock.time = dt.datetime(2026, 10, 18, 5, 13, tzinfo=NEW_YORK)
         self.answer("claude", [usage_output(1, "10:12am")])
         self.assertTrue(self.run_meter()[1][0].endswith(" | go"))
@@ -458,7 +463,7 @@ class AccountsTest(MeterTest):
     def test_reads_each_account_in_the_file(self) -> None:
         self.accounts({"name": "one", "tool": "claude"}, {"name": "two", "tool": "claude"})
         status, lines, _ = self.run_meter()
-        self.assertEqual((status, [line.split(" ")[0] for line in lines]), (0, ["one", "two", "machine"]))
+        self.assertEqual((status, [line.split(" ")[0] for line in lines]), (0, ["one", "two", "agents", "machine"]))
 
     def test_stops_on_a_file_that_is_wrong(self) -> None:
         example = '{"accounts": [{"name": "claude", "tool": "claude"}]}'
@@ -480,17 +485,48 @@ class AccountsTest(MeterTest):
 
 
 class WakeTest(MeterTest):
+    """The meter waits in steps of HAND_OFF_CHECK_SECONDS, so the tests check the seconds after the start at which it
+    reads the accounts."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.readings: list[float] = []
+        read_accounts = meter.read_accounts
+
+        def read_and_record(*arguments: Any) -> Any:
+            self.readings.append((self.clock.time - NOW).total_seconds())
+            return read_accounts(*arguments)
+
+        patcher = mock.patch.object(meter, "read_accounts", read_and_record)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_wakes_when_the_advice_changes(self) -> None:
         self.answer("claude", [usage_output(8), usage_output(9), usage_output(10, week=85)])
         status, lines, _ = self.run_meter("--wake")
-        self.assertEqual((status, self.clock.sleeps), (0, [1800, 1800]))
+        self.assertEqual((status, self.readings), (0, [0, 1800, 3600]))
         self.assertTrue(lines[0].startswith("claude 04:08 | session 10% ") and lines[0].endswith(" | watch"))
 
     def test_wakes_every_50_minutes_while_an_account_waits_for_its_reset(self) -> None:
         self.answer("claude", [usage_output(99, "7:30am")])
         status, lines, _ = self.run_meter("--wake")
-        self.assertEqual((status, self.clock.sleeps), (0, [3000]))
+        self.assertEqual((status, self.readings), (0, [0, 3000]))
         self.assertTrue(lines[0].startswith("claude 03:58 | session 99% ") and lines[0].endswith(" | stop"))
+
+    def test_wakes_within_a_minute_when_the_hook_tells_an_agent_to_hand_off(self) -> None:
+        hand_offs = self.loop / "hand-offs"
+        hand_offs.mkdir()
+        (hand_offs / "a1.400000").touch()
+        self.clock.alarms.append((NOW + dt.timedelta(seconds=610), (hand_offs / "a2.400000").touch))
+        status, lines, _ = self.run_meter("--wake")
+        self.assertEqual((status, self.readings, self.clock.time - NOW), (0, [0], dt.timedelta(seconds=660)))
+        self.assertTrue(lines[0].startswith("claude 03:08 | session 8% ") and lines[0].endswith(" | go"))
+
+    def test_does_not_wake_for_a_note_of_the_hook_from_before_it_started(self) -> None:
+        (self.loop / "hand-offs").mkdir()
+        (self.loop / "hand-offs" / "a1.500000").touch()
+        self.answer("claude", [usage_output(8), usage_output(9), usage_output(10, week=85)])
+        self.assertEqual((self.run_meter("--wake")[0], self.readings), (0, [0, 1800, 3600]))
 
     def test_counts_the_50_minutes_from_the_start_while_another_account_reads_more_often(self) -> None:
         home = self.codex_home(("2026-10-18T07:00:00Z", {"primary": {"used_percent": 3.0, "window_minutes": 10080}}))
@@ -499,12 +535,12 @@ class WakeTest(MeterTest):
         )
         self.answer("claude", [usage_output(99, "7:30am")])
         self.assertEqual(self.run_meter("--wake")[0], 0)
-        self.assertEqual(self.clock.sleeps, [1800, 1200])
+        self.assertEqual(self.readings, [0, 1800, 3000])
 
     def test_wakes_just_after_a_reset_that_comes_sooner(self) -> None:
         self.answer("claude", [usage_output(99, "3:18am"), usage_output(1, "8:18am")])
         status, lines, _ = self.run_meter("--wake")
-        self.assertEqual((status, self.clock.sleeps), (0, [660]))
+        self.assertEqual((status, self.readings), (0, [0, 660]))
         self.assertTrue(lines[0].endswith(" | go"))
 
     def test_waits_for_the_reset_of_a_parked_account_without_waking(self) -> None:
@@ -512,18 +548,18 @@ class WakeTest(MeterTest):
         self.answer("claude", [week_full, usage_output(1, week=0)])
         status, lines, _ = self.run_meter("--wake")
         reset = dt.datetime(2026, 10, 24, 17, 0, tzinfo=NEW_YORK)
-        self.assertEqual((status, self.clock.sleeps), (0, [(reset - NOW).total_seconds() + 60]))
+        self.assertEqual((status, self.readings), (0, [0, (reset - NOW).total_seconds() + 60]))
         self.assertTrue(lines[0].endswith(" | go"))
 
     def test_ends_when_an_account_gives_no_reading(self) -> None:
         self.answer("claude", [usage_output(8), {"stdout": "Not logged in"}])
         status, lines, _ = self.run_meter("--wake")
-        self.assertEqual((status, self.clock.sleeps), (1, [1800]))
+        self.assertEqual((status, self.readings), (1, [0, 1800]))
         self.assertTrue(lines[0].startswith("claude | no reading: "))
 
     def test_ends_at_once_when_the_first_reading_fails(self) -> None:
         self.answer("claude", [{"stdout": "Not logged in"}])
-        self.assertEqual((self.run_meter("--wake")[0], self.clock.sleeps), (1, []))
+        self.assertEqual((self.run_meter("--wake")[0], self.readings), (1, [0]))
 
 
 # A reading of a Mac with Apple silicon
@@ -567,6 +603,84 @@ class MachineLineTest(MeterTest):
             r"orchestrator context unknown \| "
             r"retrospective not due: 0\.0 of 30 hours of agents' work since the last one$",
         )
+
+
+def call(tokens: int, **fields: Any) -> str:
+    """A line of a transcript or of a builder's events: a call that read the given number of tokens. Its output tokens
+    are far off, as in Claude Code's transcripts."""
+    usage = {"input_tokens": 5, "cache_read_input_tokens": tokens - 1005, "cache_creation_input_tokens": 1000}
+    return json.dumps({"type": "assistant", "message": {"usage": usage | {"output_tokens": 999_999}}} | fields)
+
+
+class AgentsLineTest(MeterTest):
+    def setUp(self) -> None:
+        super().setUp()
+        project = "".join(character if character.isalnum() else "-" for character in str(paths.main_checkout()))
+        self.subagents = self.root / "claude-config" / "projects" / project / "abc123" / "subagents"
+        self.subagents.mkdir(parents=True)
+
+    def agents(self) -> str:
+        return self.run_meter()[1][-2]
+
+    def log(self, event: str, agent_id: str, agent_type: str = "builder", issue: int | None = 12) -> None:
+        line: dict[str, Any] = {"at": "2026-10-18T02:00:00-04:00", "event": event, "id": agent_id}
+        if event == "start":
+            line |= {"type": agent_type, "issue": issue, "test": False}
+        else:
+            line |= {"minutes": 1.0}
+        with (self.loop / "agents.jsonl").open("a") as handle:
+            handle.write(json.dumps(line) + "\n")
+
+    def subagent(self, agent_id: str, tool_use_id: str, lines: list[str]) -> None:
+        transcript = self.subagents / f"agent-{agent_id}.jsonl"
+        transcript.write_text("\n".join(['{"type": "user", "message": {"content": "12 other"}}', *lines]) + "\n")
+        meta = {"agentType": "builder", "toolUseId": tool_use_id, "spawnDepth": 1}
+        transcript.with_suffix(".meta.json").write_text(json.dumps(meta))
+
+    def builder_run(self, name: str, lines: list[str]) -> None:
+        folder = self.loop / "runs" / name
+        folder.mkdir(parents=True)
+        (folder / "events.jsonl").write_text("\n".join(lines) + "\n")
+
+    def hand_offs(self, *notes: str) -> None:
+        (self.loop / "hand-offs").mkdir()
+        for note in notes:
+            (self.loop / "hand-offs" / note).touch()
+
+    def test_gives_the_context_of_each_running_agent_and_the_threshold_of_its_hand_off_note(self) -> None:
+        self.log("start", "toolu_01", issue=64)
+        self.subagent("a1", "toolu_01", [call(300_000), call(412_000)])
+        self.log("start", "toolu_02", "Explore", None)
+        self.subagent("a2", "toolu_02", ['{"type": "user", "message": {"content": "next"}}'])
+        self.log("start", "64-20261018-020000", issue=64)
+        init = '{"type": "system", "subtype": "init", "session_id": "s64"}'
+        of_subagent = call(30_000, parent_tool_use_id="toolu_09")
+        result = '{"type": "result", "usage": {"input_tokens": 999}}'
+        self.builder_run("64-20261018-020000", [init, call(520_000, parent_tool_use_id=None), of_subagent, result])
+        self.log("start", "70-20261018-021000", "codex", 70)
+        self.builder_run("70-20261018-021000", ['{"type": "thread.started", "thread_id": "t1"}'])
+        self.log("start", "71-20261018-021000", issue=71)
+        self.builder_run("71-20261018-021000", ["not an event", call(200_000, session_id="s71")])
+        self.log("start", "72-20261018-021000", issue=72)
+        self.hand_offs("a1.400000", "s64.400000", "s64.500000", "a9.400000", "t1.400000", "s71.400000", "notes.txt")
+        self.assertEqual(
+            self.agents(),
+            "agents | builder #64 412k, told at 400k to hand off | Explore context unknown | "
+            "builder #64 520k, told at 500k to hand off | codex #70 context unknown | builder #71 200k | "
+            "builder #72 context unknown",
+        )
+
+    def test_leaves_out_the_agents_with_an_end_line(self) -> None:
+        self.log("start", "toolu_01")
+        self.subagent("a1", "toolu_01", [call(300_000)])
+        self.log("end", "toolu_01")
+        self.log("start", "64-20261018-020000")
+        self.builder_run("64-20261018-020000", [call(300_000)])
+        self.log("end", "64-20261018-020000")
+        self.assertEqual(self.agents(), "agents | none running")
+
+    def test_says_when_no_agent_runs_without_a_log(self) -> None:
+        self.assertEqual(self.agents(), "agents | none running")
 
 
 class ContextTest(MeterTest):
@@ -821,4 +935,4 @@ class ScriptTest(MeterTest):
             [sys.executable, str(METER)], capture_output=True, text=True, env=dict(os.environ), check=False, timeout=60
         )
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertRegex(done.stdout, r"^claude \d\d:\d\d \| session 8% .* \| go\nmachine \| ")
+        self.assertRegex(done.stdout, r"^claude \d\d:\d\d \| session 8% .* \| go\nagents \| none running\nmachine \| ")

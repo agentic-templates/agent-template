@@ -178,11 +178,6 @@ fi
 # the same session a new process.
 # This step comes last, so that no note after the file reads as part of it.
 
-# Prints the first word after "<name>:" on the first line of the state file that starts with it: state_field <name>
-state_field() {
-  awk -v name="$1:" 'index($0, name) == 1 { $0 = substr($0, length(name) + 1); print $1; exit }' "$state_file"
-}
-
 # Succeeds if a process with the id runs: is_running <process id>
 # The id must be a positive number, because kill -0 also succeeds for 0 and -1, which name groups of processes.
 is_running() {
@@ -222,8 +217,8 @@ if [[ -n $repository && -n $session_id && -n ${CLAUDE_PID:-} ]] &&
   fi
 fi
 if [[ -n $state_file && -f $state_file ]]; then
-  owner=$(state_field session)
-  owner_process=$(state_field pid)
+  owner=$(state_field "$state_file" session)
+  owner_process=$(state_field "$state_file" pid)
   both_lines="\"session: $session_id\" and \"pid: $CLAUDE_PID\" as the session and pid lines"
   # A builder runs as a subagent in the orchestrator's process, so it has the orchestrator's pid, and its input can
   # hold the orchestrator's session id. A subagent's input has an agent_id, and a builder works in a worktree.

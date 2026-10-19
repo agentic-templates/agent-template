@@ -56,6 +56,11 @@ on.
 - **Reports.** When an agent ends, read its report, and act on what it asks of you. For each item that it lists for
   the maintainer, such as a command that a hook told it to leave to them, ask the maintainer in an issue with
   `needs-decision`.
+- **Hand-offs.** When a builder reports that it handed off its work, because its context grew too long, run
+  `scripts/clear-worktrees <issue>`, so that a new builder can check out the issue's branch. If the script exits with
+  a code other than 0, plan the issue again. Otherwise, start a new agent of the same type with the same prompt, and
+  put the link to the hand-off comment in that prompt. Start it in your session once your own account's advice lets
+  you, because `scripts/loop/run-builder` can't give a builder the link.
 - **Builders that stopped.** A builder that ends without a pull request, and without a report that says why, stopped
   before it finished, such as at a usage limit. If its issue is still open and assigned to you, run
   `scripts/clear-worktrees <issue>`, which saves its unfinished work on the issue's branch and removes its worktree.
@@ -139,11 +144,13 @@ schedule it.
 ## Read the meter
 
 For each account in `.loop/accounts.json`, `scripts/loop/meter` prints a line that ends with the account's advice.
-Its last line starts with `machine`, and gives your context size and whether a retrospective is due. Run it once in
-each pass, before you launch.
+Its last line starts with `machine`, and gives your context size and whether a retrospective is due. The line before
+it starts with `agents`, and gives the context size of each agent that runs. Run the meter once in each pass, before
+you launch.
 
-`scripts/loop/meter --wake` ends, and so wakes you, when an account's advice changes. Start it again as a background
-task each time it ends.
+`scripts/loop/meter --wake` ends, and so wakes you, when an account's advice changes, and when a hook tells an agent
+to hand off its work, so that you can plan the agent that takes over. Start it again as a background task each time it
+ends.
 
 Your own account is the Claude account in `.loop/accounts.json` whose `env` values match this session's
 environment, such as `CLAUDE_CONFIG_DIR`. Start an agent on another account only when your own account's advice

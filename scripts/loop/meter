@@ -15,6 +15,10 @@ Each account's line ends with its advice:
 The session meter's stop point is 100% minus the larger of 2 percentage points and the usage of 8 minutes at the rate
 between the last two readings. Each weekly meter, the one for all models and each model's own, stops at 99%.
 
+The line before the last lists the agents that run: those with a start line and no end line in .loop/agents.jsonl,
+each with its type and the number of its issue or pull request. It gives each agent's context size, and the threshold
+at which scripts/hooks/hand-off told the agent to hand off its work, if it did.
+
 The last line gives the machine's free disk, free memory, swap in use, GPU use and GPU memory in use, its load, the
 orchestrator's context size, and whether a retrospective is due. One is due once the agents have worked {hours} hours
 since the last retrospective, which is the newest merged pull request with the label retrospective, or since the start
@@ -23,8 +27,8 @@ of .loop/agents.jsonl before there is one. The hours come from the periods on ea
 of its transcript. The test builds and the auditors don't count.
 
 With --wake, the meter keeps reading, and prints and ends when an account's advice changes, when an account gives no
-reading, and 50 minutes after it started while an account's advice is stop. Run it in the background, so that its
-end wakes the orchestrator.
+reading, when scripts/hooks/hand-off tells an agent to hand off its work, and 50 minutes after it started while an
+account's advice is stop. Run it in the background, so that its end wakes the orchestrator.
 
 .loop/accounts.json in the main checkout lists the accounts, each with the environment variables that select it:
 
@@ -88,6 +92,8 @@ CODEX_SNAPSHOT_AGE = dt.timedelta(days=8)
 # The meter reads only the end of a transcript, where the last call is. An orchestrator's transcript of 218 MB took
 # 0.25 seconds and about 0.5 GB of memory to read whole.
 TRANSCRIPT_TAIL_BYTES = 400_000
+# How often meter --wake looks for a new note of scripts/hooks/hand-off between two readings
+HAND_OFF_CHECK_SECONDS = 60
 RETROSPECTIVE_LABEL = "retrospective"
 HOURS_PER_RETROSPECTIVE = 30.0
 # A retrospective doesn't look back on the work of an earlier one.
@@ -122,6 +128,14 @@ class Readings(NamedTuple):
     machine: Machine
 
 
+class Agent(NamedTuple):
+    # How the agents line names the agent: its type, and its issue or pull request
+    name: str
+    # The subagent's agent id or the run's session id, which names the notes of scripts/hooks/hand-off
+    key: str | None
+    context: int | None
+
+
 class NoReading(Exception):
     """Why an account gave no reading, with what to do about it."""
 
@@ -140,14 +154,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 1
     log = loop_folder / "meter.jsonl"
-    readings = wait_for_wake(accounts, log) if options.wake else read_accounts(accounts, log)
+    hand_offs = loop_folder / "hand-offs"
+    readings = wait_for_wake(accounts, log, hand_offs) if options.wake else read_accounts(accounts, log)
     checkout = paths.main_checkout()
+    agents = agents_line(running_agents(loop_folder, checkout), hand_off_thresholds(note_files(hand_offs)))
     machine = machine_line(
         readings.machine,
         context=orchestrator_context(loop_folder / "state.md", checkout),
         retrospective=read_retrospective(checkout, loop_folder),
     )
-    print("\n".join([*readings.lines, machine]))
+    print("\n".join([*readings.lines, agents, machine]))
     return 0 if readings.has_every_account else 1
 
 
@@ -161,17 +177,19 @@ def now() -> dt.datetime:
     return dt.datetime.now().astimezone()
 
 
-def wait_for_wake(accounts: list[Account], log: Path) -> Readings:
-    """Reads until an account's advice differs from its advice at the first reading, or until the orchestrator needs
-    a wake while it waits for a reset."""
+def wait_for_wake(accounts: list[Account], log: Path, hand_offs: Path) -> Readings:
+    """Reads until an account's advice differs from its advice at the first reading, until scripts/hooks/hand-off
+    writes a new note in the folder hand_offs, or until the orchestrator needs a wake while it waits for a reset."""
     started = now()
+    notes_at_start = note_files(hand_offs)
     first = read_accounts(accounts, log)
     readings = first
     while readings.has_every_account:
         wait = readings.wait_seconds
         if is_waiting_for_reset(readings):
             wait = min(wait, max(0, math.ceil((started + WAKE_EVERY - now()).total_seconds())))
-        time.sleep(wait)
+        if sleep_until_hand_off(wait, hand_offs, notes_at_start):
+            break
         readings = read_accounts(accounts, log)
         if readings.advice != first.advice:
             break
@@ -182,6 +200,18 @@ def wait_for_wake(accounts: list[Account], log: Path) -> Readings:
 
 def is_waiting_for_reset(readings: Readings) -> bool:
     return "stop" in readings.advice.values()
+
+
+def sleep_until_hand_off(seconds: int, hand_offs: Path, known: set[str]) -> bool:
+    """Sleeps for the seconds, or until the folder hand_offs has a note that isn't in known. Returns whether it has."""
+    left = seconds
+    while left > 0:
+        step = min(left, HAND_OFF_CHECK_SECONDS)
+        time.sleep(step)
+        left -= step
+        if note_files(hand_offs) - known:
+            return True
+    return False
 
 
 def read_accounts(accounts: list[Account], log: Path) -> Readings:
@@ -458,6 +488,66 @@ def gpu_part(machine: Machine) -> str:
     return f"{use}, {memory:.1f} GB {whose}"
 
 
+def running_agents(loop_folder: Path, checkout: Path) -> list[Agent]:
+    """The agents that have a start line and no end line in agents.jsonl in the loop folder. An agent of a session
+    reads its context from its transcript, and a run of scripts/loop/run-builder from its events in its run folder."""
+    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
+    agents = []
+    for run in agent_log.read_runs(loop_folder / "agents.jsonl"):
+        if run.end is not None:
+            continue
+        issue = run.start.get("issue")
+        name = f"{run.start['type']} #{issue}" if issue else run.start["type"]
+        transcript = transcripts.get(run.start["id"])
+        if transcript is not None:
+            agents.append(Agent(name, transcript.stem.removeprefix("agent-"), context_tokens(transcript)))
+            continue
+        events = loop_folder / "runs" / run.start["id"] / "events.jsonl"
+        session = run_session(events) if events.exists() else None
+        agents.append(Agent(name, session, context_tokens(events)))
+    return agents
+
+
+def run_session(events: Path) -> str | None:
+    """The session id in the first event of a builder's run, which Claude gives it, or None."""
+    with events.open(errors="replace") as handle:
+        first = handle.readline()
+    try:
+        session = json.loads(first).get("session_id")
+    except ValueError, AttributeError:
+        return None
+    return session if isinstance(session, str) else None
+
+
+def note_files(hand_offs: Path) -> set[str]:
+    """The names of the files in which scripts/hooks/hand-off notes that it told an agent to hand off its work, each
+    <agent id or session id>.<threshold>."""
+    return {file.name for file in hand_offs.glob("*.*")}
+
+
+def hand_off_thresholds(notes: set[str]) -> dict[str, int]:
+    """The highest threshold at which scripts/hooks/hand-off told each agent to hand off its work."""
+    thresholds: dict[str, int] = {}
+    for note in notes:
+        agent, _, threshold = note.rpartition(".")
+        if threshold.isdigit():
+            thresholds[agent] = max(thresholds.get(agent, 0), int(threshold))
+    return thresholds
+
+
+def agents_line(agents: list[Agent], thresholds: dict[str, int]) -> str:
+    if not agents:
+        return "agents | none running"
+    parts = ["agents"]
+    for agent in agents:
+        part = f"{agent.name} {'context unknown' if agent.context is None else f'{agent.context // 1000}k'}"
+        threshold = thresholds.get(agent.key or "")
+        if threshold:
+            part += f", told at {threshold // 1000}k to hand off"
+        parts.append(part)
+    return " | ".join(parts)
+
+
 def orchestrator_context(state_file: Path, checkout: Path) -> int | None:
     session = session_in_state_file(state_file)
     if session is None:
@@ -475,7 +565,9 @@ def session_in_state_file(state_file: Path) -> str | None:
 
 
 def context_tokens(transcript: Path) -> int | None:
-    """The input of the last call in a transcript, which is the session's context size, or None."""
+    """The input of the last call in a transcript, which is the session's context size, or None. A builder's events
+    hold its subagents' calls too, each with the id of the tool call that started the subagent, and those don't
+    count."""
     if not transcript.exists():
         return None
     with transcript.open("rb") as handle:
@@ -485,8 +577,11 @@ def context_tokens(transcript: Path) -> int | None:
         if '"usage"' not in line:
             continue
         try:
-            usage = json.loads(line)["message"]["usage"]
+            entry = json.loads(line)
+            usage = entry["message"]["usage"]
         except ValueError, KeyError, TypeError:
+            continue
+        if entry.get("parent_tool_use_id"):
             continue
         return int(
             usage.get("input_tokens", 0)
