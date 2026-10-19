@@ -481,14 +481,19 @@ opens_pull_request() {
 
 # Sets head_commit to the latest commit of the pull request of opens_pull_request, in the repository of the current
 # folder, or fails when it can't find it: the latest commit of the branch that --head names, or HEAD when it names none.
-# It also sets head_branch to the name of the pull request's branch, which is empty when HEAD points to no branch.
+# It also sets head_branch to the name of the pull request's branch when the branch is in this repository. It's empty
+# when HEAD points to no branch, and when --head names the branch as <user>:<branch>, because the user's repository
+# can be a fork.
 find_head_commit() {
-  local head_ref=HEAD
-  # --head can name the branch as <user>:<branch>.
-  head_branch=${pr_head#*:}
-  if [[ -n $head_branch ]]; then
-    head_ref=refs/heads/$head_branch
-  else
+  local head_ref=HEAD branch
+  branch=${pr_head#*:}
+  head_branch=""
+  if [[ -n $branch ]]; then
+    head_ref=refs/heads/$branch
+    if [[ $pr_head != *:* ]]; then
+      head_branch=$branch
+    fi
+  elif [[ -z $pr_head ]]; then
     head_branch=$(git symbolic-ref --quiet --short HEAD) || true
   fi
   head_commit=$(git rev-parse --verify --quiet "$head_ref^{commit}") || return 1

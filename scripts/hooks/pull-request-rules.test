@@ -160,6 +160,8 @@ expect_block Bash "gh pr create --head 20-show-the-totals --title '$title' --bod
 git switch --quiet 20-show-the-totals
 expect_block Bash "gh pr create --title '$title' --body-file ../body.md" "$(blocked "$not_the_branch_issue")"
 git switch --quiet work
+# After a person's name and a colon, the branch can be in a fork, which no issue here links to.
+expect_allow Bash "gh pr create --head ana:20-show-the-totals --title '$title' --body-file ../body.md"
 
 # Bodies from here-documents and standard input, with quotes in the text, which would end a quoted word
 quoted_body=${body/"skips the expenses"/skips the \"imported\" expenses}

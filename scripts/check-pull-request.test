@@ -5,6 +5,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 script=$PWD/scripts/check-pull-request
 
+# shellcheck source=scripts/missing-tools
+source scripts/missing-tools
+if ! has jq https://jqlang.org/download/ "scripts/check-pull-request.test"; then
+  exit 0
+fi
+
 case_count=0
 failed_cases=0
 
@@ -20,23 +26,12 @@ stand_in=$base/bin
 mkdir "$stand_in"
 # A stand-in for gh, first on the PATH, that answers the commands that look up an issue and list the branches that
 # link to it, as GitHub would: #12 and #17 are open issues, #13 a closed issue, #14 a pull request, #15 an open
-# research issue and #16 an open issue with sub-issues, and no other number exists. The branches 12-skip-imported-rows
-# and 12-skip-the-imported-expenses link to #12, 17-export-the-totals links to #17, and no branch to the other numbers.
-# With TEST_GH=fail, it fails, as gh does without the network.
+# research issue and #16 an open issue with sub-issues, and no other number exists. It runs the --jq filter of the
+# query for the branches on GitHub's answer in TEST_ANSWERS/<number>.json, and an answer with errors fails as gh
+# fails on it. With TEST_GH=fail, it fails, as gh does without the network.
 cat >"$stand_in/gh" <<'STAND_IN'
 #!/usr/bin/env bash
 jq_filter='[.state, (.pull_request != null), any(.labels[]; .name == "research"), (.sub_issues_summary.total // 0)] | @tsv'
-branches_query='query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    issueOrPullRequest(number: $number) {
-      ... on Issue {
-        linkedBranches(first: 100) { nodes { ref { name } } }
-        closedByPullRequestsReferences(first: 100, userLinkedOnly: true) { nodes { headRefName } }
-      }
-    }
-  }
-}'
-branches_filter='.data.repository.issueOrPullRequest | (.linkedBranches.nodes[]?.ref.name // empty), (.closedByPullRequestsReferences.nodes[]?.headRefName)'
 
 # Prints what gh api prints for the issue with the filter above: look_up_issue <number>
 look_up_issue() {
@@ -54,28 +49,42 @@ look_up_issue() {
   esac
 }
 
-# Prints what gh api graphql prints for the issue with the query and filter above: list_branches <number>
+# Prints what gh api graphql prints for GitHub's answer to the query for the branches, with a filter: list_branches
+# <number> <filter>. gh prints an answer with errors as it is, without the filter, and fails with each error's message.
 list_branches() {
-  case $1 in
-    12) printf '%s\n' 12-skip-imported-rows 12-skip-the-imported-expenses ;;
-    17) printf '%s\n' 17-export-the-totals ;;
-    13 | 14 | 15 | 16) ;;
-    *)
-      echo '{"data":{"repository":{"issueOrPullRequest":null}},"errors":[{"type":"NOT_FOUND","message":"Could not resolve to an issue or pull request with the number of '"$1"'."}]}'
-      echo "gh: Could not resolve to an issue or pull request with the number of $1." >&2
-      exit 1
-      ;;
-  esac
+  local answer=$TEST_ANSWERS/$1.json
+  if [[ $(jq '.errors != null' "$answer") == true ]]; then
+    cat "$answer"
+    jq --raw-output '.errors[] | "gh: \(.message)"' "$answer" >&2
+    exit 1
+  fi
+  jq --raw-output "$2" "$answer"
 }
 
+# The arguments of the query for the branches. The query must ask for the issue or pull request of the number.
+owner="" repo="" number="" query="" filter=""
 if [[ $# == 4 && $1 == api && $2 == "repos/{owner}/{repo}/issues/"* && $3 == --jq && $4 == "$jq_filter" ]]; then
   command=look_up_issue
   number=${2##*/}
-elif [[ $# == 12 && "$1 $2 $3 $4 $5 $6 $7" == "api graphql -F owner={owner} -F repo={repo} -F" && $8 == number=* &&
-  $9 == -f && ${10} == "query=$branches_query" && ${11} == --jq && ${12} == "$branches_filter" ]]; then
-  command=list_branches
-  number=${8#number=}
-else
+elif [[ $1 == api && $2 == graphql ]]; then
+  shift 2
+  while (($# >= 2)); do
+    case "$1 $2" in
+      "-F owner="*) owner=${2#owner=} ;;
+      "-F repo="*) repo=${2#repo=} ;;
+      "-F number="*) number=${2#number=} ;;
+      "-f query="*) query=${2#query=} ;;
+      "--jq "*) filter=$2 ;;
+      *) break ;;
+    esac
+    shift 2
+  done
+  if (($# == 0)) && [[ $owner == "{owner}" && $repo == "{repo}" && $number =~ ^[0-9]+$ && -n $filter &&
+    $query == *'issueOrPullRequest(number: $number)'* ]]; then
+    command=list_branches
+  fi
+fi
+if [[ -z ${command:-} ]]; then
   echo "The stand-in for gh doesn't answer: gh $*" >&2
   exit 1
 fi
@@ -83,13 +92,76 @@ if [[ ${TEST_GH:-} == fail ]]; then
   echo "error connecting to api.github.com" >&2
   exit 1
 fi
-"$command" "$number"
+"$command" "$number" "$filter"
 STAND_IN
 chmod +x "$stand_in/gh"
 
+# GitHub's answers to the query for the branches, by the issue's number, in the shape that GitHub gives them. The
+# branches 12-skip-imported-rows and 12-skip-the-imported-expenses link to #12, after a branch that was deleted, whose
+# ref is null. The pull request from 17-export-the-totals links to #17, which links to no branch. The issues #13, #15
+# and #16 link to no branch, and the answer for a pull request's number, #14, has no field. #99 is a number that no
+# issue or pull request has.
+export TEST_ANSWERS=$base/answers
+mkdir "$TEST_ANSWERS"
+cat >"$TEST_ANSWERS/12.json" <<'ANSWER'
+{
+  "data": {
+    "repository": {
+      "issueOrPullRequest": {
+        "linkedBranches": {
+          "nodes": [
+            { "ref": null },
+            { "ref": { "name": "12-skip-imported-rows" } },
+            { "ref": { "name": "12-skip-the-imported-expenses" } }
+          ]
+        },
+        "closedByPullRequestsReferences": { "nodes": [] }
+      }
+    }
+  }
+}
+ANSWER
+cat >"$TEST_ANSWERS/17.json" <<'ANSWER'
+{
+  "data": {
+    "repository": {
+      "issueOrPullRequest": {
+        "linkedBranches": { "nodes": [] },
+        "closedByPullRequestsReferences": { "nodes": [{ "headRefName": "17-export-the-totals" }] }
+      }
+    }
+  }
+}
+ANSWER
+for number in 13 15 16; do
+  cat >"$TEST_ANSWERS/$number.json" <<'ANSWER'
+{
+  "data": {
+    "repository": {
+      "issueOrPullRequest": { "linkedBranches": { "nodes": [] }, "closedByPullRequestsReferences": { "nodes": [] } }
+    }
+  }
+}
+ANSWER
+done
+echo '{"data":{"repository":{"issueOrPullRequest":{}}}}' >"$TEST_ANSWERS/14.json"
+cat >"$TEST_ANSWERS/99.json" <<'ANSWER'
+{
+  "data": { "repository": { "issueOrPullRequest": null } },
+  "errors": [
+    {
+      "type": "NOT_FOUND",
+      "path": ["repository", "issueOrPullRequest"],
+      "locations": [{ "line": 3, "column": 5 }],
+      "message": "Could not resolve to an issue or pull request with the number of 99."
+    }
+  ]
+}
+ANSWER
+
 # A repository whose main has scripts/configure-github, with a branch for each kind of pull request:
-# - work adds a file in one commit. The branches 12-skip-the-imported-expenses, 17-totals, 14-review-notes and
-#   99-notes hold the same commit.
+# - work adds a file in one commit. The branches 12-skip-the-imported-expenses, 17-export-the-totals, 17-totals,
+#   14-review-notes and 99-notes hold the same commit.
 # - configure changes scripts/configure-github.
 # - co-authored has a commit without a Co-authored-by trailer, and one with two of them.
 # After the branches, main gets a commit that changes scripts/configure-github and has a Co-authored-by trailer,
@@ -105,7 +177,7 @@ git -C "$repository" switch --quiet -c work
 echo "Imports" >"$repository/imports.txt"
 git -C "$repository" add imports.txt
 git -C "$repository" commit --quiet -m "feat: skip the expenses that were already imported"
-for numbered_branch in 12-skip-the-imported-expenses 17-totals 14-review-notes 99-notes; do
+for numbered_branch in 12-skip-the-imported-expenses 17-export-the-totals 17-totals 14-review-notes 99-notes; do
   git -C "$repository" branch "$numbered_branch"
 done
 git -C "$repository" switch --quiet -c configure main
@@ -124,15 +196,18 @@ template=$(<.github/pull_request_template.md)
 filled_in=${template/"Closes #"/Closes #12}
 filled_in+=$'\n'"The app skips the expenses that it has already imported."
 
-# The title of the pull request, and its branch, which a case can change for itself, as in title=<title> expect_pass ...
+# The title of the pull request, its branch, and the repository that holds the branch, which a case can change for
+# itself, as in title=<title> expect_pass ... The pull request is in the repository octo/app.
 title="feat: skip the expenses that were already imported"
 branch=work
+head_repository=octo/app
 
 # Runs the script on a body, for a pull request from the branch into main, and sets status and output:
 # run_check <body>
 run_check() {
   status=0
-  output=$(cd "$repository" && TITLE=$title BODY=$1 BRANCH=$branch PATH=$stand_in:$PATH "$script" main "$branch" 2>&1) || status=$?
+  output=$(cd "$repository" && TITLE=$title BODY=$1 BRANCH=$branch HEAD_REPOSITORY=$head_repository GH_REPO=octo/app \
+    PATH=$stand_in:$PATH "$script" main "$branch" 2>&1) || status=$?
 }
 
 # Checks that the script passes a body: expect_pass <description> <body>
@@ -230,11 +305,19 @@ TEST_GH=fail expect_errors "When gh fails" "$filled_in" \
   "Can't look up #12, because gh failed: error connecting to api.github.com. Try again once gh can reach GitHub."
 
 # The issue that the pull request's branch was created for, which links to the branch. #12 links to
-# 12-skip-the-imported-expenses after another branch, and the issue or pull request of each other branch's number
-# doesn't link to it.
+# 12-skip-the-imported-expenses after a deleted branch and another branch, #17 links to the pull request from
+# 17-export-the-totals, and the issue or pull request of each other branch's number doesn't link to it.
 branch=12-skip-the-imported-expenses expect_pass "From the branch of the issue that the body closes" "$filled_in"
 branch=12-skip-the-imported-expenses expect_errors "From the branch of an issue, with a body that closes another open issue" \
   "${filled_in/"Closes #12"/Closes #17}" "$(not_the_branch_issue "#17" 12-skip-the-imported-expenses 12)"
+branch=17-export-the-totals expect_errors "From a branch whose pull request links to the issue, with a body that closes another open issue" \
+  "$filled_in" "$(not_the_branch_issue "#12" 17-export-the-totals 17)"
+branch=12-skip-the-imported-expenses head_repository="" expect_errors \
+  "From the branch of an issue, with no repository for the branch, as from the hook, and a body that closes another open issue" \
+  "${filled_in/"Closes #12"/Closes #17}" "$(not_the_branch_issue "#17" 12-skip-the-imported-expenses 12)"
+branch=12-skip-the-imported-expenses head_repository=ana/app expect_pass \
+  "From a fork's branch with the name of a branch that an issue links to, with a body that closes another open issue" \
+  "${filled_in/"Closes #12"/Closes #17}"
 branch=12-skip-the-imported-expenses expect_errors "From the branch of an issue, with a body that closes it and two others" \
   "${filled_in/"Closes #12"/Closes #17$'\n'Closes #12$'\n'Closes #13}" \
   "The line \"Closes #13\" names #13, which is closed. $edit_the_line" "$(more_than_one_issue "#17, #12, #13")" \
