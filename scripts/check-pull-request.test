@@ -235,14 +235,14 @@ expect_errors "With paths into a home folder in a code block and in an HTML comm
 
 # The files that the pull request changes. The branch work doesn't change scripts/configure-github, though main
 # changed it after the branch started.
-configure_github_sentence="A maintainer with admin access needs to run scripts/configure-github after the merge."
+configure_github_sentence="The orchestrator runs scripts/configure-github after the merge."
 branch=configure expect_errors "With a change to scripts/configure-github" "$filled_in" \
-  "The pull request changes scripts/configure-github, and the body doesn't say that a maintainer needs to run it. Add this sentence under \"What changed and why\": $configure_github_sentence"
-branch=configure expect_pass "With a change to scripts/configure-github, and the sentence that asks a maintainer to run it" \
+  "The pull request changes scripts/configure-github, and the body doesn't say that the orchestrator runs it after the merge. Add this sentence under \"What changed and why\": $configure_github_sentence"
+branch=configure expect_pass "With a change to scripts/configure-github, and the sentence that says that the orchestrator runs it" \
   "${filled_in/"already imported."/already imported. $configure_github_sentence}"
 branch=configure expect_errors "With a change to scripts/configure-github, and the sentence in an HTML comment" \
   "${filled_in/"already imported."/already imported. <!-- $configure_github_sentence -->}" \
-  "The pull request changes scripts/configure-github, and the body doesn't say that a maintainer needs to run it. Add this sentence under \"What changed and why\": $configure_github_sentence"
+  "The pull request changes scripts/configure-github, and the body doesn't say that the orchestrator runs it after the merge. Add this sentence under \"What changed and why\": $configure_github_sentence"
 
 # The commits of the pull request. The commit on main with a Co-authored-by trailer is no part of any branch's.
 co_authored_commit=$(git -C "$repository" rev-parse --short co-authored)

@@ -16,6 +16,24 @@ mkdir -p "$test_cwd" "$other_clone"
 # Cursor sends no folder, so its hook runs in the test's own folder.
 cd "$test_cwd"
 
+# The agent's checkout is the main checkout of a repository that holds a copy of the scripts, whose hooks the cases run,
+# so that the hook finds the main checkout and its state file. origin/main has the same files, and a builder's worktree
+# is inside the main checkout, as in .claude/worktrees. git looks for no repository above the temporary folder, reads
+# none of the person's settings, and commits as a stand-in person.
+export GIT_CEILING_DIRECTORIES=$folders GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
+unset LOOP_DIR
+main_checkout=$test_cwd
+worktree=$main_checkout/.claude/worktrees/builder
+git init --quiet --initial-branch=main "$main_checkout"
+cp -R "${hooks_folder%/*}" "$main_checkout/scripts"
+git -C "$main_checkout" add scripts
+git -C "$main_checkout" commit --quiet -m "chore: start the project"
+git -C "$main_checkout" remote add origin git@github.com:jtmpl/project.git
+git -C "$main_checkout" update-ref refs/remotes/origin/main HEAD
+git -C "$main_checkout" worktree add --quiet --detach "$worktree"
+hooks_folder=$main_checkout/scripts/hooks
+
 # A stand-in for gh, first on the PATH, so that the cases ask nothing of GitHub.
 # It answers gh repo view by GH_REPO when it's set, so that the cases show that the hook passes GH_REPO on as the
 # script would, although gh 2.102 itself ignores GH_REPO there. Otherwise it answers by the folder it runs in:
@@ -128,7 +146,7 @@ test_main_rules() {
   TEST_MAIN_RULES="check title"
 }
 
-second_run="Blocked: this repository's settings were applied before, so a maintainer with admin access runs scripts/configure-github again. Go on with the other work, and list the command in your report for the maintainer, who runs it."
+second_run="Blocked: this repository's settings were applied before, so only the orchestrator or a maintainer with admin access runs scripts/configure-github again. Go on with the other work, and list the command in your report."
 merge_reason="comes from a fork, so a maintainer merges it. Go on with the other work, and list the command in your report for the maintainer, who runs it."
 checkout_reason="Read it with gh pr diff 7 instead, because a checkout brings in its hook scripts and its AGENTS.md."
 
@@ -206,6 +224,89 @@ for rulesets in "main none" "none main"; do
   expect_block Bash 'cd && scripts/configure-github' "$cannot_tell"
   expect_block Bash "cd -P '$other_clone' && scripts/configure-github" "$cannot_tell"
 done
+
+# Runs the hook on a command of a session, or of a subagent of it, and checks its result:
+# expect_from <session> <agent id or ""> <command> <exit code> <message>
+# A subagent's input has the id of its session, and its own in agent_id.
+expect_from() {
+  local input
+  input=$(sample_input claude-code Bash "$3" | jq -c --arg session "$1" --arg agent "$2" \
+    '.session_id = $session | if $agent == "" then . else . + {agent_id: $agent, agent_type: "builder"} end')
+  run_hook "$input"
+  expect_result "For session $1${2:+ and its agent $2}, the hook for Bash \"$3\"" "$4" "$5"
+}
+
+# A run of scripts/configure-github by the orchestrator, the session that the state file names, once the settings were
+# applied. It runs the main checkout's script in the main checkout, while the script and the files that it reads are
+# the same there as on origin/main.
+orchestrator=11111111-aaaa-4bbb-8ccc-000000000001
+not_alone="Blocked: the orchestrator runs scripts/configure-github again only in the main checkout, as a command of its own, without GH_REPO: cd $main_checkout && scripts/configure-github."
+# Prints the message that blocks the orchestrator's run while files differ from origin/main: unlike_main <files>
+unlike_main() {
+  echo "Blocked: the orchestrator runs scripts/configure-github again only while the script and the files that it reads are the same in the main checkout as on origin/main, because a reviewer read each change to them before it merged. These differ: $1. Bring the main checkout up to date with git fetch origin && git merge --ff-only origin/main, undo any change to them that's left, and run the script again."
+}
+TEST_RULESETS=main TEST_OTHER_RULESETS=main
+# Without a state file, or with one that names no session, no session is the orchestrator's.
+expect_from "$orchestrator" "" scripts/configure-github 2 "$second_run"
+mkdir "$main_checkout/.loop"
+echo "goal: the merge queue" >"$main_checkout/.loop/state.md"
+expect_from "$orchestrator" "" scripts/configure-github 2 "$second_run"
+printf '%s\n' "session: $orchestrator" "goal: the merge queue" >"$main_checkout/.loop/state.md"
+for command in "${runs_of_the_script[@]}" "'$main_checkout/scripts/configure-github'" \
+  "scripts/configure-github >configure.log 2>&1" "cd '$main_checkout' && scripts/configure-github"; do
+  expect_from "$orchestrator" "" "$command" 0 ""
+done
+test_cwd=$worktree expect_from "$orchestrator" "" "cd '$main_checkout' && scripts/configure-github" 0 ""
+
+# A builder, which runs as a subagent of the orchestrator's session or in a session of its own, and a session that the
+# state file doesn't name
+for command in "${runs_of_the_script[@]}" "cd '$main_checkout' && scripts/configure-github"; do
+  expect_from "$orchestrator" agent-7 "$command" 2 "$second_run"
+  test_cwd=$worktree expect_from builder-1 "" "$command" 2 "$second_run"
+  expect_from abc123 "" "$command" 2 "$second_run"
+done
+
+# The orchestrator's run of another checkout's script, in another folder, on another repository, or with other commands
+# that could change the script's files before it runs
+test_cwd=$worktree expect_from "$orchestrator" "" scripts/configure-github 2 "$not_alone"
+for command in "cd '$worktree' && scripts/configure-github" "'$worktree/scripts/configure-github'" \
+  "env -C '$worktree' scripts/configure-github" "GH_REPO=jtmpl/project scripts/configure-github" \
+  "GH_REPO=jtmpl/other scripts/configure-github" "cd '$other_clone' && scripts/configure-github" \
+  "cp '$worktree/scripts/configure-github' scripts/ && scripts/configure-github" \
+  "scripts/configure-github | tail -n 5" "scripts/configure-github & git switch --quiet work"; do
+  expect_from "$orchestrator" "" "$command" 2 "$not_alone"
+done
+
+# The orchestrator's run while the main checkout's script, or a file that it sources, differs from origin/main's
+read_files=(scripts/configure-github)
+# shellcheck disable=SC2016 # The pattern matches the script's text, in which $( ) and $0 stay as written.
+sourced_file='^source "\$\(dirname "\$0"\)/([^"]+)"$'
+while IFS= read -r line; do
+  if [[ $line =~ $sourced_file ]]; then
+    read_files+=("scripts/${BASH_REMATCH[1]}")
+  fi
+done <"$main_checkout/scripts/configure-github"
+if [[ " ${read_files[*]} " != *" scripts/admin-access "* ]]; then
+  echo "error: can't find the line of scripts/configure-github that sources scripts/admin-access, so the cases for a file that the script reads would test too little. Change them to match how the script sources its files." >&2
+  failed_cases=$((failed_cases + 1))
+fi
+for file in "${read_files[@]}"; do
+  echo "# A change that hasn't merged" >>"$main_checkout/$file"
+  expect_from "$orchestrator" "" scripts/configure-github 2 "$(unlike_main "$file")"
+  git -C "$main_checkout" checkout --quiet -- "$file"
+done
+for file in "${read_files[@]}"; do
+  echo "# A change that hasn't merged" >>"$main_checkout/$file"
+done
+git -C "$main_checkout" commit --quiet -am "feat: turn on the merge queue"
+all_files=$(printf '%s, ' "${read_files[@]}")
+expect_from "$orchestrator" "" scripts/configure-github 2 "$(unlike_main "${all_files%, }")"
+# Once origin/main has the commit, as after its pull request merged, the orchestrator runs the script.
+git -C "$main_checkout" update-ref refs/remotes/origin/main HEAD
+expect_from "$orchestrator" "" scripts/configure-github 0 ""
+# Without origin/main, each file counts as different.
+git -C "$main_checkout" update-ref -d refs/remotes/origin/main
+expect_from "$orchestrator" "" scripts/configure-github 2 "$(unlike_main "${all_files%, }")"
 
 # Checking out, fetching or merging a pull request from a fork
 TEST_PULL_REQUEST=fork

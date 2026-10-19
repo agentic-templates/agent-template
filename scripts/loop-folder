@@ -1,7 +1,7 @@
 # shellcheck shell=bash
-# The loop's folder, which holds the orchestrator's state file and the log of the hooks' blocks, and state_field, which
-# reads a line of the state file. The hooks in scripts/hooks read them from here, and scripts/loop/paths.py finds the
-# same folder for the Python scripts.
+# The loop's folder, which holds the orchestrator's state file and the log of the hooks' blocks, state_field, which
+# reads a line of the state file, and is_orchestrators_session, which tells whether the file names a session. The hooks
+# in scripts/hooks read them from here, and scripts/loop/paths.py finds the same folder for the Python scripts.
 
 # Prints the loop's folder: the folder that LOOP_DIR names, as in the tests, or else .loop in the main checkout, which
 # holds the git folder that its worktrees share, so that every worktree finds the same folder. A repository that keeps
@@ -21,4 +21,10 @@ loop_folder() {
 # state_field <state file> <name>
 state_field() {
   awk -v name="$2:" 'index($0, name) == 1 { $0 = substr($0, length(name) + 1); print $1; exit }' "$1"
+}
+
+# Succeeds if the state file in a loop's folder names a session as the orchestrator's, on its session: line:
+# is_orchestrators_session <loop folder> <session id>
+is_orchestrators_session() {
+  [[ -n $2 && -f $1/state.md && $(state_field "$1/state.md" session) == "$2" ]]
 }

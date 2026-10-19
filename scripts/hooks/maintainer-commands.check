@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Blocks the commands that wait for a maintainer:
-# - running scripts/configure-github again on a repository whose settings were applied, because the loop
-#   can merge a change to the script that nobody read. The repository is the one that the script would change.
+# - running scripts/configure-github again on a repository whose settings were applied, unless the orchestrator's
+#   session runs it in the main checkout, as a command of its own, while the script and the files that it reads are the
+#   same there as on origin/main, because a reviewer read each change to them before it merged. The repository is the
+#   one that the script would change.
 # - checking out, fetching or merging a pull request from a fork, because a checkout brings in the pull
 #   request's hook scripts and AGENTS.md, and only a maintainer decides to put a fork's code on main
 # - merging a pull request while the rules for main no longer require a check that scripts/configure-github
@@ -16,6 +18,8 @@ source "${BASH_SOURCE[0]%/*}/helpers.bash"
 checkout_flags_with_value=" -b --branch --worktree -R --repo "
 
 report="Go on with the other work, and list the command in your report for the maintainer, who runs it."
+# The files of the repository that a run of scripts/configure-github reads: the script, and the file that it sources.
+configure_github_files=(scripts/configure-github scripts/admin-access)
 alert_change="Blocked: only a maintainer dismisses or changes a code scanning or Dependabot alert. Fix the code that the alert points to. If you think the alert is wrong, tell the maintainer which alert and why."
 # The endpoint of a single alert, with or without a leading slash, a host or a query string.
 # The owner and the repository can be one word, such as $repo.
@@ -127,25 +131,103 @@ is_configure_github() {
   [[ $1 == scripts/configure-github || $1 == */scripts/configure-github ]]
 }
 
-# Succeeds if the command in command_words runs scripts/configure-github.
+# Succeeds if the command in command_words runs scripts/configure-github, and sets script_word to the word that names
+# the script.
 runs_configure_github() {
-  local program=${command_words[0]}
+  script_word=${command_words[0]}
   # bash or sh can run the script too.
-  if [[ ${program##*/} == bash || ${program##*/} == sh ]]; then
+  if [[ ${script_word##*/} == bash || ${script_word##*/} == sh ]]; then
     read_shell_arguments
     # An interactive shell runs the file that --rcfile or --init-file names, and the hook can't tell whether the
     # shell is interactive, such as when it reads a terminal. So that file counts as a run, whatever the other flags are.
     if is_configure_github "$shell_rcfile"; then
+      script_word=$shell_rcfile
       return 0
     elif $shell_only_reads; then
       return 1
     fi
-    program=$shell_operand
+    script_word=$shell_operand
   fi
-  is_configure_github "$program"
+  is_configure_github "$script_word"
 }
 
-# Blocks a run of scripts/configure-github on a repository whose settings were applied before:
+# Succeeds if the action comes from the orchestrator's session, and not from a subagent of it, such as a builder,
+# whose input has the session's id too.
+is_orchestrator() {
+  local loop
+  if [[ -n $agent_id ]]; then
+    return 1
+  fi
+  loop=$(hook_loop_folder 2>/dev/null) || return 1
+  is_orchestrators_session "$loop" "$session_id"
+}
+
+# Prints the main checkout of this hook's repository, which git lists first among the worktrees, by its physical path.
+main_checkout() {
+  local line=""
+  IFS= read -r line < <(git -C "$hooks_folder" worktree list --porcelain 2>/dev/null) || true
+  if [[ $line != "worktree "* ]]; then
+    return 1
+  fi
+  printf '%s\n' "${line#worktree }"
+}
+
+# Adds 1 to other_commands for a simple command other than cd: count_other_command <word>...
+count_other_command() {
+  if [[ $1 != cd ]]; then
+    other_commands=$((other_commands + 1))
+  fi
+}
+
+# Prints the number of simple commands in the shell command other than cd.
+other_command_count() {
+  other_commands=0
+  for_each_simple_command count_other_command "$shell_command"
+  echo "$other_commands"
+}
+
+# Succeeds if the command in command_words runs the main checkout's scripts/configure-github in the main checkout,
+# without GH_REPO, and the shell command holds no simple command other than cd besides it, because another command
+# could change the script's files after this hook compares them with origin/main:
+# runs_alone_in_main_checkout <main checkout> <true if the command sets GH_REPO>
+# other_command_count runs in a subshell, because its for_each_simple_command changes command_folder after a command
+# that runs through env -C.
+runs_alone_in_main_checkout() {
+  [[ $2 == false && $(physical_path "$command_folder" /) == "$1" &&
+    $(physical_path "$script_word" "$command_folder") == "$1/scripts/configure-github" &&
+    $(other_command_count) == 1 ]]
+}
+
+# Prints the files in configure_github_files whose text in a checkout differs from origin/main's, or that origin/main
+# lacks, separated by commas: files_unlike_origin_main <checkout>
+files_unlike_origin_main() {
+  local file on_main on_disk differing=""
+  for file in "${configure_github_files[@]}"; do
+    on_main=$(git -C "$1" rev-parse --verify --quiet "refs/remotes/origin/main:$file" 2>/dev/null) || on_main=""
+    on_disk=$(git -C "$1" hash-object -- "$file" 2>/dev/null) || on_disk=""
+    if [[ -z $on_main || $on_main != "$on_disk" ]]; then
+      differing+="${differing:+, }$file"
+    fi
+  done
+  printf '%s' "$differing"
+}
+
+# Blocks the orchestrator's run of scripts/configure-github, unless it runs alone in the main checkout while the files
+# that it reads are the same there as on origin/main: check_orchestrators_run <true if the command sets GH_REPO>
+check_orchestrators_run() {
+  local main differing
+  main=$(main_checkout) || main=""
+  if [[ -z $main ]] || ! runs_alone_in_main_checkout "$main" "$1"; then
+    block "Blocked: the orchestrator runs scripts/configure-github again only in the main checkout, as a command of its own, without GH_REPO: cd ${main:-<main checkout>} && scripts/configure-github."
+  fi
+  differing=$(files_unlike_origin_main "$main")
+  if [[ -n $differing ]]; then
+    block "Blocked: the orchestrator runs scripts/configure-github again only while the script and the files that it reads are the same in the main checkout as on origin/main, because a reviewer read each change to them before it merged. These differ: $differing. Bring the main checkout up to date with git fetch origin && git merge --ff-only origin/main, undo any change to them that's left, and run the script again."
+  fi
+}
+
+# Blocks a run of scripts/configure-github on a repository whose settings were applied before, unless the orchestrator
+# runs it as check_orchestrators_run allows:
 # check_configure_github [<word that drop_command_prefixes dropped, such as GH_REPO=owner/name>]...
 check_configure_github() {
   local word repository sets_gh_repo=false gh_repo=""
@@ -166,9 +248,13 @@ check_configure_github() {
   else
     repository=$(script_repository "$command_folder") || return 0
   fi
-  if settings_applied_before "$repository"; then
-    block "Blocked: this repository's settings were applied before, so a maintainer with admin access runs scripts/configure-github again. $report"
+  if ! settings_applied_before "$repository"; then
+    return 0
   fi
+  if ! is_orchestrator; then
+    block "Blocked: this repository's settings were applied before, so only the orchestrator or a maintainer with admin access runs scripts/configure-github again. Go on with the other work, and list the command in your report."
+  fi
+  check_orchestrators_run "$sets_gh_repo"
 }
 
 check_gh_pr() {

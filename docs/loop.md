@@ -127,6 +127,8 @@ After each issue, go back to step 1. Start an auditor too when "Start a retrospe
   this pass found.
 - **Merges.** While pull requests are merging, keep `scripts/wait-for-pull-requests` running as a background task,
   and start it again each time it ends.
+- **Settings.** Once a pull request that changes `scripts/configure-github` merges, bring the main checkout's `main` up
+  to date with `origin/main`. Then run `scripts/configure-github` there, so that GitHub's settings match main.
 
 ### Record
 

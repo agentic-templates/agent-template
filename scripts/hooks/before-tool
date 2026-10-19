@@ -34,7 +34,7 @@ if ! fields=$(jq -r -f "${BASH_SOURCE[0]%/*}/input.jq" 2>/dev/null <<<"$input");
   exit 0
 fi
 eval "$fields"
-export HOOK_TOOL_NAME HOOK_COMMAND HOOK_FILE_PATH HOOK_CWD
+export HOOK_TOOL_NAME HOOK_COMMAND HOOK_FILE_PATH HOOK_CWD HOOK_SESSION_ID HOOK_AGENT_ID
 
 # The checks act only on these tools, so every other tool's action goes ahead at once. Cursor calls Bash Shell, and
 # Codex edits files with apply_patch. Claude Code's Agent call starts an agent, which scripts/loop/agent-log records.
