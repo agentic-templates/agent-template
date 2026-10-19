@@ -296,6 +296,25 @@ run_case todo_in_a_shell_script fail \
 run_case fixme_in_a_text_file fail "notes.txt:1:$fixme the rounding"
 run_case other_words_and_markdown pass
 
+# Cases for the check that finds coverage markers without a reason
+
+coverage_markers_without_a_reason() {
+  printf '%s\n' 'import os' 'if os.name == "nt":  # pragma: no cover' '    print("Windows")' > "$copy/scripts/windows.py"
+  printf '%s\n' 'while True:  # PRAGMA NO BRANCH  ' '    break' > "$copy/scripts/loop.py"
+}
+
+coverage_markers_with_a_reason() {
+  printf '%s\n' 'import os' 'if os.name == "nt":  # pragma: no cover, because only Windows runs this line' \
+    '    print("Windows")' > "$copy/scripts/windows.py"
+  echo 'Mark a line with "# pragma: no cover" and the reason.' > "$copy/docs/page.md"
+}
+
+run_case coverage_markers_without_a_reason fail \
+  'scripts/windows.py:2:if os.name == "nt":  # pragma: no cover' \
+  'scripts/loop.py:1:while True:  # PRAGMA NO BRANCH' \
+  'error: the lines above exclude code from coverage without a reason. Write the reason after the marker, as in "# pragma: no cover, because only Windows runs this line".'
+run_case coverage_markers_with_a_reason pass
+
 # Cases for the check that finds paths into a person's home folder.
 
 # Prints each argument on a line of its own, with a person's name in place of <name>.

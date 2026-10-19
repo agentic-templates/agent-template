@@ -1,0 +1,54 @@
+# The Python scripts are in scripts/loop. The project isn't a package, so its version stays 0.
+[project]
+name = "agent-template"
+version = "0"
+requires-python = ">=3.15"
+
+[dependency-groups]
+dev = ["coverage>=7.16.2", "mypy>=2.4.0", "ruff>=0.17.0"]
+
+[tool.uv]
+package = false
+# uv takes no version that is less than 7 days old, so that a bad or compromised release has time to be found and
+# pulled.
+exclude-newer = "7 days"
+
+[tool.ruff]
+line-length = 120
+# scripts/loop holds the modules that the scripts there import.
+src = ["scripts/loop"]
+
+[tool.ruff.lint]
+# Ruff's default rules, and these, which "Add a language" in docs/languages.md asks for.
+extend-select = [
+    # unused arguments and commented-out code
+    "ARG",
+    "ERA001",
+    # a task that nothing awaits
+    "RUF006",
+    # blanket suppression comments
+    "PGH003",
+    "PGH004",
+    # the complexity of a function
+    "C901",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.mypy]
+strict = true
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "unused-awaitable"]
+mypy_path = "scripts/loop"
+
+[tool.coverage.run]
+branch = true
+source = ["scripts"]
+# The tests run scripts/loop/meter as a script too.
+patch = ["subprocess"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+skip_covered = true

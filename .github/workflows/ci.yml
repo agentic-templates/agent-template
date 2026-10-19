@@ -32,13 +32,12 @@ jobs:
         if: github.event_name == 'pull_request'
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
 
-      # scripts/install-check-tools holds each tool's version and checksum.
-      - name: Install shellcheck, actionlint and zizmor
+      # scripts/install-check-tools holds each tool's version and checksum. uv installs the Python version in
+      # .python-version and the packages in uv.lock when scripts/check first runs it.
+      - name: Install shellcheck, actionlint, zizmor and uv
         run: |
           scripts/install-check-tools "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-
-      # Install the project's toolchain here, from its pinned version file.
 
       # zizmor uses the job's read-only token to check the actions in the workflows against GitHub's advisories.
       # SKIP_SCRIPT_TESTS skips the tests of the scripts and hooks, which the script-tests job runs.
@@ -112,7 +111,7 @@ jobs:
 
       # The ShellCheck cases of scripts/test-check run shellcheck.
       # scripts/draft-assets.test runs actionlint and zizmor.
-      - name: Install shellcheck, actionlint and zizmor
+      - name: Install shellcheck, actionlint, zizmor and uv
         run: |
           scripts/install-check-tools "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"

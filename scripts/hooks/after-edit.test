@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Tests scripts/hooks/after-edit in a small repository, with a stand-in for uv.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+
+case_count=0
+failed_cases=0
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+repository=$base/repository
+mkdir -p "$repository/scripts/hooks" "$repository/scripts/loop" "$repository/docs" "$base/bin" "$base/elsewhere"
+cp -p scripts/hooks/after-edit "$repository/scripts/hooks/"
+cp -p scripts/python-files "$repository/scripts/"
+git -C "$repository" init --quiet
+printf '%s\n' 'x = 1' >"$repository/scripts/loop/new.py"
+printf '%s\n' '#!/usr/bin/env -S uv run --script --quiet' 'x = 1' >"$repository/scripts/loop/tool"
+printf '%s\n' '#!/usr/bin/env python3' 'x = 1' >"$repository/scripts/loop/old-tool"
+printf '%s\n' '#!/usr/bin/env bash' 'echo 1' >"$repository/scripts/loop/run"
+printf '%s\n' '# Page' >"$repository/docs/page.md"
+printf '%s\n' 'x = 1' >"$base/elsewhere/other.py"
+
+# The stand-in for uv writes the folder it runs in and its arguments to TEST_CALLS, and prints what ruff would print.
+cat >"$base/bin/uv" <<'STAND_IN'
+#!/usr/bin/env bash
+echo "$PWD $*" >>"$TEST_CALLS"
+echo "1 file reformatted"
+STAND_IN
+chmod +x "$base/bin/uv"
+
+# Runs the hook after an action in the repository, and sets output and calls: run_hook <tool> <input fields>
+run_hook() {
+  local tool=$1 fields=$2 input
+  input=$(jq -n --arg tool "$tool" --arg cwd "$repository" --argjson fields "$fields" \
+    '{hook_event_name: "PostToolUse", cwd: $cwd, tool_name: $tool, tool_input: $fields}')
+  : >"$base/calls"
+  output=$(TEST_CALLS="$base/calls" PATH="$base/bin:$PATH" "$repository/scripts/hooks/after-edit" <<<"$input" 2>&1) || true
+  calls=$(<"$base/calls")
+}
+
+# Checks that the hook printed nothing and ran uv as expected: expect_calls <description> <uv calls, or nothing>
+expect_calls() {
+  local description=$1 expected=$2
+  case_count=$((case_count + 1))
+  if [[ -n $output || $calls != "$expected" ]]; then
+    echo "error: $description must print nothing and run \"$expected\", but it printed \"$output\" and ran \"$calls\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# The uv command that formats files: formats <path>...
+formats() {
+  echo "$repository run --project $repository --locked --quiet ruff format --quiet -- $*"
+}
+
+run_hook Write '{"file_path": "scripts/loop/new.py", "content": "x = 1"}'
+expect_calls "A Write of a .py file" "$(formats scripts/loop/new.py)"
+
+run_hook Edit "$(jq -n --arg path "$repository/scripts/loop/tool" '{file_path: $path, old_string: "1", new_string: "2"}')"
+expect_calls "An Edit of a script that runs with uv" "$(formats "$repository/scripts/loop/tool")"
+
+run_hook Edit '{"file_path": "scripts/loop/old-tool", "old_string": "1", "new_string": "2"}'
+expect_calls "An Edit of a script that runs with python3" "$(formats scripts/loop/old-tool)"
+
+run_hook Write '{"file_path": "docs/page.md", "content": "# Page"}'
+expect_calls "A Write of a Markdown page" ""
+
+run_hook Write "$(jq -n --arg path "$base/elsewhere/other.py" '{file_path: $path, content: "x = 1"}')"
+expect_calls "A Write of a .py file outside the repository" ""
+
+run_hook Write '{"file_path": "scripts/loop/missing.py", "content": "x = 1"}'
+expect_calls "A Write of a file that is gone" ""
+
+patch=$(printf '%s\n' '*** Begin Patch' '*** Add File: scripts/loop/new.py' '+x = 1' '*** Update File: scripts/loop/run' \
+  '@@' '-echo 1' '+echo 2' '*** Update File: docs/page.md' '*** Move to: scripts/loop/tool' '*** End Patch')
+run_hook apply_patch "$(jq -n --arg patch "$patch" '{command: $patch}')"
+expect_calls "Codex's apply_patch" "$(formats scripts/loop/new.py scripts/loop/tool)"
+
+case_count=$((case_count + 1))
+input=$(jq -n --arg cwd "$repository" '{cwd: $cwd, tool_name: "Write", tool_input: {file_path: "scripts/loop/new.py"}}')
+if ! output=$(PATH="$base/elsewhere:/usr/bin:/bin" "$repository/scripts/hooks/after-edit" <<<"$input" 2>&1) || [[ -n $output ]]; then
+  echo "error: without uv, the hook must exit with code 0 and print nothing, but it printed \"$output\"." >&2
+  failed_cases=$((failed_cases + 1))
+fi
+
+case_count=$((case_count + 1))
+if ! output=$(PATH="$base/bin:$PATH" "$repository/scripts/hooks/after-edit" <<<"not JSON" 2>&1) || [[ -n $output ]]; then
+  echo "error: for input that isn't JSON, the hook must exit with code 0 and print nothing, but it printed \"$output\"." >&2
+  failed_cases=$((failed_cases + 1))
+fi
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/hooks/after-edit.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/hooks/after-edit.test passed. Cases: $case_count."

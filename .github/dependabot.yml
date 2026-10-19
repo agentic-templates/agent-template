@@ -19,3 +19,18 @@ updates:
       include: scope
     # Without this, Dependabot adds a label for each package manager once there's more than one.
     labels: [dependencies]
+
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      uv:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    commit-message:
+      prefix: build
+      include: scope
+    labels: [dependencies]
