@@ -31,9 +31,11 @@ if [[ ! -f $page ]]; then
 fi
 
 # Outside a clone with origin/main, or for a page that git doesn't track, the reader gets the whole page and no lines.
+# Until the resolution of a merge conflict in the page is staged, git lists the page once for each side of the conflict,
+# and --deduplicate lists it once.
 new_lines=""
 if branch_start=$(git merge-base HEAD origin/main 2>/dev/null) &&
-  path=$(git --literal-pathspecs ls-files --full-name -- "$page" 2>/dev/null) && [[ -n $path ]]; then
+  path=$(git --literal-pathspecs ls-files --full-name --deduplicate -- "$page" 2>/dev/null) && [[ -n $path ]]; then
   # git diff gets no pathspec, because with only the page's new name it can't see a rename, and the renamed page
   # would look new. --diff-filter=MR leaves out a page that the branch's start doesn't have, because all of it is new.
   if ! diff=$(git -c core.quotePath=false diff --no-ext-diff --no-color --no-relative --find-renames --unified=0 --diff-filter=MR \
