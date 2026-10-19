@@ -126,6 +126,7 @@ expect_help_flag "" -c --comment
 # In a command with a word that may expand, such as -${x}h or $x -h, the shell can turn the letters or the word
 # before the h into a flag that takes the h as its value, so neither helper reads the command as asking for help.
 command_word_may_expand=("" yes)
+# shellcheck disable=SC2016 # The word is as the hook reads it from the command, so $ stays as written.
 for word in -h -ch '-${x}h'; do
   expect_stop "$word" no
 done
