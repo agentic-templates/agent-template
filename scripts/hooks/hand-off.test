@@ -226,7 +226,7 @@ expect_note "For a builder whose transcript can't be found" ""
 expect_note_files "For the builders" "$builder.400000"
 
 # A note whose file the hook can't write, because a file stands where its folder should be. A read-only folder
-# wouldn't stop root, as in the container of CI's bash-3-2 job.
+# wouldn't stop root.
 add_reply "$orchestrator" a8 410000
 rm -rf "$notes"
 touch "$notes"
