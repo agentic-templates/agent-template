@@ -3,8 +3,8 @@
 # in a Markdown page anywhere in docs/, and no fresh reader has read that page as it is now, because "Review a changed
 # page with a fresh reader" in docs/pages.md asks for one. A pull request that only deletes a page's lines or renames
 # the page needs no reader. Once the pull request is open, the check blocks a git push to its branch in the same way,
-# for each page that the push adds or rewrites text in, if the pull request adds or rewrites text in that page too. So a
-# page that only a merge of the base branch changes needs no reader.
+# for each page that the push adds a line to that the page on the pull request's base branch lacks. So a page needs no
+# reader when a merge of the base branch, or a rebase onto it, only brings in the base branch's lines.
 # scripts/fresh-reader records git's hash of each page that it gives a reader, as pages-read.bash describes, and this
 # check looks up the hash of each such page. The pull request's commits are those that find_commits in helpers.bash
 # finds, in the folder that gh runs in, as follow_cd in helpers.bash finds it. A push's commits are those after the
@@ -14,7 +14,8 @@
 # committed, because it can't tell then which text the pull request holds.
 # The check allows the command when it can't find the pull request's commits, and when claude isn't installed, because
 # scripts/fresh-reader runs claude, and docs/pages.md has the agent give the page to another reader then. It allows a
-# push that sends no pages to the branches on origin: one to another remote, or with --delete or --dry-run. It also
+# push that sends no pages to the branches on origin: one to another remote, with --delete or --dry-run, alone or in a
+# group of short options such as -nu, or with --tags and no refspec, which sends only the tags. It also
 # allows a push whose branches or repository the command doesn't name: one with --all, --branches or --mirror, or with
 # --git-dir or --work-tree before push.
 # shellcheck source=scripts/hooks/helpers.bash
@@ -55,11 +56,23 @@ pages_with_new_text() {
   done
 }
 
-# Prints each page on the input that is among the pages given, one to a line: pages_among <pages, one to a line>
-pages_among() {
-  local path
+# Prints the lines that a page has and a commit doesn't, one to a line: added_lines <commit> <path>
+added_lines() {
+  # With -U0, each hunk holds only the lines that it removes and adds, after the header that starts with @@.
+  git diff --no-ext-diff --no-textconv --no-color --no-relative -U0 "$1" ${pages_commit:+"$pages_commit"} -- "$2" |
+    awk '/^@@/ { in_hunk = 1; next } /^diff --git / { in_hunk = 0 } in_hunk && /^\+/ { print substr($0, 2) }'
+}
+
+# Prints each page on the input that has a line that a commit doesn't have and that the page on the base branch lacks,
+# one to a line: pages_with_lines_not_on_base <the base branch's commit> <commit>
+# Such a line is one that the branch wrote, rather than one that a merge of the base branch, or a rebase onto it,
+# brought in.
+pages_with_lines_not_on_base() {
+  local path lines
   while IFS= read -r path; do
-    if grep -qxF -- "$path" <<<"$1"; then
+    lines=$(added_lines "$2" "$path")
+    # A page that the base branch doesn't have lacks every line, and grep -v with no patterns prints every line.
+    if [[ -n $lines ]] && grep -qvxF -f <(git cat-file blob "$1:$path" 2>/dev/null || true) <<<"$lines"; then
       printf '%s\n' "$path"
     fi
   done
@@ -141,32 +154,32 @@ open_pull_requests() {
 }
 
 # Blocks a push that gives a branch on origin pages that no reader has read as the push leaves them, when the branch has
-# an open pull request that adds or rewrites text in those pages too:
+# an open pull request, and the push adds lines to those pages that the pull request's base branch lacks:
 # check_pushed_branch <the commit or branch that the push sends> <the branch on origin>
 check_pushed_branch() {
-  local origin_commit pushed_pages unread="" uncommitted pull_requests number base_branch branch_start
+  local origin_commit unread uncommitted pull_requests number base_branch written
   # The repository has a copy of the branch on origin once it has fetched or pushed the branch. Without one, the hook
   # can't tell which text the push adds.
   if ! head_commit=$(git rev-parse --verify --quiet "$1^{commit}") ||
     ! origin_commit=$(git rev-parse --verify --quiet "refs/remotes/origin/$2^{commit}") || ! find_pages_commit; then
     return 0
   fi
-  pushed_pages=$(pages_with_new_text "$origin_commit")
-  if [[ -n $pushed_pages ]]; then
-    unread=$(unread_pages <<<"$pushed_pages")
-  fi
+  unread=$(pages_with_new_text "$origin_commit" | unread_pages)
   uncommitted=$(uncommitted_pages)
   # Most pushes add no text to pages, or only text that a reader has read, so they need no question to GitHub.
   if [[ -z $unread && -z $uncommitted ]] || ! pull_requests=$(open_pull_requests "$2") || [[ -z $pull_requests ]]; then
     return 0
   fi
   while read -r number base_branch; do
-    if ! find_base_commit "$base_branch" || ! branch_start=$(git merge-base "$base_commit" "$head_commit"); then
+    if ! find_base_commit "$base_branch"; then
       continue
     fi
-    unread=$(pages_with_new_text "$branch_start" | pages_among "$pushed_pages" | unread_pages)
+    written=""
     if [[ -n $unread ]]; then
-      block "$(unread_message "this push to pull request #$number" "git push" "$unread")"
+      written=$(pages_with_lines_not_on_base "$base_commit" "$origin_commit" <<<"$unread")
+    fi
+    if [[ -n $written ]]; then
+      block "$(unread_message "this push to pull request #$number" "git push" "$written")"
     fi
     if [[ -n $uncommitted ]]; then
       block "$(uncommitted_message "git push" "$uncommitted")"
@@ -188,11 +201,64 @@ change_to_git_folder() {
   done
 }
 
-# Checks each branch that a git push updates, as check_pushed_branch describes. A refspec without a colon gives the
-# branch of the same name, and HEAD gives HEAD's branch. A push without a refspec pushes HEAD, as git's default
-# push.default, simple, does.
+# Succeeds if git push gets one of these short options, alone or in a group such as -nu, as read_push_arguments found
+# the flags: has_short_push_flag <letters>
+has_short_push_flag() {
+  local flag letters
+  for flag in ${flags[@]+"${flags[@]}"}; do
+    if [[ $flag == --* || $flag != -?* ]]; then
+      continue
+    fi
+    # -o takes the rest of its word as its value, as in -oci.skip.
+    letters=${flag#-}
+    letters=${letters%%o*}
+    if [[ $letters == *["$1"]* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Succeeds if the check lets a git push through, as read_push_arguments read it, because the push sends no pages to the
+# branches on origin, or the command doesn't name its branches, as the comment at the top of this file lists.
+is_push_let_through() {
+  if [[ -n $push_remote && $push_remote != origin ]] || has_short_push_flag dn ||
+    has_git_flag --delete --dry-run --all --branches --mirror; then
+    return 0
+  fi
+  # With --tags and no refspec, git pushes only the tags.
+  if ((${#push_refspecs[@]} == 0)) && has_git_flag --tags; then
+    return 0
+  fi
+  return 1
+}
+
+# Checks the branch that a refspec of a git push updates, as check_pushed_branch describes. A refspec without a colon
+# gives the branch of the same name, and HEAD gives HEAD's branch: check_refspec <refspec>
+check_refspec() {
+  local spec=${1#+} source branch
+  source=${spec%%:*}
+  # git reads @ as HEAD in the source of a refspec, though not after its colon.
+  if [[ $source == @ ]]; then
+    source=HEAD
+  fi
+  branch=$source
+  if [[ $spec == *:* ]]; then
+    branch=${spec#*:}
+  fi
+  if [[ $branch == HEAD ]]; then
+    branch=$(git symbolic-ref --quiet --short HEAD) || return 0
+  fi
+  # A refspec with nothing before its colon, as in :feature, deletes the branch.
+  if [[ -n $source ]]; then
+    check_pushed_branch "$source" "${branch#refs/heads/}"
+  fi
+}
+
+# Checks each branch that a git push updates, as check_refspec describes. A push without a refspec pushes HEAD, as
+# git's default push.default, simple, does.
 check_git_push() {
-  local spec branch
+  local spec
   if [[ ${command_words[0]##*/} != git ]]; then
     return 0
   fi
@@ -201,23 +267,14 @@ check_git_push() {
     return 0
   fi
   read_push_arguments
-  if [[ -n $push_remote && $push_remote != origin ]] || has_flag -d -n ||
-    has_git_flag --delete --dry-run --all --branches --mirror; then
+  if is_push_let_through; then
     return 0
   fi
   if ((${#push_refspecs[@]} == 0)); then
     push_refspecs=(HEAD)
   fi
   for spec in "${push_refspecs[@]}"; do
-    spec=${spec#+}
-    branch=${spec#*:}
-    if [[ $branch == HEAD ]]; then
-      branch=$(git symbolic-ref --quiet --short HEAD) || continue
-    fi
-    # A refspec with nothing before its colon, as in :feature, deletes the branch.
-    if [[ $spec != :* ]]; then
-      check_pushed_branch "${spec%%:*}" "${branch#refs/heads/}"
-    fi
+    check_refspec "$spec"
   done
 }
 

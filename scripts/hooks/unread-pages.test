@@ -281,7 +281,8 @@ expect_check "git push" 0 ""
 echo "It waits for the checks." >>docs/loop.md
 commit_all "docs: say that the loop waits for the checks"
 for push in "git push" "git push -u origin HEAD" "git push --force-with-lease origin +HEAD:refs/heads/pushed" \
-  "git push origin pushed" "cd docs && git push" "git -C docs push"; do
+  "git push origin pushed" "git push origin @" "git push origin @:pushed" "git push --tags origin HEAD" \
+  "cd docs && git push" "git -C docs push"; do
   expect_check "$push" 2 "$(unread_push 5 docs/loop.md)"
 done
 read_page docs/loop.md
@@ -301,9 +302,10 @@ expect_check "git push -u origin HEAD" 0 ""
 git switch --quiet pushed
 
 # A push that leaves the branch on origin as it is, that pushes branches the command doesn't name, or that can give git
-# another repository goes ahead, and so does a push without claude.
-for push in "git push fork HEAD" "git push --dry-run" "git push origin -d pushed" "git push origin :pushed" \
-  "git push --all" "git --git-dir=.git push"; do
+# another repository goes ahead, and so does a push without claude. A dry run can be among other short options, and
+# --tags without a refspec pushes only the tags.
+for push in "git push fork HEAD" "git push --dry-run" "git push -nu origin pushed" "git push --tags" \
+  "git push origin -d pushed" "git push origin :pushed" "git push --all" "git --git-dir=.git push"; do
   expect_check "$push" 0 ""
 done
 PATH=$no_claude
@@ -323,10 +325,12 @@ git branch stacked pushed
 git push --quiet origin stacked
 
 # In a worktree of its own, whose record has none of the pages that the reader read in the clone, a push that adds no
-# text to a page goes ahead, and so does a merge of main that adds text only to a page that the pull request doesn't
-# change.
+# text to a page goes ahead. So does a clean merge of main that adds text to a page that the pull request doesn't
+# change, and elsewhere in a page that it changes.
 git switch --quiet main
 echo "Then rewrite each sentence that the reader found unclear." >>docs/pages.md
+sed 's/^# Run the loop$/# Run the loop of builders/' docs/loop.md >"$base/loop.md"
+mv "$base/loop.md" docs/loop.md
 commit_all "docs: say what to do with the reader's answer"
 git push --quiet origin main
 pushed_worktree=$base/pushed-worktree
@@ -335,8 +339,27 @@ work_in "$pushed_worktree"
 echo "More notes" >>notes.txt
 commit_all "chore: keep more notes"
 expect_check "git push" 0 ""
-git merge --quiet --no-edit main
+git merge --quiet --no-edit main >/dev/null
 expect_check "git push" 0 ""
+
+# A merge whose resolution of a conflict writes a line that neither branch has is blocked.
+work_in "$clone"
+sed 's/^It merges each pull request\.$/It merges each pull request after a review./' docs/loop.md >"$base/loop.md"
+mv "$base/loop.md" docs/loop.md
+commit_all "docs: say that the loop merges after a review"
+git push --quiet origin main
+work_in "$pushed_worktree"
+if git merge --quiet --no-edit main >/dev/null 2>&1; then
+  echo "error: in $pushed_worktree, the merge of main must stop on a conflict in docs/loop.md, but it didn't." >&2
+  exit 1
+fi
+sed -e '/^<<<<<<< /d' -e '/^=======$/d' -e '/^>>>>>>> /d' -e '/^It merges each pull request after a review\.$/d' \
+  -e 's/^It merges each pull request once the checks pass\.$/It merges each pull request after a review and the checks./' \
+  docs/loop.md >"$base/loop.md"
+mv "$base/loop.md" docs/loop.md
+git add docs/loop.md
+git commit --quiet --no-edit
+expect_check "git push" 2 "$(unread_push 5 docs/loop.md)"
 echo "It waits for each builder." >>docs/loop.md
 commit_all "docs: say that the loop waits for each builder"
 expect_check "git push" 2 "$(unread_push 5 docs/loop.md)"
