@@ -200,17 +200,56 @@ github_scripts_tree() {
   jq -r -e '.tree[] | select(.path == "scripts" and .type == "tree") | .sha' <<<"$answer"
 }
 
-# Prints the tree of a checkout's scripts folder as it is on disk, with the files that git doesn't track yet, other than
-# the ones that it ignores. It stages the folder in a copy of the index, as tree_on_disk in check-passed.bash does, so
-# that the real index stays as it is: scripts_tree_on_disk <checkout>
+# Prints an entry for git update-index -z --index-info for each path that standard input lists, separated by NUL
+# characters, as the path is on disk in a checkout: disk_entries <checkout>
+# It hashes the bytes on disk and takes the mode from the disk, because git add would follow settings in the shared git
+# folder that can make it store a file as main has it while the file on disk differs, such as a clean filter, a
+# conversion of line endings or core.fileMode=false. A symbolic link is a blob of its target, as git stores it. A path
+# that is neither a file nor a symbolic link gets no entry, such as a file that's gone or a folder in its place, whose
+# files are listed too. It fails for a folder that holds a repository of its own, which git lists with a / at the end
+# rather than its files.
+disk_entries() {
+  local path target blob blobs files=() modes=() i=0
+  while IFS= read -r -d '' path; do
+    if [[ -L $1/$path ]]; then
+      target=$(readlink "$1/$path") || return 1
+      blob=$(printf '%s' "$target" | git -C "$1" hash-object -w --stdin 2>/dev/null) || return 1
+      printf '120000 %s\t%s\0' "$blob" "$path"
+    elif [[ -f $1/$path ]]; then
+      files+=("$path")
+      if [[ -x $1/$path ]]; then
+        modes+=(100755)
+      else
+        modes+=(100644)
+      fi
+    elif [[ $path == */ ]]; then
+      return 1
+    fi
+  done
+  if ((${#files[@]} == 0)); then
+    return 0
+  fi
+  # One git hash-object for all the files takes 0.01 seconds for the 165 files in scripts, and one for each file 0.8.
+  blobs=$(git -C "$1" hash-object -w --no-filters -- "${files[@]}" 2>/dev/null) || return 1
+  while IFS= read -r blob; do
+    printf '%s %s\t%s\0' "${modes[i]}" "$blob" "${files[i]}"
+    i=$((i + 1))
+  done <<<"$blobs"
+}
+
+# Prints the tree of a checkout's scripts folder as it is on disk: the files of HEAD and the ones that git doesn't track,
+# other than the ones that it ignores, as disk_entries finds them. It lists them with an index that it reads from HEAD,
+# rather than with a copy of the checkout's index, which can hold flags, such as assume-unchanged and skip-worktree,
+# that make git skip a file that differs: scripts_tree_on_disk <checkout>
 scripts_tree_on_disk() {
-  local index folder status=0
-  index=$(git -C "$1" rev-parse --path-format=absolute --git-path index 2>/dev/null) || return 1
+  local folder status=0
   folder=$(mktemp -d) || return 1
-  if [[ -e $index ]] && ! cp -p "$index" "$folder/index"; then
-    status=1
-  elif ! GIT_INDEX_FILE=$folder/index git -C "$1" add --all -- scripts >/dev/null 2>&1 ||
-    ! GIT_INDEX_FILE=$folder/index git -C "$1" write-tree --prefix=scripts/ 2>/dev/null; then
+  if ! GIT_INDEX_FILE=$folder/head-index git -C "$1" read-tree HEAD 2>/dev/null ||
+    ! GIT_INDEX_FILE=$folder/head-index git -C "$1" ls-files -z --cached --others --exclude-standard -- scripts \
+      >"$folder/paths" 2>/dev/null ||
+    ! disk_entries "$1" <"$folder/paths" >"$folder/entries" ||
+    ! GIT_INDEX_FILE=$folder/disk-index git -C "$1" update-index -z --index-info <"$folder/entries" 2>/dev/null ||
+    ! GIT_INDEX_FILE=$folder/disk-index git -C "$1" write-tree --prefix=scripts/ 2>/dev/null; then
     status=1
   fi
   rm -rf "$folder"
@@ -228,7 +267,7 @@ check_orchestrators_run() {
     block "Blocked: the orchestrator runs scripts/configure-github again only in the main checkout, as a command of its own, without a variable, env, bash, sh or a redirection: cd ${main:-<main checkout>} && scripts/configure-github."
   fi
   if ! on_github=$(github_scripts_tree "$1") || ! on_disk=$(scripts_tree_on_disk "$main"); then
-    block "Blocked: this hook can't compare the main checkout's scripts folder with the one on main on GitHub, because gh or git failed. Check that gh can reach GitHub, and that git status in the main checkout shows no conflict, and try again."
+    block "Blocked: this hook can't compare the main checkout's scripts folder with the one on main on GitHub, because gh or git failed, or the folder holds a repository of its own. Check that gh can reach GitHub, remove any repository inside the folder, and try again."
   fi
   if [[ $on_github != "$on_disk" ]]; then
     block "Blocked: the orchestrator runs scripts/configure-github again only while the main checkout's scripts folder, with its untracked files, is the same as on main on GitHub, because a reviewer read each change to it before it merged. Bring the main checkout up to date with git fetch origin && git merge --ff-only origin/main, remove any other change or new file in its scripts folder, and run the script again."

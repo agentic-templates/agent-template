@@ -250,7 +250,7 @@ expect_from() {
 orchestrator=11111111-aaaa-4bbb-8ccc-000000000001
 not_alone="Blocked: the orchestrator runs scripts/configure-github again only in the main checkout, as a command of its own, without a variable, env, bash, sh or a redirection: cd $main_checkout && scripts/configure-github."
 unlike_main="Blocked: the orchestrator runs scripts/configure-github again only while the main checkout's scripts folder, with its untracked files, is the same as on main on GitHub, because a reviewer read each change to it before it merged. Bring the main checkout up to date with git fetch origin && git merge --ff-only origin/main, remove any other change or new file in its scripts folder, and run the script again."
-cannot_compare="Blocked: this hook can't compare the main checkout's scripts folder with the one on main on GitHub, because gh or git failed. Check that gh can reach GitHub, and that git status in the main checkout shows no conflict, and try again."
+cannot_compare="Blocked: this hook can't compare the main checkout's scripts folder with the one on main on GitHub, because gh or git failed, or the folder holds a repository of its own. Check that gh can reach GitHub, remove any repository inside the folder, and try again."
 TEST_RULESETS=main TEST_OTHER_RULESETS=main
 # Without a state file, or with one that names no session, no session is the orchestrator's.
 expect_from "$orchestrator" "" scripts/configure-github 2 "$second_run"
@@ -302,6 +302,44 @@ rm "$main_checkout/scripts/hooks/notes.txt"
 mkdir -p "$main_checkout/scripts/loop/__pycache__"
 echo "Bytecode" >"$main_checkout/scripts/loop/__pycache__/meter.cpython-313.pyc"
 expect_from "$orchestrator" "" scripts/configure-github 0 ""
+# A file differs, although a setting in the shared git folder makes git add store it as main has it: a flag in the
+# checkout's index that makes git skip the file, a clean filter, a conversion of line endings or core.fileMode=false.
+admin_access=$main_checkout/scripts/admin-access
+for flag in assume-unchanged skip-worktree; do
+  git -C "$main_checkout" update-index "--$flag" scripts/admin-access
+  echo "# A change that hasn't merged" >>"$admin_access"
+  expect_from "$orchestrator" "" scripts/configure-github 2 "$unlike_main"
+  git -C "$main_checkout" update-index "--no-$flag" scripts/admin-access
+  git -C "$main_checkout" checkout --quiet -- scripts/admin-access
+done
+mkdir -p "$main_checkout/.git/info"
+git -C "$main_checkout" config filter.drop-last-line.clean "sed '\$d'"
+echo "scripts/admin-access filter=drop-last-line" >"$main_checkout/.git/info/attributes"
+echo "# A change that hasn't merged" >>"$admin_access"
+expect_from "$orchestrator" "" scripts/configure-github 2 "$unlike_main"
+git -C "$main_checkout" config --unset filter.drop-last-line.clean
+git -C "$main_checkout" checkout --quiet -- scripts/admin-access
+echo "* text=auto eol=lf" >"$main_checkout/.git/info/attributes"
+awk '{ printf "%s\r\n", $0 }' "$admin_access" >"$folders/admin-access"
+mv "$folders/admin-access" "$admin_access"
+expect_from "$orchestrator" "" scripts/configure-github 2 "$unlike_main"
+rm "$main_checkout/.git/info/attributes"
+git -C "$main_checkout" checkout --quiet -- scripts/admin-access
+git -C "$main_checkout" config core.fileMode false
+chmod +x "$admin_access"
+expect_from "$orchestrator" "" scripts/configure-github 2 "$unlike_main"
+chmod -x "$admin_access"
+git -C "$main_checkout" config --unset core.fileMode
+# A symbolic link counts as a link, as git stores it, also when it points to a file with the same bytes.
+mv "$admin_access" "$folders/admin-access"
+ln -s "$folders/admin-access" "$admin_access"
+expect_from "$orchestrator" "" scripts/configure-github 2 "$unlike_main"
+rm "$admin_access"
+git -C "$main_checkout" checkout --quiet -- scripts/admin-access
+# A repository inside the folder, which git lists as one folder rather than as its files
+git init --quiet "$main_checkout/scripts/vendor"
+expect_from "$orchestrator" "" scripts/configure-github 2 "$cannot_compare"
+rm -rf "$main_checkout/scripts/vendor"
 # A builder commits a change to the script in its worktree, moves origin/main to the commit, which every worktree can
 # do, because they share the git folder, and checks the script out in the main checkout.
 echo "# A change that hasn't merged" >>"$worktree/scripts/configure-github"
@@ -311,6 +349,13 @@ git -C "$main_checkout" checkout --quiet origin/main -- scripts/configure-github
 expect_from "$orchestrator" "" scripts/configure-github 2 "$unlike_main"
 # Once GitHub's main has the change, as after its pull request merged, the orchestrator runs the script.
 TEST_SCRIPTS_TREE=$(git -C "$worktree" rev-parse HEAD:scripts)
+expect_from "$orchestrator" "" scripts/configure-github 0 ""
+# A symbolic link that main on GitHub has too
+ln -s configure-github "$worktree/scripts/configure"
+git -C "$worktree" add scripts/configure
+git -C "$worktree" commit --quiet -m "feat: add a shorter name for scripts/configure-github"
+TEST_SCRIPTS_TREE=$(git -C "$worktree" rev-parse HEAD:scripts)
+ln -s configure-github "$main_checkout/scripts/configure"
 expect_from "$orchestrator" "" scripts/configure-github 0 ""
 # When gh fails, the hook can't compare the folders.
 TEST_SCRIPTS_TREE=fail
