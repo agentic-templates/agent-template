@@ -1,4 +1,4 @@
-"""Writes the lines of agents.jsonl in the loop folder: one when an agent starts, and one each time it ends.
+"""Writes and reads the lines of agents.jsonl in the loop folder: one when an agent starts, and one each time it ends.
 scripts/loop/agent-log writes them for the agents of a Claude Code session, and scripts/loop/run-builder for its runs.
 Nothing trims the file, because Claude Code deletes the transcripts that hold some of the numbers after 30 days.
 
@@ -21,6 +21,7 @@ An end line holds at, "end" as its event, the start line's id, and:
                   null. They count when the start line has none, as for a type without an agent file.
   minutes         the agent's minutes, from each prompt or message that it received to its last call before the next
                   one, or a Codex run's minutes
+  periods         the periods that make up those minutes, each a list of its start and end time
   tool_calls      the agent's tool calls
   input_tokens    the input tokens that the agent used, cached tokens too
   output_tokens   the output tokens that the agent used. For an agent of a session, the count leaves out most of
@@ -70,8 +71,20 @@ class AgentSettings(NamedTuple):
     max_turns: str | None = None
 
 
+class AgentRun(NamedTuple):
+    """An agent in agents.jsonl: its start line, and its last end line, or None if it has none."""
+
+    start: dict[str, Any]
+    end: dict[str, Any] | None
+
+
+Period = tuple[dt.datetime, dt.datetime]
+
+
 class Numbers(NamedTuple):
     minutes: float
+    # The start and end times of each period, in ISO format
+    periods: list[tuple[str, str]]
     tool_calls: int
     input_tokens: int
     output_tokens: int
@@ -146,6 +159,7 @@ def transcript_numbers(transcript: Path) -> Numbers:
     calls, prompts = transcripts.read_transcript(transcript)
     return Numbers(
         minutes=round(transcripts.working_minutes(calls, prompts), 1),
+        periods=period_texts(transcripts.working_periods(calls, prompts)),
         tool_calls=sum(call.tool_calls for call in calls),
         input_tokens=sum(call.input_tokens for call in calls),
         output_tokens=sum(call.output_tokens for call in calls),
@@ -220,3 +234,62 @@ def append(line: dict[str, Any]) -> None:
 
 def now() -> str:
     return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def period_texts(periods: list[Period]) -> list[tuple[str, str]]:
+    return [(start.isoformat(timespec="seconds"), end.isoformat(timespec="seconds")) for start, end in periods]
+
+
+def read_runs(log: Path) -> list[AgentRun]:
+    """The agents in a log, in the order they started. A log that nothing has written yet holds none. An agent ends
+    again each time that it gets a message after it ended, so its last end line counts."""
+    if not log.exists():
+        return []
+    starts: dict[str, dict[str, Any]] = {}
+    ends: dict[str, dict[str, Any]] = {}
+    for line in log.read_text().splitlines():
+        entry: dict[str, Any] = json.loads(line)
+        (starts if entry["event"] == "start" else ends)[entry["id"]] = entry
+    return [AgentRun(start, ends.get(agent_id)) for agent_id, start in starts.items()]
+
+
+def started(run: AgentRun) -> dt.datetime:
+    return dt.datetime.fromisoformat(run.start["at"])
+
+
+def agent_transcripts(project_folder: Path) -> dict[str, Path]:
+    """The transcripts of the agents of the sessions in a Claude Code project folder, by the id of the Agent call that
+    started each. Claude Code writes the id in the .meta.json file next to the transcript when the agent starts."""
+    found = {}
+    for meta in project_folder.glob("*/subagents/*.meta.json"):
+        agent_id = json.loads(meta.read_text()).get("toolUseId")
+        if agent_id:
+            found[agent_id] = meta.with_name(meta.name.removesuffix(".meta.json") + ".jsonl")
+    return found
+
+
+def working_periods(run: AgentRun, transcripts_by_id: dict[str, Path], runs_folder: Path) -> list[Period]:
+    """When an agent worked: the periods on its last end line. An agent without an end line, such as one that still
+    runs or one whose session ended first, worked until the last line of its transcript, or for a run of
+    scripts/loop/run-builder, of its events in its run folder."""
+    if run.end is not None:
+        if "periods" not in run.end:
+            # An end line from before end lines held periods gives only the minutes.
+            return [(started(run), started(run) + dt.timedelta(minutes=run.end["minutes"]))]
+        return [(dt.datetime.fromisoformat(start), dt.datetime.fromisoformat(end)) for start, end in run.end["periods"]]
+    transcript = transcripts_by_id.get(run.start["id"])
+    if transcript is not None and transcript.exists():
+        return transcripts.working_periods(*transcripts.read_transcript(transcript))
+    events = runs_folder / run.start["id"] / "events.jsonl"
+    if events.exists():
+        return [(started(run), dt.datetime.fromtimestamp(events.stat().st_mtime, dt.UTC))]
+    return []
+
+
+def minutes_after(periods: list[Period], moment: dt.datetime | None) -> float:
+    """The minutes of the periods after a moment, or all of them without one."""
+    minutes = 0.0
+    for start, end in periods:
+        start = max(start, moment) if moment else start
+        minutes += max(0.0, (end - start).total_seconds() / 60)
+    return minutes

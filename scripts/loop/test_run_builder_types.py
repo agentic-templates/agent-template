@@ -147,6 +147,7 @@ class AgentLinesTest(RunBuilderTest):
                 "model": None,
                 "effort": None,
                 "minutes": 12.0,
+                "periods": [["2026-10-11T14:00:00+00:00", "2026-10-11T14:12:00+00:00"]],
                 "tool_calls": 4,
                 "input_tokens": 32913,
                 "output_tokens": 1366,
@@ -199,7 +200,9 @@ class AgentLinesTest(RunBuilderTest):
             },
         )
         self.assert_run_usage(end)
-        self.assertGreaterEqual(end.pop("minutes"), 0)
+        [[began, ended]] = end.pop("periods")
+        minutes = (dt.datetime.fromisoformat(ended) - dt.datetime.fromisoformat(began)).total_seconds() / 60
+        self.assertEqual(end.pop("minutes"), round(minutes, 1))
         self.assertGreaterEqual(end.pop("worktree_mb"), 0)
         self.assertEqual(
             end,

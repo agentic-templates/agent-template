@@ -72,7 +72,7 @@ needs-breakdown|f9d0c4|Accepted, but too big for one pull request. Split it befo
 needs-decision|d876e3|Waiting for a maintainer to answer a question or make a decision
 ready|0e8a16|It meets the definition of ready, so the loop builds it
 dependencies|0366d6|Dependabot's version updates
-retrospective|5319e7|A retrospective's pull request. scripts/loop/meter counts the merges since the newest one
+retrospective|5319e7|A retrospective's pull request. scripts/loop/meter adds up the agents' hours since the newest one
 LABELS
 # Delete every other label, such as the defaults that GitHub gives every new repository.
 current=$(gh label list --repo "$repo" --limit 200 --json name --jq '.[].name')

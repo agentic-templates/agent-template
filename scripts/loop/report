@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import paths
+from agent_log import AgentRun, read_runs, started
 from github import GitHubError, gh_api
 from transcripts import Call, read_transcript
 
@@ -105,13 +106,6 @@ class Agent(NamedTuple):
     calls: list[Call]
 
 
-class AgentRun(NamedTuple):
-    """An agent in .loop/agents.jsonl: its start line, and its last end line, or None if it has none."""
-
-    start: dict[str, Any]
-    end: dict[str, Any] | None
-
-
 class PullRequest(NamedTuple):
     commit_times: list[dt.datetime]
     has_failed_check: bool
@@ -140,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     options = parser.parse_args(argv)
     since: dt.datetime = options.since
     checkout = paths.main_checkout()
-    runs = [run for run in read_agent_runs(read_log("agents.jsonl")) if not run.start["test"]]
+    runs = [run for run in read_runs(paths.loop_dir() / "agents.jsonl") if not run.start["test"]]
     recent = [run for run in runs if started(run) >= since]
     try:
         ci_runs = read_ci_runs(since, checkout)
@@ -261,21 +255,6 @@ def count_once(transcripts: list[Transcript], since: dt.datetime) -> list[Agent]
         if calls:
             agents.append(Agent(transcript.role, calls))
     return agents
-
-
-def read_agent_runs(log: str) -> list[AgentRun]:
-    """The agents in the lines of agents.jsonl, in the order they started. An agent ends again each time that it gets a
-    message after it ended, so its last end line counts."""
-    starts: dict[str, dict[str, Any]] = {}
-    ends: dict[str, dict[str, Any]] = {}
-    for line in log.splitlines():
-        entry: dict[str, Any] = json.loads(line)
-        (starts if entry["event"] == "start" else ends)[entry["id"]] = entry
-    return [AgentRun(start, ends.get(agent_id)) for agent_id, start in starts.items()]
-
-
-def started(run: AgentRun) -> dt.datetime:
-    return dt.datetime.fromisoformat(run.start["at"])
 
 
 def opened(run: AgentRun) -> int | None:

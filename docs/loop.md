@@ -100,8 +100,8 @@ After each issue, go back to step 1. Start an auditor too when "Start a retrospe
   opened the draft, and ask it to fix each one, with a test when the error is in code. If you opened the draft, fix
   the errors yourself. Nobody reviews the fixes again. Once the errors are fixed, or if the reviewer reports none, run
   `gh pr ready <number>` and `gh pr merge <number>`. If it's the auditor's pull request, first add the label
-  `retrospective` to it if it's missing, because the meter counts the merged pull requests since the newest one with
-  that label.
+  `retrospective` to it if it's missing, because the meter counts the hours that the agents worked since the newest
+  merged pull request with that label.
 - **Stuck pull requests.** Run `scripts/stuck-pull-requests`. For each pull request that it prints:
   - If it's Dependabot's, leave it for the maintainer.
   - If the script says that the merge queue removed it 2 times or more, plan its issue again.

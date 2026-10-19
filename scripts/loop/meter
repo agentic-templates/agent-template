@@ -16,8 +16,11 @@ The session meter's stop point is 100% minus the larger of 2 percentage points a
 between the last two readings. Each weekly meter, the one for all models and each model's own, stops at 99%.
 
 The last line gives the machine's free disk and load, the orchestrator's context size, and whether a retrospective is
-due. One is due after a release, and after {merges} merged pull requests, since the last retrospective: the newest
-merged pull request with the label retrospective.
+due. One is due once the agents have worked {hours} hours since the last retrospective, which is the newest merged
+pull request with the label retrospective, or since the start of .loop/agents.jsonl before there is one. The hours
+come from the periods on each agent's last end line in .loop/agents.jsonl, which scripts/loop/agent_log.py describes.
+An agent without an end line counts until the last line of its transcript. The test builds and the auditors don't
+count.
 
 With --wake, the meter keeps reading, and prints and ends when an account's advice changes, when an account gives no
 reading, and 50 minutes after it started while an account's advice is stop. Run it in the background, so that its
@@ -46,6 +49,7 @@ import time
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import agent_log
 import paths
 from accounts import Account, AccountsError, claude_environment, load_accounts
 from github import GitHubError, gh_api
@@ -84,19 +88,19 @@ CODEX_SNAPSHOT_AGE = dt.timedelta(days=8)
 # 0.25 seconds and about 0.5 GB of memory to read whole.
 TRANSCRIPT_TAIL_BYTES = 400_000
 RETROSPECTIVE_LABEL = "retrospective"
-MERGES_PER_RETROSPECTIVE = 30
+HOURS_PER_RETROSPECTIVE = 30.0
+# A retrospective doesn't look back on the work of an earlier one.
+AUDITOR = "auditor"
 
 # GitHub can't order pull requests by when they merged, so the meter takes the latest merge of the newest ones.
 REPOSITORY_QUERY = """
 query($owner: String!, $name: String!, $label: String!) {
   repository(owner: $owner, name: $name) {
-    latestRelease { tagName publishedAt }
     pullRequests(labels: [$label], states: MERGED, first: 100, orderBy: {field: CREATED_AT, direction: DESC}) {
       nodes { mergedAt }
     }
   }
 }"""
-SEARCH_COUNT_QUERY = "query($search: String!) { search(query: $search, type: ISSUE) { issueCount } }"
 
 
 class Advice(NamedTuple):
@@ -113,11 +117,6 @@ class Readings(NamedTuple):
     # The shortest wait that an account's advice asks for
     wait_seconds: int
     has_every_account: bool
-
-
-class Release(NamedTuple):
-    tag: str
-    published: dt.datetime
 
 
 class NoReading(Exception):
@@ -145,16 +144,16 @@ def main(argv: list[str] | None = None) -> int:
         load=os.getloadavg()[0],
         cores=os.cpu_count() or 1,
         context=orchestrator_context(loop_folder / "state.md", checkout),
-        retrospective=read_retrospective(checkout),
+        retrospective=read_retrospective(checkout, loop_folder),
     )
     print("\n".join([*readings.lines, machine]))
     return 0 if readings.has_every_account else 1
 
 
 def help_text() -> str:
-    """The docstring, with MERGES_PER_RETROSPECTIVE in place of {merges}, so that a retrospective changes the number
-    in one place. The docstring's JSON example has braces of its own, so str.format can't fill it in."""
-    return str(__doc__).replace("{merges}", str(MERGES_PER_RETROSPECTIVE))
+    """The docstring, with HOURS_PER_RETROSPECTIVE in place of {hours}, so that a retrospective changes the number in
+    one place. The docstring's JSON example has braces of its own, so str.format can't fill it in."""
+    return str(__doc__).replace("{hours}", f"{HOURS_PER_RETROSPECTIVE:g}")
 
 
 def now() -> dt.datetime:
@@ -472,30 +471,31 @@ def context_tokens(transcript: Path) -> int | None:
     return None
 
 
-def read_retrospective(checkout: Path) -> str:
+def read_retrospective(checkout: Path, loop_folder: Path) -> str:
     try:
         variables = {"owner": "{owner}", "name": "{repo}", "label": RETROSPECTIVE_LABEL}
         repository = github(REPOSITORY_QUERY, variables, checkout)["repository"]
-        merges = [dt.datetime.fromisoformat(node["mergedAt"]) for node in repository["pullRequests"]["nodes"]]
-        last = max(merges, default=None)
-        search = "repo:{owner}/{repo} is:pr is:merged"
-        if last:
-            search += f" merged:>{last.astimezone(dt.UTC):%Y-%m-%dT%H:%M:%SZ}"
-        merged = github(SEARCH_COUNT_QUERY, {"search": search}, checkout)["search"]["issueCount"]
     except GitHubError as error:
         return f"retrospective unknown: {error}"
-    latest = repository["latestRelease"]
-    release = Release(latest["tagName"], dt.datetime.fromisoformat(latest["publishedAt"])) if latest else None
-    return retrospective_note(last, release, merged)
+    merges = [dt.datetime.fromisoformat(node["mergedAt"]) for node in repository["pullRequests"]["nodes"]]
+    last = max(merges, default=None)
+    runs = agent_log.read_runs(loop_folder / "agents.jsonl")
+    counted = [run for run in runs if not run.start["test"] and run.start["type"] != AUDITOR]
+    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
+    minutes = sum(
+        agent_log.minutes_after(agent_log.working_periods(run, transcripts, loop_folder / "runs"), last)
+        for run in counted
+    )
+    return retrospective_note(last, minutes / 60)
 
 
-def retrospective_note(last: dt.datetime | None, release: Release | None, merged: int) -> str:
+def retrospective_note(last: dt.datetime | None, hours: float) -> str:
     since = "since the last one" if last else "with no retrospective yet"
-    if release and (last is None or release.published > last):
-        return f"retrospective due: release {release.tag} {since}"
-    if merged >= MERGES_PER_RETROSPECTIVE:
-        return f"retrospective due: {merged} merged pull requests {since}"
-    return f"retrospective not due: {merged} of {MERGES_PER_RETROSPECTIVE} merged pull requests {since}, and no release"
+    if hours >= HOURS_PER_RETROSPECTIVE:
+        return f"retrospective due: {hours:.1f} hours of agents' work {since}"
+    # Rounded down, so that 29.98 hours don't show as 30.0 of 30
+    shown = math.floor(hours * 10) / 10
+    return f"retrospective not due: {shown:.1f} of {HOURS_PER_RETROSPECTIVE:g} hours of agents' work {since}"
 
 
 def github(query: str, variables: dict[str, str], checkout: Path) -> Any:

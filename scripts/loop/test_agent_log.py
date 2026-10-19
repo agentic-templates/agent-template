@@ -260,6 +260,7 @@ class EndTest(AgentLogTest):
                 "model": None,
                 "effort": None,
                 "minutes": 12.0,
+                "periods": [["2026-10-11T14:00:00+00:00", "2026-10-11T14:12:00+00:00"]],
                 "tool_calls": 3,
                 "input_tokens": 1500,
                 "output_tokens": 34,

@@ -16,6 +16,7 @@ from unittest import mock
 from zoneinfo import ZoneInfo
 
 import paths
+from test_transcripts import call_line, prompt_line, write_transcript
 
 METER = Path(__file__).with_name("meter")
 # The meter's file name has no .py, so the tests load it by its path.
@@ -27,9 +28,9 @@ NOW = dt.datetime(2026, 10, 18, 3, 8, tzinfo=NEW_YORK)
 
 # A stand-in for claude and gh. It writes each call to calls.jsonl in STANDIN_DIR, with the folder it runs in, the files
 # there and some variables. claude gives the next answer in claude.json there, and the last one again when they run out.
-# gh gives the answer under "repository" or "search" in gh.json, for its two queries. An answer can sleep, print to
-# stdout and stderr, and exit with a status. -S keeps coverage, which starts in each Python process of the tests, out
-# of the stand-ins, where it made the tests five times slower.
+# gh gives the answer in gh.json. An answer can sleep, print to stdout and stderr, and exit with a status. -S keeps
+# coverage, which starts in each Python process of the tests, out of the stand-ins, where it made the tests five times
+# slower.
 STANDIN = f"""#!{sys.executable} -S
 import json, os, sys, time
 folder, tool = os.environ["STANDIN_DIR"], os.path.basename(sys.argv[0])
@@ -39,7 +40,7 @@ with open(os.path.join(folder, "calls.jsonl"), "a") as log:
     log.write(json.dumps(call) + "\\n")
 answers = json.load(open(os.path.join(folder, tool + ".json")))
 if tool == "gh":
-    answer = answers["search" if any("search(" in argument for argument in sys.argv) else "repository"]
+    answer = answers
 else:
     calls = [json.loads(line) for line in open(os.path.join(folder, "calls.jsonl"))]
     answer = answers[min(sum(call["tool"] == tool for call in calls), len(answers)) - 1]
@@ -63,18 +64,11 @@ def usage_output(
     return {"stdout": output}
 
 
-def github_answer(
-    merges: tuple[str, ...] = ("2026-10-11T14:00:00Z",), release: tuple[str, str] | None = None, merged: int = 12
-) -> dict[str, Any]:
-    """gh's answers, with the times when the retrospectives' pull requests merged."""
-    repository = {
-        "latestRelease": {"tagName": release[0], "publishedAt": release[1]} if release else None,
-        "pullRequests": {"nodes": [{"mergedAt": merge} for merge in merges]},
-    }
-    return {
-        "repository": {"stdout": json.dumps({"data": {"repository": repository}})},
-        "search": {"stdout": json.dumps({"data": {"search": {"issueCount": merged}}})},
-    }
+def github_answer(merges: tuple[str, ...] = ("2026-10-18T05:00:00Z",), **more: Any) -> dict[str, Any]:
+    """gh's answer, with the times when the retrospectives' pull requests merged, and any more fields of the
+    repository. The default time is 1:00 in New York on the day of NOW."""
+    repository = {"pullRequests": {"nodes": [{"mergedAt": merge} for merge in merges]}, **more}
+    return {"stdout": json.dumps({"data": {"repository": repository}})}
 
 
 def meters(
@@ -532,16 +526,18 @@ class WakeTest(MeterTest):
 class MachineLineTest(MeterTest):
     def test_gives_the_disk_the_load_the_context_and_the_retrospective(self) -> None:
         self.assertEqual(
-            meter.machine_line(94.4, 3.25, 10, 210_500, "retrospective due: release v1.2.0 since the last one"),
+            meter.machine_line(
+                94.4, 3.25, 10, 210_500, "retrospective due: 31.5 hours of agents' work since the last one"
+            ),
             "machine | disk 94 GB free | load 3.2 on 10 cores | orchestrator context 210k | "
-            "retrospective due: release v1.2.0 since the last one",
+            "retrospective due: 31.5 hours of agents' work since the last one",
         )
 
     def test_is_the_last_line(self) -> None:
         self.assertRegex(
             self.run_meter()[1][-1],
             r"^machine \| disk \d+ GB free \| load \d+\.\d on \d+ cores \| orchestrator context unknown \| "
-            r"retrospective not due: 12 of 30 merged pull requests since the last one, and no release$",
+            r"retrospective not due: 0\.0 of 30 hours of agents' work since the last one$",
         )
 
 
@@ -598,56 +594,172 @@ class ContextTest(MeterTest):
                 self.assertEqual(self.context(), "orchestrator context unknown")
 
 
+def new_york(time: str) -> dt.datetime:
+    return dt.datetime.fromisoformat(time).replace(tzinfo=NEW_YORK)
+
+
+def agent(
+    agent_id: str,
+    started: str,
+    minutes: float | None,
+    agent_type: str = "builder",
+    is_test: bool = False,
+    periods: list[tuple[str, str]] | None = None,
+) -> list[str]:
+    """The lines of .loop/agents.jsonl for an agent that started at a time in New York, with an end line unless
+    minutes is None. The agent worked from its start for the minutes, unless the periods say otherwise."""
+    start = {"at": new_york(started).isoformat(), "event": "start", "id": agent_id, "type": agent_type, "test": is_test}
+    lines = [json.dumps(start)]
+    if minutes is None:
+        return lines
+    if periods is None:
+        periods = [(started, (new_york(started) + dt.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%S"))]
+    end = {
+        "at": new_york(started).isoformat(),
+        "event": "end",
+        "id": agent_id,
+        "minutes": minutes,
+        "periods": [[new_york(begin).isoformat(), new_york(finish).isoformat()] for begin, finish in periods],
+    }
+    lines.append(json.dumps(end))
+    return lines
+
+
 class RetrospectiveTest(MeterTest):
-    def retrospective(self) -> str:
+    """The last retrospective merged at 1:00 in New York, unless a test says otherwise."""
+
+    def retrospective(self, *agents: list[str]) -> str:
+        lines = [line for lines in agents for line in lines]
+        (self.loop / "agents.jsonl").write_text("".join(f"{line}\n" for line in lines))
         return self.run_meter()[1][-1].split(" | ")[4]
 
-    def test_is_due_after_a_release_since_the_last_one(self) -> None:
-        self.answer("gh", github_answer(release=("v1.2.0", "2026-10-12T09:00:00Z"), merged=3))
-        self.assertEqual(self.retrospective(), "retrospective due: release v1.2.0 since the last one")
+    def test_is_due_once_one_agent_worked_30_hours_since_the_last_one(self) -> None:
+        cases = {
+            1800: "retrospective due: 30.0 hours of agents' work since the last one",
+            1799: "retrospective not due: 29.9 of 30 hours of agents' work since the last one",
+        }
+        for minutes, note in cases.items():
+            with self.subTest(minutes=minutes):
+                self.assertEqual(self.retrospective(agent("a", "2026-10-18T01:30:00", minutes)), note)
 
-    def test_is_not_due_after_a_release_before_the_last_one(self) -> None:
-        self.answer("gh", github_answer(release=("v1.1.0", "2026-10-11T13:59:59Z"), merged=3))
+    def test_adds_up_the_work_of_every_type_of_agent(self) -> None:
+        agents = [
+            agent("a", "2026-10-18T01:00:00", 600),
+            agent("b", "2026-10-18T01:30:00", 600, "researcher"),
+            agent("c", "2026-10-18T02:00:00", 600, "reviewer"),
+            agent("d", "2026-10-18T02:00:00", 1, "codex"),
+        ]
         self.assertEqual(
-            self.retrospective(),
-            "retrospective not due: 3 of 30 merged pull requests since the last one, and no release",
+            self.retrospective(*agents), "retrospective due: 30.0 hours of agents' work since the last one"
         )
 
-    def test_is_due_after_30_merged_pull_requests_since_the_last_one(self) -> None:
-        self.answer("gh", github_answer(merged=30))
-        self.assertEqual(self.retrospective(), "retrospective due: 30 merged pull requests since the last one")
-        self.answer("gh", github_answer(merged=29))
+    def test_counts_the_last_end_of_an_agent_that_ended_again_after_a_message(self) -> None:
+        first_end = agent("a", "2026-10-18T01:30:00", 1000)
+        again = agent("a", "2026-10-18T01:30:00", 1200)[1]
         self.assertEqual(
-            self.retrospective(),
-            "retrospective not due: 29 of 30 merged pull requests since the last one, and no release",
+            self.retrospective([*first_end, again]),
+            "retrospective not due: 20.0 of 30 hours of agents' work since the last one",
         )
 
-    def test_counts_the_pull_requests_merged_after_the_last_retrospective(self) -> None:
+    def test_leaves_out_test_builds_auditors_and_work_before_the_last_one(self) -> None:
+        agents = [
+            agent("test", "2026-10-18T01:30:00", 600, is_test=True),
+            agent("auditor", "2026-10-18T01:30:00", 600, "auditor"),
+            agent("before", "2026-10-17T20:00:00", 300),
+            agent("counted", "2026-10-18T01:00:00", 60),
+        ]
+        self.assertEqual(
+            self.retrospective(*agents), "retrospective not due: 1.0 of 30 hours of agents' work since the last one"
+        )
+
+    def test_counts_the_work_after_the_last_one_of_an_agent_that_started_before_it(self) -> None:
+        periods = [
+            ("2026-10-17T23:00:00", "2026-10-18T00:30:00"),
+            ("2026-10-18T00:40:00", "2026-10-18T01:30:00"),
+            ("2026-10-18T02:00:00", "2026-10-18T02:15:00"),
+        ]
+        self.assertEqual(
+            self.retrospective(agent("a", "2026-10-17T23:00:00", 155, periods=periods)),
+            "retrospective not due: 0.7 of 30 hours of agents' work since the last one",
+        )
+
+    def test_counts_an_agent_of_a_session_without_an_end_line_until_the_last_line_of_its_transcript(self) -> None:
+        project = "".join(character if character.isalnum() else "-" for character in str(paths.main_checkout()))
+        agents = self.root / "claude-config" / "projects" / project / "session-1" / "subagents"
+        start = new_york("2026-10-18T00:30:00").astimezone(dt.UTC)
+        write_transcript(
+            agents / "agent-a1.jsonl",
+            [
+                {**prompt_line(0), "timestamp": start.isoformat()},
+                {**call_line("a", 0), "timestamp": (start + dt.timedelta(minutes=50)).isoformat()},
+                {**call_line("b", 0), "timestamp": (start + dt.timedelta(minutes=90)).isoformat()},
+            ],
+        )
+        (agents / "agent-a1.meta.json").write_text(json.dumps({"agentType": "builder", "toolUseId": "toolu_1"}))
+        (agents / "agent-a2.meta.json").write_text(json.dumps({"agentType": "builder"}))
+        self.assertEqual(
+            self.retrospective(agent("toolu_1", "2026-10-18T00:30:00", None)),
+            "retrospective not due: 1.0 of 30 hours of agents' work since the last one",
+        )
+
+    def test_counts_a_run_without_an_end_line_until_the_last_line_of_its_events(self) -> None:
+        events = self.loop / "runs" / "issue-12-run" / "events.jsonl"
+        events.parent.mkdir(parents=True)
+        events.write_text('{"type": "turn.started"}\n')
+        last_line = new_york("2026-10-18T02:30:00").timestamp()
+        os.utime(events, (last_line, last_line))
+        self.assertEqual(
+            self.retrospective(
+                agent("issue-12-run", "2026-10-18T00:00:00", None), agent("other-run", "2026-10-18T01:00:00", None)
+            ),
+            "retrospective not due: 1.5 of 30 hours of agents' work since the last one",
+        )
+
+    def test_counts_the_minutes_of_an_end_line_without_periods_from_the_agents_start(self) -> None:
+        start = json.dumps(
+            {"at": "2026-10-18T00:30:00-04:00", "event": "start", "id": "a", "type": "builder", "test": False}
+        )
+        end = json.dumps({"at": "2026-10-18T03:00:00-04:00", "event": "end", "id": "a", "minutes": 120})
+        self.assertEqual(
+            self.retrospective([start, end]),
+            "retrospective not due: 1.5 of 30 hours of agents' work since the last one",
+        )
+
+    def test_starts_at_the_newest_retrospective(self) -> None:
         self.answer(
-            "gh", github_answer(merges=("2026-10-01T09:00:00Z", "2026-10-11T14:00:00Z", "2026-10-05T09:00:00Z"))
+            "gh", github_answer(merges=("2026-10-11T09:00:00Z", "2026-10-18T05:00:00Z", "2026-10-15T09:00:00Z"))
         )
-        self.run_meter()
-        repository, search = self.calls("gh")
+        agents = [agent("a", "2026-10-16T12:00:00", 1800), agent("b", "2026-10-18T02:00:00", 90)]
+        self.assertEqual(
+            self.retrospective(*agents), "retrospective not due: 1.5 of 30 hours of agents' work since the last one"
+        )
+        (repository,) = self.calls("gh")
         self.assertEqual(repository["args"][:4], ["api", "graphql", "-f", f"query={meter.REPOSITORY_QUERY}"])
         self.assertEqual(
             repository["args"][4:], ["-F", "owner={owner}", "-F", "name={repo}", "-F", "label=retrospective"]
         )
-        self.assertEqual(
-            search["args"][4:], ["-F", "search=repo:{owner}/{repo} is:pr is:merged merged:>2026-10-11T14:00:00Z"]
-        )
-        self.assertEqual(Path(search["cwd"]), paths.main_checkout())
+        self.assertEqual(Path(repository["cwd"]), paths.main_checkout())
 
-    def test_counts_every_merged_pull_request_before_the_first_retrospective(self) -> None:
-        self.answer("gh", github_answer(merges=(), merged=31))
-        self.assertEqual(self.retrospective(), "retrospective due: 31 merged pull requests with no retrospective yet")
-        self.assertEqual(self.calls("gh")[1]["args"][4:], ["-F", "search=repo:{owner}/{repo} is:pr is:merged"])
-        self.answer("gh", github_answer(merges=(), release=("v0.1.0", "2026-10-01T09:00:00Z"), merged=1))
-        self.assertEqual(self.retrospective(), "retrospective due: release v0.1.0 with no retrospective yet")
+    def test_counts_the_whole_log_before_the_first_retrospective(self) -> None:
+        self.answer("gh", github_answer(merges=()))
+        agents = [agent("a", "2026-09-01T12:00:00", 1500), agent("b", "2026-10-18T02:00:00", 300)]
+        self.assertEqual(
+            self.retrospective(*agents), "retrospective due: 30.0 hours of agents' work with no retrospective yet"
+        )
+        self.assertEqual(
+            self.retrospective(), "retrospective not due: 0.0 of 30 hours of agents' work with no retrospective yet"
+        )
+
+    def test_is_not_due_after_a_release_alone(self) -> None:
+        release = {"tagName": "v1.2.0", "publishedAt": "2026-10-18T06:00:00Z"}
+        self.answer("gh", github_answer(latestRelease=release))
+        self.assertEqual(
+            self.retrospective(agent("a", "2026-10-18T01:30:00", 60)),
+            "retrospective not due: 1.0 of 30 hours of agents' work since the last one",
+        )
 
     def test_is_unknown_when_gh_fails(self) -> None:
-        self.answer(
-            "gh", {"repository": {"status": 1, "stderr": "HTTP 401: Bad credentials\n(https://api.github.com)\n"}}
-        )
+        self.answer("gh", {"status": 1, "stderr": "HTTP 401: Bad credentials\n(https://api.github.com)\n"})
         self.assertEqual(
             self.retrospective(),
             "retrospective unknown: gh api graphql failed: HTTP 401: Bad credentials (https://api.github.com). Check the "
@@ -660,15 +772,15 @@ class RetrospectiveTest(MeterTest):
 
 
 class HelpTest(unittest.TestCase):
-    def test_gives_the_number_of_merged_pull_requests_that_makes_a_retrospective_due(self) -> None:
+    def test_gives_the_hours_of_work_that_make_a_retrospective_due(self) -> None:
         printed = io.StringIO()
         with (
-            mock.patch.object(meter, "MERGES_PER_RETROSPECTIVE", 12),
+            mock.patch.object(meter, "HOURS_PER_RETROSPECTIVE", 12.5),
             contextlib.redirect_stdout(printed),
             self.assertRaises(SystemExit),
         ):
             meter.main(["--help"])
-        self.assertIn("after 12 merged pull requests,", " ".join(printed.getvalue().split()))
+        self.assertIn("once the agents have worked 12.5 hours since", " ".join(printed.getvalue().split()))
 
 
 class ScriptTest(MeterTest):
