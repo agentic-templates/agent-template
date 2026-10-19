@@ -5,6 +5,9 @@
 
 The lines are:
 
+  Before                    When the period before starts, which the Type lines compare with. It runs from the last
+                            retrospective that merged before --since to --since, or from the first agent if none merged
+                            before. There is no period before, and no line, until a retrospective merged by --since.
   CI runs that passed       How many runs of .github/workflows/ci.yml passed, and the median time from a run's start
                             to its end.
   CI jobs                   Each job's median time in those runs, leaving out the runs that skipped it. The jobs that
@@ -14,7 +17,12 @@ The lines are:
                             their minutes and of their tool calls, and their share of the input tokens that all those
                             agents used. Then their output tokens, and how many pull requests they opened, and how
                             many of those needed a fix after review, failed a check, left the merge queue unmerged, or
-                            got a second builder. The test builds of a retrospective don't count.
+                            got a second builder. The test builds of a retrospective don't count. If the agents of the
+                            type opened pull requests in the period before, the line gives the same counts for those,
+                            as they stood at --since, and a type that started no agent since gets a line for them. If
+                            they opened pull requests in both periods, the line names each count whose difference is
+                            larger than chance, by Fisher's exact test at the 5% level, with Holm's correction for the
+                            number of counts that the report compares.
   Requests of the agents of a session that have no event
                             How many of these requests have no event in .loop/requests.jsonl, which
                             scripts/loop/request_events.py describes, out of all of them. The report takes each
@@ -81,6 +89,7 @@ for.
 import argparse
 import datetime as dt
 import json
+import math
 import statistics
 import sys
 from collections import Counter
@@ -93,7 +102,7 @@ import heavy_log
 import paths
 import request_events
 from agent_log import AgentRun, Period, agent_output_tokens, agent_transcripts, read_runs, started, working_periods
-from github import GitHubError, gh_api
+from github import GitHubError, gh_api, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, hook_threshold, note_files
 from transcripts import Call, Message, person_messages, read_transcript
 
@@ -125,9 +134,9 @@ query($owner: String!, $repo: String!) {
   repository(owner: $owner, name: $repo) { %s }
 }
 fragment facts on PullRequest {
-  commits(first: 100) { nodes { commit { committedDate checkSuites(first: 20) { nodes { conclusion } } } } }
+  commits(first: 100) { nodes { commit { committedDate checkSuites(first: 20) { nodes { conclusion updatedAt } } } } }
   timelineItems(itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT], first: 100) {
-    nodes { ... on RemovedFromMergeQueueEvent { reason } }
+    nodes { ... on RemovedFromMergeQueueEvent { reason createdAt } }
   }
 }"""
 # GitHub records a removal from the merge queue with this reason each time the queue merges a pull request.
@@ -135,6 +144,9 @@ MERGED_REASON = "merged"
 # What each field of PullRequestResult says about a pull request, in the fields' order
 RESULT_WORDS = ("needed a fix after review", "failed a check", "left the merge queue unmerged", "got a second builder")
 NOTHING_HAPPENED = "no fix after review, failed check, unmerged exit from the merge queue or second builder"
+# A difference between two counts is larger than chance when chance alone gives one as large less often than this,
+# after Holm's correction.
+CHANCE_LEVEL = 0.05
 # How many kinds of tool calls a context line names, those whose results added the most context first
 MOST_ADDING_KINDS = 3
 
@@ -165,8 +177,8 @@ class Context(NamedTuple):
 
 class PullRequest(NamedTuple):
     commit_times: list[dt.datetime]
-    has_failed_check: bool
-    has_left_merge_queue: bool
+    failed_check_times: list[dt.datetime]
+    unmerged_exit_times: list[dt.datetime]
 
 
 class PullRequestResult(NamedTuple):
@@ -219,14 +231,18 @@ def main(argv: list[str] | None = None) -> int:
     recent = [run for run in runs if started(run) >= since]
     try:
         ci_runs = read_ci_runs(since, checkout)
-        pull_requests = read_pull_requests(sorted({number for run in recent if (number := opened(run))}), checkout)
+        period_before = period_before_since(retrospective_merges(checkout), since)
+        before = [run for run in runs if period_before and period_before.start <= started(run) < since]
+        compared = recent + before
+        pull_requests = read_pull_requests(sorted({number for run in compared if (number := opened(run))}), checkout)
         transcripts = read_transcripts(paths.claude_project_folder(checkout), checkout, since)
     except (GitHubError, ReportError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
+    # The last retrospective counted the period before as it stood at --since, so the period before stops there.
     results = {
-        run.start["id"]: pull_request_result(run, pull_requests[number], runs)
-        for run in recent
+        run.start["id"]: pull_request_result(run, pull_requests[number], runs, None if started(run) >= since else since)
+        for run in compared
         if (number := opened(run))
     }
     agents = count_once(transcripts, since)
@@ -246,8 +262,9 @@ def main(argv: list[str] | None = None) -> int:
     ends = [run.end for run in recent if run.end]
     lines = [
         f"Since {since.isoformat()}",
+        *before_lines(period_before),
         *ci_lines(ci_runs),
-        *type_lines(recent, results, event_tokens),
+        *type_lines(recent, before, results, event_tokens),
         no_event_line(ends, event_tokens),
         orchestrator_line(agents),
         block_line(count_blocks(read_log("blocks.log"), since)),
@@ -377,6 +394,31 @@ def message_lines(messages: list[Message]) -> list[str]:
     return lines
 
 
+class PeriodBefore(NamedTuple):
+    start: dt.datetime
+    # Whether a retrospective merged at the start, rather than the period starting with the first agent
+    is_from_retrospective: bool
+
+
+def period_before_since(merges: list[dt.datetime], since: dt.datetime) -> PeriodBefore | None:
+    """The period that the Type lines compare with: from the last retrospective that merged before the time, or from
+    the first agent, to the time. There is none until a retrospective merged by the time."""
+    if not any(merge <= since for merge in merges):
+        return None
+    earlier = [merge for merge in merges if merge < since]
+    if not earlier:
+        return PeriodBefore(dt.datetime.min.replace(tzinfo=dt.UTC), False)
+    return PeriodBefore(max(earlier), True)
+
+
+def before_lines(period: PeriodBefore | None) -> list[str]:
+    if period is None:
+        return []
+    if not period.is_from_retrospective:
+        return ["Before: from the first agent, because no retrospective merged before then"]
+    return [f"Before: from {period.start.isoformat()}, when the last retrospective before then merged"]
+
+
 def opened(run: AgentRun) -> int | None:
     """The pull request that the agent opened, or None."""
     return run.end["pull_request"] if run.end else None
@@ -396,25 +438,41 @@ def read_pull_requests(numbers: list[int], checkout: Path) -> dict[int, PullRequ
 
 def pull_request_facts(node: dict[str, Any]) -> PullRequest:
     commits = [entry["commit"] for entry in node["commits"]["nodes"]]
+    suites = [suite for commit in commits for suite in commit["checkSuites"]["nodes"]]
+    removals = node["timelineItems"]["nodes"]
     return PullRequest(
         commit_times=[dt.datetime.fromisoformat(commit["committedDate"]) for commit in commits],
-        has_failed_check=any(
-            suite["conclusion"] in FAILED_CONCLUSIONS for commit in commits for suite in commit["checkSuites"]["nodes"]
-        ),
-        has_left_merge_queue=any(removal["reason"] != MERGED_REASON for removal in node["timelineItems"]["nodes"]),
+        failed_check_times=[
+            dt.datetime.fromisoformat(suite["updatedAt"])
+            for suite in suites
+            if suite["conclusion"] in FAILED_CONCLUSIONS
+        ],
+        unmerged_exit_times=[
+            dt.datetime.fromisoformat(removal["createdAt"])
+            for removal in removals
+            if removal["reason"] != MERGED_REASON
+        ],
     )
 
 
-def pull_request_result(opener: AgentRun, pull_request: PullRequest, runs: list[AgentRun]) -> PullRequestResult:
-    """What happened to the pull request that an agent opened, from its facts and the agents that started later."""
+def pull_request_result(
+    opener: AgentRun, pull_request: PullRequest, runs: list[AgentRun], until: dt.datetime | None
+) -> PullRequestResult:
+    """What happened to the pull request that an agent opened, from its facts and the agents that started later, up to
+    the time, or up to now without one."""
+
+    def by_then(time: dt.datetime) -> bool:
+        return until is None or time < until
+
     number = opened(opener)
-    later = [run for run in runs if started(run) > started(opener)]
+    later = [run for run in runs if started(opener) < started(run) and by_then(started(run))]
     reviews = [started(run) for run in later if run.start["type"] == REVIEWER and run.start["issue"] == number]
     subjects = {number, opener.start["issue"]} - {None}
+    commit_times = [time for time in pull_request.commit_times if by_then(time)]
     return PullRequestResult(
-        needed_fix_after_review=bool(reviews) and any(time > min(reviews) for time in pull_request.commit_times),
-        failed_check=pull_request.has_failed_check,
-        left_merge_queue=pull_request.has_left_merge_queue,
+        needed_fix_after_review=bool(reviews) and any(time > min(reviews) for time in commit_times),
+        failed_check=any(by_then(time) for time in pull_request.failed_check_times),
+        left_merge_queue=any(by_then(time) for time in pull_request.unmerged_exit_times),
         got_second_builder=any(run.start["type"] != REVIEWER and run.start["issue"] in subjects for run in later),
     )
 
@@ -444,15 +502,32 @@ def ci_lines(runs: list[CiRun]) -> list[str]:
     ]
 
 
-def type_lines(runs: list[AgentRun], results: dict[str, PullRequestResult], event_tokens: dict[str, int]) -> list[str]:
-    if not runs:
+def type_lines(
+    runs: list[AgentRun], before: list[AgentRun], results: dict[str, PullRequestResult], event_tokens: dict[str, int]
+) -> list[str]:
+    """A line for each type of the agents that started, and for each type whose agents opened pull requests only in
+    the period before."""
+    names = {run.start["type"] for run in runs} | {run.start["type"] for run in before if run.start["id"] in results}
+    if not names:
         return ["Types: no agent started"]
     all_input = sum(run.end["input_tokens"] for run in runs if run.end)
-    types = sorted({run.start["type"] for run in runs})
-    return [
-        type_line(name, [run for run in runs if run.start["type"] == name], all_input, results, event_tokens)
-        for name in types
-    ]
+    p_values: dict[tuple[str, str], float] = {}
+    for name in names:
+        now, earlier = type_results(name, runs, results), type_results(name, before, results)
+        if now and earlier:
+            for field, words in enumerate(RESULT_WORDS):
+                p_values[(name, words)] = count_p_value(now, earlier, field)
+    larger = larger_than_chance(p_values)
+    lines = []
+    for name in sorted(names):
+        line = type_line(name, [run for run in runs if run.start["type"] == name], all_input, results, event_tokens)
+        earlier = type_results(name, before, results)
+        if earlier:
+            line += f" | before: pull requests: {len(earlier)}, {', '.join(result_counts(earlier))}"
+        if (name, RESULT_WORDS[0]) in p_values:
+            line += " | " + verdict([words for words in RESULT_WORDS if (name, words) in larger])
+        lines.append(line)
+    return lines
 
 
 def type_line(
@@ -467,11 +542,58 @@ def type_line(
         output_tokens = sum(agent_output_tokens(end, event_tokens)[0] for end in ends)
         line += f", median {minutes:.1f} min and {tool_calls:g} tool calls, {share:.0%} of the agents' input tokens"
         line += f" | output tokens: {output_tokens}"
-    own = [results[run.start["id"]] for run in runs if run.start["id"] in results]
+    own = type_results(name, runs, results)
     if not own:
         return f"{line} | pull requests: 0"
-    counts = [f"{sum(result[field] for result in own)} {words}" for field, words in enumerate(RESULT_WORDS)]
-    return f"{line} | pull requests: {len(own)}, {', '.join(counts)}"
+    return f"{line} | pull requests: {len(own)}, {', '.join(result_counts(own))}"
+
+
+def type_results(name: str, runs: list[AgentRun], results: dict[str, PullRequestResult]) -> list[PullRequestResult]:
+    """What happened to the pull requests that the agents of the type opened."""
+    return [results[run.start["id"]] for run in runs if run.start["type"] == name and run.start["id"] in results]
+
+
+def result_counts(results: list[PullRequestResult]) -> list[str]:
+    return [f"{sum(result[field] for result in results)} {words}" for field, words in enumerate(RESULT_WORDS)]
+
+
+def verdict(larger: list[str]) -> str:
+    return f"larger than chance: {', '.join(larger)}" if larger else "no difference larger than chance"
+
+
+def count_p_value(now: list[PullRequestResult], earlier: list[PullRequestResult], field: int) -> float:
+    """The p-value of the difference of a count from the period before to now."""
+    count_now = sum(result[field] for result in now)
+    return fisher_exact(count_now, len(now), sum(result[field] for result in earlier), len(earlier))
+
+
+def larger_than_chance[Key](p_values: dict[Key, float]) -> set[Key]:
+    """The keys whose difference is larger than chance, by Holm's correction: the smallest p-value must be below the
+    level divided by the number of p-values, the next below the level divided by one fewer, and so on, until one
+    isn't. The report tests four counts of each type, so without the correction it would often name a difference
+    that chance alone gave."""
+    larger: set[Key] = set()
+    ordered = sorted(p_values.items(), key=lambda item: item[1])
+    for rank, (key, p_value) in enumerate(ordered):
+        if p_value >= CHANCE_LEVEL / (len(ordered) - rank):
+            break
+        larger.add(key)
+    return larger
+
+
+def fisher_exact(count: int, total: int, other_count: int, other_total: int) -> float:
+    """The two-sided p-value of Fisher's exact test for count of total against other_count of other_total: the chance
+    of a split at most as likely as this one, if both totals drew from one pool with the same share. The test fits
+    counts too small for the normal approximation that a chi-squared test relies on."""
+    pool = total + other_total
+    counted = count + other_count
+    # Ways to give each split of the counted to the first total, as whole numbers, so that equal splits compare equal
+    ways = [
+        math.comb(counted, in_first) * math.comb(pool - counted, total - in_first)
+        for in_first in range(max(0, total - (pool - counted)), min(counted, total) + 1)
+    ]
+    observed = math.comb(counted, count) * math.comb(pool - counted, total - count)
+    return sum(way for way in ways if way <= observed) / math.comb(pool, total)
 
 
 def no_event_line(ends: list[dict[str, Any]], event_tokens: dict[str, int]) -> str:

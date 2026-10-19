@@ -38,7 +38,8 @@ REQUEST = {
 # A stand-in for gh. It writes each call's arguments to calls.jsonl in STANDIN_DIR. For a list of runs it prints the
 # lines under "runs" in gh.json. For a GraphQL query of runs it gives the jobs under "jobs" for each id that the query
 # names, and no node for an id that "jobs" doesn't hold. For a query of pull requests it gives the facts under
-# "pull_requests" for each number that the query names.
+# "pull_requests" for each number that the query names. For a query of the retrospectives it gives the times under
+# "retrospectives" as the times when they merged.
 # An answer under "fail" makes each call print it to stderr and exit with code 1. -S keeps coverage, which starts in
 # each Python process of the tests, out of the stand-in.
 STANDIN = f"""#!{sys.executable} -S
@@ -51,7 +52,10 @@ if "fail" in answers:
     sys.stderr.write(answers["fail"])
     sys.exit(1)
 query = next((argument for argument in sys.argv if argument.startswith("query=")), "")
-if "pullRequest(" in query:
+if "mergedAt" in query:
+    nodes = [{{"mergedAt": merged}} for merged in answers["retrospectives"]]
+    print(json.dumps({{"data": {{"repository": {{"pullRequests": {{"nodes": nodes}}}}}}}}))
+elif "pullRequest(" in query:
     numbers = re.findall(r"pr([0-9]+): pullRequest", query)
     facts = {{"pr" + number: answers["pull_requests"][number] for number in numbers}}
     print(json.dumps({{"data": {{"repository": facts}}}}))
@@ -97,10 +101,16 @@ class ReportTest(unittest.TestCase):
         self.runs: list[dict[str, str]] = []
         self.jobs: dict[str, list[dict[str, str]]] = {}
         self.pull_requests: dict[str, dict[str, Any]] = {}
+        self.retrospectives: list[str] = []
         self.answer()
 
     def answer(self) -> None:
-        answers = {"runs": self.runs, "jobs": self.jobs, "pull_requests": self.pull_requests}
+        answers = {
+            "runs": self.runs,
+            "jobs": self.jobs,
+            "pull_requests": self.pull_requests,
+            "retrospectives": self.retrospectives,
+        }
         (self.standins / "gh.json").write_text(json.dumps(answers))
 
     def add_pull_request(
@@ -109,14 +119,17 @@ class ReportTest(unittest.TestCase):
         commit_minutes: tuple[float, ...] = (1,),
         conclusions: tuple[str | None, ...] = (),
         removals: tuple[str, ...] = (),
+        removal_minute: float = 1,
     ) -> None:
-        """Gives GitHub's facts about a pull request: its commits, each with check suites of the conclusions, and the
-        reason of each time that the merge queue removed it."""
-        suites = {"nodes": [{"conclusion": conclusion} for conclusion in conclusions]}
-        commits = [{"commit": {"committedDate": at(minute), "checkSuites": suites}} for minute in commit_minutes]
+        """Gives GitHub's facts about a pull request: its commits, each with check suites of the conclusions that
+        ended at the commit's time, and the reason of each time that the merge queue removed it."""
+        commits = []
+        for minute in commit_minutes:
+            suites = {"nodes": [{"conclusion": conclusion, "updatedAt": at(minute)} for conclusion in conclusions]}
+            commits.append({"commit": {"committedDate": at(minute), "checkSuites": suites}})
         self.pull_requests[str(number)] = {
             "commits": {"nodes": commits},
-            "timelineItems": {"nodes": [{"reason": reason} for reason in removals]},
+            "timelineItems": {"nodes": [{"reason": reason, "createdAt": at(removal_minute)} for reason in removals]},
         }
         self.answer()
 
@@ -217,7 +230,7 @@ class CiTest(ReportTest):
         for _ in range(101):
             self.add_run(1, job("tests", 1))
         self.assertEqual(self.line("CI runs"), "CI runs that passed: 101, median 1.0 min")
-        queries = [call for call in self.calls() if call[1] == "graphql"]
+        queries = [call for call in self.calls() if f"query={report.JOBS_QUERY}" in call]
         self.assertEqual([sum(argument.startswith("ids[]=") for argument in query) for query in queries], [100, 1])
 
     def test_skips_a_run_that_was_deleted_after_the_listing(self) -> None:
