@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Makes git run the hooks in scripts/git-hooks, such as the pre-push hook that runs scripts/leak-scan. The setting
 # holds for each worktree of the clone, and each worktree runs the hooks in its own checkout. Running the script again
-# changes nothing.
+# changes nothing. scripts/hooks/maintainer-only.check blocks an agent's push that would run the hooks of another folder.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

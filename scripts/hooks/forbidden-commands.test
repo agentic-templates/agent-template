@@ -13,6 +13,11 @@ test_cwd=$base/project
 other=$base/other
 git init --quiet "$test_cwd"
 git init --quiet "$other"
+# git runs each repository's hooks in its scripts/git-hooks, so that scripts/hooks/maintainer-only.check lets the pushes
+# go ahead. The paths are absolute, because a push from project with --git-dir=../other/.git would run project's hooks
+# from a relative one.
+git -C "$test_cwd" config core.hooksPath "$test_cwd/scripts/git-hooks"
+git -C "$other" config core.hooksPath "$other/scripts/git-hooks"
 
 # A stand-in for gh, first on the PATH, so that the cases ask nothing of GitHub. It records each call in TEST_GH_CALLS.
 # It has no #! line, so that the check takes it for the gh program rather than for a script that runs another gh. bash
