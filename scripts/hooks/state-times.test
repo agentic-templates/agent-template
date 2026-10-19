@@ -56,9 +56,9 @@ run_hook() {
   after=$(date -u +%s)
 }
 
-# Prints the state file with each time on an updated, heartbeat or taken in line that falls between before and after
-# replaced by "now", or prints "no file" if it doesn't exist.
-state_with_now() {
+# Prints the state file with "(clock)" in place of each time on an updated, heartbeat or taken in line that falls
+# between before and after, or prints "no file" if it doesn't exist.
+state_with_clock() {
   if [[ ! -f $state_file ]]; then
     echo "no file"
     return 0
@@ -66,62 +66,96 @@ state_with_now() {
   jq -R -r --argjson before "$before" --argjson after "$after" '
     (capture("^(?<name>updated|heartbeat|taken in): (?<time>.*)$") // null) as $line
     | ($line.time // "" | try fromdateiso8601 catch null) as $seconds
-    | if $seconds != null and $seconds >= $before and $seconds <= $after then "\($line.name): now" else . end' \
+    | if $seconds != null and $seconds >= $before and $seconds <= $after then "\($line.name): (clock)" else . end' \
     "$state_file"
 }
 
 # Checks that the hook exited with code 0, printed nothing, and left the state file as expected:
-# expect_state <description> <state file, with now for the clock's time, or "no file">
+# expect_state <description> <state file, with (clock) for the clock's time, or "no file">
 expect_state() {
   local description=$1 expected=$2 state
   case_count=$((case_count + 1))
-  state=$(state_with_now)
+  state=$(state_with_clock)
   if [[ $hook_status != 0 || -n $hook_output || $state != "$expected" ]]; then
-    echo "error: $description, the hook must exit with code 0, print nothing and leave the state file as \"$expected\", where now is the clock's time, but it exited with code $hook_status, printed \"$hook_output\" and left \"$state\"." >&2
+    echo "error: $description, the hook must exit with code 0, print nothing and leave the state file as \"$expected\", where (clock) is the clock's time while the hook ran, but it exited with code $hook_status, printed \"$hook_output\" and left \"$state\"." >&2
     failed_cases=$((failed_cases + 1))
   fi
 }
 
-printf '%s\n' 'session: owner-1' 'pid: 42' >"$state_file"
+# Writes the state file from lines: write_state <line>...
+write_state() {
+  printf '%s\n' "$@" >"$state_file"
+}
+
+old_heartbeat='heartbeat: 2020-01-01T00:00:00Z'
+
+write_state 'session: owner-1' 'pid: 42' "$old_heartbeat"
 run_hook "$main_checkout" "$(file_input Edit "$state_file")"
-expect_state "After an Edit of the state file" $'session: owner-1\npid: 42\nupdated: now'
+expect_state "After an Edit of the state file" $'session: owner-1\npid: 42\nheartbeat: 2020-01-01T00:00:00Z\nupdated: (clock)'
 
 # The orchestrator's own guess at the time gives way to the clock's.
-printf '%s\n' 'session: owner-1' 'updated: 2020-01-01T00:00:00Z' 'goal: ship' >"$state_file"
+write_state 'session: owner-1' 'updated: 2020-01-02T00:00:00Z' 'goal: ship' "$old_heartbeat"
 run_hook "$main_checkout" "$(file_input Write "$state_file")"
-expect_state "After a Write of the state file with an updated line" $'session: owner-1\nupdated: now\ngoal: ship'
+expect_state "After a Write of the state file with an updated line" \
+  $'session: owner-1\nupdated: (clock)\ngoal: ship\nheartbeat: 2020-01-01T00:00:00Z'
 
 # The orchestrator writes "taken in: now" before it reads the maintainer's comments on GitHub.
-printf '%s\n' 'session: owner-1' 'taken in: now' 'updated: 2020-01-01T00:00:00Z' >"$state_file"
+write_state 'taken in: now' 'updated: 2020-01-02T00:00:00Z' "$old_heartbeat"
 run_hook "$main_checkout" "$(file_input Edit "$state_file")"
-expect_state "After an Edit that writes \"taken in: now\"" $'session: owner-1\ntaken in: now\nupdated: now'
+expect_state "After an Edit that writes \"taken in: now\"" \
+  $'taken in: (clock)\nupdated: (clock)\nheartbeat: 2020-01-01T00:00:00Z'
 
-printf '%s\n' 'taken in: 2020-01-01T00:00:00Z' 'note: taken in: now' >"$state_file"
+write_state 'taken in: 2020-01-03T00:00:00Z' 'note: taken in: now' 'updated: 2020-01-02T00:00:00Z' "$old_heartbeat"
 run_hook "$main_checkout" "$(file_input Edit "$state_file")"
 expect_state "After an Edit of a state file with a time on its taken in line" \
-  $'taken in: 2020-01-01T00:00:00Z\nnote: taken in: now\nupdated: now'
+  $'taken in: 2020-01-03T00:00:00Z\nnote: taken in: now\nupdated: (clock)\nheartbeat: 2020-01-01T00:00:00Z'
 
-printf '%s\n' 'session: owner-1' 'pid: 42' >"$state_file"
+# The hook can't tell when a heartbeat was scheduled before the file had the line, so the heartbeat it adds is due.
+write_state 'session: owner-1'
+run_hook "$main_checkout" "$(file_input Edit "$state_file")"
+expect_state "After an Edit of a state file without a heartbeat line" \
+  $'session: owner-1\nupdated: (clock)\nheartbeat: 1970-01-01T00:00:00Z'
+
+write_state 'session: owner-1' "$old_heartbeat"
 run_hook "$main_checkout" "$(file_input Edit .loop/state.md)"
 expect_state "After an Edit of the state file by a path relative to the main checkout" \
-  $'session: owner-1\npid: 42\nupdated: now'
+  $'session: owner-1\nheartbeat: 2020-01-01T00:00:00Z\nupdated: (clock)'
 
-printf '%s\n' 'session: owner-1' 'pid: 42' >"$state_file"
+write_state 'session: owner-1' "$old_heartbeat"
 run_hook "$worktree" "$(file_input Edit "$state_file" "$worktree")"
-expect_state "After an Edit of the main checkout's state file from a worktree" $'session: owner-1\npid: 42\nupdated: now'
+expect_state "After an Edit of the main checkout's state file from a worktree" \
+  $'session: owner-1\nheartbeat: 2020-01-01T00:00:00Z\nupdated: (clock)'
 
-printf '%s\n' 'session: owner-1' 'heartbeat: 2020-01-01T00:00:00Z' 'updated: 2020-01-02T00:00:00Z' >"$state_file"
+write_state 'session: owner-1' "$old_heartbeat" 'updated: 2020-01-02T00:00:00Z'
 run_hook "$main_checkout" "$(cron_input "$heartbeat")"
-expect_state "After CronCreate of the heartbeat" \
-  $'session: owner-1\nheartbeat: now\nupdated: 2020-01-02T00:00:00Z'
+expect_state "After CronCreate of the heartbeat" $'session: owner-1\nheartbeat: (clock)\nupdated: 2020-01-02T00:00:00Z'
 
-printf '%s\n' 'session: owner-1' >"$state_file"
+write_state 'session: owner-1'
 run_hook "$main_checkout" "$(cron_input "$heartbeat")"
-expect_state "After CronCreate of the heartbeat, with no heartbeat line" $'session: owner-1\nheartbeat: now'
+expect_state "After CronCreate of the heartbeat, with no heartbeat or updated line" \
+  $'session: owner-1\nheartbeat: (clock)\nupdated: (clock)'
+
+# A reader that opened the state file before the hook wrote it, such as session-start, reads the whole earlier file.
+unchanged=$'session: owner-1\nupdated: 2020-01-02T00:00:00Z\nheartbeat: 2020-01-01T00:00:00Z'
+write_state "$unchanged"
+exec 3<"$state_file"
+run_hook "$main_checkout" "$(file_input Edit "$state_file")"
+held=$(cat <&3)
+exec 3<&-
+case_count=$((case_count + 1))
+if [[ $held != "$unchanged" ]]; then
+  echo "error: A reader that opened the state file before the hook wrote it must read the whole earlier file, \"$unchanged\", but it read \"$held\"." >&2
+  failed_cases=$((failed_cases + 1))
+fi
+case_count=$((case_count + 1))
+loop_files=$(ls -A "$main_checkout/.loop")
+if [[ $loop_files != state.md ]]; then
+  echo "error: After an Edit of the state file, the hook must leave only state.md in .loop, but it holds: $loop_files" >&2
+  failed_cases=$((failed_cases + 1))
+fi
 
 # Other actions leave the state file as it is.
-unchanged=$'session: owner-1\nupdated: 2020-01-01T00:00:00Z'
-printf '%s\n' "$unchanged" >"$state_file"
+write_state "$unchanged"
 run_hook "$main_checkout" "$(cron_input "Check whether the deploy finished.")"
 expect_state "After CronCreate of another prompt" "$unchanged"
 
