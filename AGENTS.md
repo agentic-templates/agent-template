@@ -36,7 +36,7 @@ When a request doesn't fit this direction, say so, and ask the maintainer whethe
 - `scripts/loop/consequential`: lists the files of the branch's change that a reviewer reads before the change merges: the rules, the scripts and the files that keep agents safe.
 - `uv run --locked python -m unittest discover -s scripts/loop -t scripts/loop`: runs the tests of the Python scripts, which `scripts/check` runs too.
 
-The Python scripts in `scripts/loop` need [uv](https://docs.astral.sh/uv/getting-started/installation/). When uv first runs one, it installs the Python version in `.python-version` and the packages in `uv.lock`.
+The Python scripts, `scripts/leak-scan` and those in `scripts/loop`, need [uv](https://docs.astral.sh/uv/getting-started/installation/). When uv first runs one, it installs the Python version in `.python-version` and the packages in `uv.lock`.
 
 Keep the checks on a pull request within five minutes.
 

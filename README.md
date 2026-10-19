@@ -11,6 +11,7 @@ You need:
 - The GitHub CLI
 - bash
 - [jq](https://jqlang.org/download/)
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
 
 1. If you don't have a GitHub organization, create one at https://github.com/account/organizations/new.
 2. Create a public repository from the template, and go into its clone:
@@ -25,6 +26,7 @@ You need:
    <details>
    <summary>The setup list, for your agent</summary>
 
+   - Run `scripts/install-git-hooks`, and ask the person which folders outside the repository are private, such as notes or other projects. List them in `.loop/leak-scan.paths`, one to a line, so that the leak scan blocks any push that would publish their paths or contents.
    - Run `gh api "repos/{owner}/{repo}/rulesets?includes_parents=false"` as written, because gh fills in the owner and the repository. If it lists no ruleset named `main`, run `scripts/configure-github` before you open the setup's pull request. If the script fails, stop the setup and pass its error on. When it finishes, ask the person to turn on Dependabot malware alerts at the link it prints.
    - In `AGENTS.md`, rewrite "What this project is": what the project is for, and which changes belong in it. Under "Commands", add the commands that aren't tied to one language, such as one that starts the project's database.
    - For each language the project uses, follow `docs/languages.md`.
