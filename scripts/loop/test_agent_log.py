@@ -82,6 +82,9 @@ class AgentLogTest(unittest.TestCase):
         ):
             patched.start()
             self.addCleanup(patched.stop)
+        # scripts/loop/run-builder sets the variable for a builder that runs these tests, and with it the script
+        # writes nothing. The patch of the environment above puts it back after the test.
+        os.environ.pop(agent_log.RUN_VARIABLE, None)
         self.labels("bug\nready\n")
 
     def labels(self, text: str | None) -> None:
