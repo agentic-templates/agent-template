@@ -80,6 +80,13 @@ hook_loop_folder() {
   loop_folder "${git_folders%%$'\n'*}" "${git_folders#*$'\n'}"
 }
 
+# Prints the main checkout of this hook's repository, by its physical path, as git prints the folders.
+hook_main_checkout() {
+  local git_folders
+  git_folders=$(git -C "$hooks_folder" rev-parse --path-format=absolute --git-common-dir --show-toplevel) || return 1
+  main_checkout "${git_folders%%$'\n'*}" "${git_folders#*$'\n'}"
+}
+
 # Adds a line to blocks.log in the loop's folder of this hook's repository. HOOK_BLOCK_LOG names another file, as in
 # the hooks' tests. The line holds the time, the check's file name and the words, with the values that could hold a
 # secret left out, so that its reader can tell a real block from a false alarm: log_block <word>...

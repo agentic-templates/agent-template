@@ -126,9 +126,11 @@ After each issue, go back to step 1. Start an auditor too when "Start a retrospe
   Once you've gone through them all, replace the state file's list of `BLOCKED` pull requests with the ones that
   this pass found.
 - **Merges.** While pull requests are merging, keep `scripts/wait-for-pull-requests` running as a background task,
-  and start it again each time it ends.
-- **Settings.** Once a pull request that changes `scripts/configure-github` merges, bring the main checkout's `main` up
-  to date with `origin/main`. Then run `scripts/configure-github` there, so that GitHub's settings match main.
+  and start it again each time it ends. When a pull request merges, the script fast-forwards `main` in the main
+  checkout to `origin/main`, so that you and the agents you start get the hooks, scripts and agent types that merged.
+  If the script says it can't fast-forward, fix what it names, such as by switching the main checkout back to `main`.
+- **Settings.** Once a pull request that changes `scripts/configure-github` merges, and the fast-forward is done, run
+  `scripts/configure-github` in the main checkout, so that GitHub's settings match main.
 - **Releases.** Once a goal is done, publish a release as "Publish a release" in `docs/releasing.md` describes, and
   don't wait for the maintainer to ask. A goal is done when its issue closes as completed. For a goal of more than one
   pull request, that's its parent issue.

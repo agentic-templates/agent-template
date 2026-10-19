@@ -164,16 +164,6 @@ is_orchestrator() {
   is_orchestrators_session "$loop" "$session_id"
 }
 
-# Prints the main checkout of this hook's repository, which git lists first among the worktrees, by its physical path.
-main_checkout() {
-  local line=""
-  IFS= read -r line < <(git -C "$hooks_folder" worktree list --porcelain 2>/dev/null) || true
-  if [[ $line != "worktree "* ]]; then
-    return 1
-  fi
-  printf '%s\n' "${line#worktree }"
-}
-
 # Adds 1 to other_commands for a simple command other than a cd without redirections, because a redirection can write
 # a file, also on a cd: count_other_command <word>...
 count_other_command() {
@@ -233,7 +223,7 @@ scripts_tree_on_disk() {
 # check_orchestrators_run <owner/name> <number of the words before the command's name>
 check_orchestrators_run() {
   local main on_github on_disk
-  main=$(main_checkout) || main=""
+  main=$(hook_main_checkout 2>/dev/null) || main=""
   if [[ -z $main ]] || ! runs_alone_in_main_checkout "$main" "$2"; then
     block "Blocked: the orchestrator runs scripts/configure-github again only in the main checkout, as a command of its own, without a variable, env, bash, sh or a redirection: cd ${main:-<main checkout>} && scripts/configure-github."
   fi
