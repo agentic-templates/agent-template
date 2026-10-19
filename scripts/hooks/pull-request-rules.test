@@ -20,7 +20,8 @@ export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_
 # link to it: #12 and #20 are open issues, the branch 20-show-the-totals links to #20, and no other number exists.
 # scripts/check-pull-request.test checks the commands that the script runs. The stand-in also answers gh pr view, with
 # the file in the folder pull-requests named for the word after view, such as 5.json, or for the current branch when
-# that word is a flag. The cases write those files with pull_request.
+# that word is a flag. For gh pr view <name> --repo <repository>, the file is in the folder of that name in
+# pull-requests, such as jtmpl/other/7.json. The cases write those files with pull_request.
 mkdir "$base/bin" "$base/pull-requests"
 cat >"$base/bin/gh" <<'STAND_IN'
 #!/usr/bin/env bash
@@ -29,7 +30,11 @@ if [[ ${1:-} == pr && ${2:-} == view ]]; then
   if [[ $name == -* ]]; then
     name=$(git symbolic-ref --quiet --short HEAD) || name=""
   fi
-  file=${0%/*}/../pull-requests/$name.json
+  folder=${0%/*}/../pull-requests
+  if [[ ${4:-} == --repo ]]; then
+    folder=$folder/${5:-}
+  fi
+  file=$folder/$name.json
   if [[ -z $name || ! -f $file ]]; then
     echo "no pull requests found for \"$name\"" >&2
     exit 1
@@ -283,7 +288,15 @@ expect_block Bash "gh pr edit 5 --title \"\$type: skip the expenses\"" \
 expect_block Bash "gh pr edit 5 --body-file ../missing.md" \
   "Blocked: this hook checks the body file before the command runs, and ../missing.md doesn't exist yet or the command writes it. Write the file in a command of its own first, and give its path without variables."
 expect_block Bash "gh pr edit 5 --body \"\$(cat ../body.md)\"" "$from_command"
+# gh pr edit with -R edits the pull request of that repository, also when the repository follows -R in the same word.
+# Pull requests 5 and 7 of jtmpl/other have a title and body that the scripts pass.
+mkdir -p "$base/pull-requests/jtmpl/other"
+pull_request jtmpl/other/5
+pull_request jtmpl/other/7
 expect_repository_flags 2 "$(edit_blocked "$no_closing_line")" pr edit "5 --body-file ../no-closing-line.md"
+for repository in '-R jtmpl/other' -Rjtmpl/other; do
+  expect_allow Bash "gh pr edit 7 $repository --title '$title'"
+done
 
 # A short flag's value right after the flag, with or without =
 expect_block Bash "gh pr edit 5 -t'skip the expenses that were already imported'" "$(edit_blocked "$not_a_type")"

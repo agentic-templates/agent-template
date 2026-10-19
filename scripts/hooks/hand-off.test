@@ -222,18 +222,28 @@ add_reply "$orchestrator" d2 600000
 rm "$projects/$orchestrator/subagents/agent-d2.meta.json"
 run_hook "$orchestrator" d2
 expect_note "For a subagent without the file that says who started it" ""
-for agent_type in reviewer researcher auditor Explore general-purpose; do
+for agent_type in reviewer researcher Explore general-purpose; do
   add_reply "$orchestrator" "t-$agent_type" 600000
   run_hook "$orchestrator" "t-$agent_type"
   expect_note "For a subagent of the type $agent_type" ""
 done
+expect_note_files "For the agents that get no note" ""
+
+# Subagents of the other types that hand off their work
 agent_type="builder-small"
 add_reply "$orchestrator" t-small 410000
 run_hook "$orchestrator" t-small
 expect_note "For a subagent of the type builder-small" "$soon $how"
+agent_type=auditor
+add_reply "$orchestrator" t-auditor 400001
+run_hook "$orchestrator" t-auditor
+expect_note "For an auditor just past 400k tokens" "$soon $how"
+add_reply "$orchestrator" t-auditor 500001
+run_hook "$orchestrator" t-auditor
+expect_note "For an auditor just past 500k tokens" "$now $how"
 agent_type=builder
+expect_note_files "For the subagents of the other types that hand off" "t-auditor.400000 t-auditor.500000 t-small.400000"
 rm -rf "$notes"
-expect_note_files "For the agents that get no note" ""
 
 # A session that scripts/loop/run-builder started, and its subagent
 builder=33333333-aaaa-4bbb-8ccc-000000000003

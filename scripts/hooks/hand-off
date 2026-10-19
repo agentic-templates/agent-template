@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # Claude Code runs this hook after each tool call, because .claude/settings.json lists it. It tells the orchestrator,
-# and the builders that it starts, to shrink their context once it grows past a threshold, because each call reads the
-# whole context again, so a long context costs more on every step, and the agent works worse.
+# and the builders and auditors that it starts, to shrink their context once it grows past a threshold, because each
+# call reads the whole context again, so a long context costs more on every step, and the agent works worse.
 # The orchestrator is the session that the session: line of the state file names. Once its context passes
 # compact_tokens, it asks for a compaction, as "Compact your context" in docs/loop.md describes. It gets the note once
 # each time its context passes the threshold: the hook creates .loop/told-to-compact when it gives the note, and deletes
 # the file once the context is below the threshold again, as after a compaction.
-# A builder hands off its work: once its context first passes soon_tokens, at its next stopping point, and once it
-# first passes now_tokens, after the step it's on. The builders are the subagents of a builder type that the
-# orchestrator's session starts itself, and the builders that scripts/loop/run-builder starts for an issue, which have
-# LOOP_HAND_OFF set. Other agents, and the maintainer's other sessions, get no note, because the notes' steps are the
-# orchestrator's and a builder's. Each note comes once to each builder. For each note, the hook creates a file in
-# .loop/hand-offs, named <agent>.<threshold>, where <agent> is a subagent's agent id or a session's id.
-# scripts/loop/meter reads them.
+# A builder or an auditor hands off its work: once its context first passes soon_tokens, at its next stopping point,
+# and once it first passes now_tokens, after the step it's on. These are the subagents of a builder type or of the
+# type auditor that the orchestrator's session starts itself, and the builders that scripts/loop/run-builder starts
+# for an issue, which have LOOP_HAND_OFF set. Other agents, and the maintainer's other sessions, get no note, because
+# the notes' steps are those of the orchestrator, a builder and an auditor. Each note comes once to each builder and
+# auditor. For each note, the hook creates a file in .loop/hand-offs, named <agent>.<threshold>, where <agent> is a
+# subagent's agent id or a session's id. scripts/loop/meter reads them.
 # The files are in the .loop of the main checkout. When the hook can't create a note's file, the note says so. The hook
 # says nothing when it can't tell the context's size, such as when it can't find the agent's transcript, or after a
 # compaction until the agent's next reply.
@@ -116,9 +116,9 @@ fi
 if [[ -n $agent_id && -n ${LOOP_HAND_OFF:-} ]]; then
   exit 0
 fi
-# The builder types in .claude/agents are builder and builder-<kind of issue>.
+# The types in .claude/agents that hand off are auditor, builder and builder-<kind of issue>.
 case $agent_type in
-  "" | builder | builder-*) ;;
+  "" | auditor | builder | builder-*) ;;
   *) exit 0 ;;
 esac
 # A subagent's hook gets the transcript of its session, and the subagent's own is in a folder next to it.
