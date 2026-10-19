@@ -186,11 +186,12 @@ the script again, followed by the number of each issue that no account can take,
 Keep your shell in the main checkout, and run git in a worktree with `git -C <worktree>`. After a compaction, the
 session-start hook shows you your state file only when your shell is in the main checkout.
 
-Once your context passes about 300k tokens, as the meter's `machine` line shows, ask for a compaction if the maintainer
-installed a compaction sender. That's a Stop hook in the maintainer's own Claude Code settings that types `/compact`
-when it finds `.loop/compact-request.txt`. Finish the step you're on, such as landing a pull request or starting a
-builder. Then write `.loop/compact-request.txt` with your session id on its first line and `Resume from .loop/state.md.`
-on its second, and end your turn.
+When `scripts/hooks/hand-off` tells you that your context has grown long enough to compact, ask for a compaction if the
+maintainer installed a compaction sender. That's a Stop hook in the maintainer's own Claude Code settings that types
+`/compact` when it finds `.loop/compact-request.txt`. Finish the step you're on, such as landing a pull request or
+starting a builder, and bring your state file up to date. Then write `.loop/compact-request.txt` with your session id on
+its first line and `Resume from .loop/state.md.` on its second, and end your turn. Without a sender, ask the maintainer
+to type `/compact`, and go on with the loop.
 
 ## Ask the maintainer
 

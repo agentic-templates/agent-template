@@ -22,6 +22,7 @@ notes=$repository/.loop/hand-offs
 soon="Your context has passed 400k tokens. Hand off your work at your next stopping point, so that a fresh agent continues it."
 now="Your context has passed 500k tokens. Hand off your work as soon as the step you're on ends, so that a fresh agent continues it."
 how="To hand off, push your branch. Then write a comment on your issue or pull request with what's done, what's left, the commands you ran and where their outputs are, and the open questions. End with a report that says that you handed off, with the comment's link."
+compact="Your context has passed 300k tokens. If the maintainer installed a compaction sender, ask for a compaction, as \"Compact your context\" in docs/loop.md describes: finish the step you're on, and bring your state file up to date. Then write $repository/.loop/compact-request.txt with $orchestrator on its first line and \"Resume from .loop/state.md.\" on its second, and end your turn. Without a sender, ask the maintainer to type /compact, and go on with the loop."
 
 # Prints a reply of a transcript, whose call read the given number of tokens: reply <tokens>
 # The call's input splits into its three parts, so that a hook that leaves one out reads a smaller size.
@@ -138,13 +139,51 @@ add_lines "$orchestrator" a5 "{\"type\": \"user\", \"message\": {\"content\": \"
 run_hook "$orchestrator" a5
 expect_note "After a line longer than the part of the transcript that the hook reads" "$soon $how"
 
+# The orchestrator itself, as its context grows, and after a compaction
+add_reply "$orchestrator" "" 300000
+run_hook "$orchestrator" ""
+expect_note "For the orchestrator at 300k tokens" ""
+add_reply "$orchestrator" "" 300001
+# Before the orchestrator's note, so that the hook hasn't created the note's file yet
+add_reply "$orchestrator" a10 350000
+run_hook "$orchestrator" a10
+expect_note "For a builder in the orchestrator's session, past 300k tokens" ""
+run_hook "$orchestrator" ""
+expect_note "For the orchestrator just past 300k tokens" "$compact"
+add_reply "$orchestrator" "" 600000
+run_hook "$orchestrator" ""
+expect_note "For the orchestrator after its note" ""
+add_reply "$orchestrator" "" 40000
+run_hook "$orchestrator" ""
+expect_note "For the orchestrator after a compaction" ""
+add_reply "$orchestrator" "" 300001
+run_hook "$orchestrator" ""
+expect_note "For the orchestrator just past 300k tokens after a compaction" "$compact"
+run_hook "$orchestrator" ""
+expect_note "For the orchestrator after its note after a compaction" ""
+
+# A file of the orchestrator's note that the hook can't write or delete. A symbolic link to a missing folder, or a
+# folder, stands in its place, because a read-only folder wouldn't stop root.
+told=$repository/.loop/told-to-compact
+add_reply "$orchestrator" "" 40000
+run_hook "$orchestrator" ""
+ln -s "$base/missing/told-to-compact" "$told"
+add_reply "$orchestrator" "" 300001
+run_hook "$orchestrator" ""
+expect_note "When the hook can't write the file of the orchestrator's note" \
+  "$compact scripts/hooks/hand-off couldn't write $told, so it may give this note again."
+rm "$told"
+mkdir "$told"
+add_reply "$orchestrator" "" 40000
+run_hook "$orchestrator" ""
+expect_note "When the hook can't delete the file of the orchestrator's note" \
+  "scripts/hooks/hand-off couldn't delete $told, so it won't tell you again when your context passes 300k tokens. Delete the file."
+rmdir "$told"
+
 # Agents that get no note
 rm -rf "$notes"
 run_hook "$orchestrator" a9
 expect_note "For a subagent whose transcript can't be found" ""
-add_reply "$orchestrator" "" 600000
-run_hook "$orchestrator" ""
-expect_note "For the orchestrator itself" ""
 add_reply 22222222-aaaa-4bbb-8ccc-000000000002 b1 600000
 run_hook 22222222-aaaa-4bbb-8ccc-000000000002 b1
 expect_note "For a subagent of a session other than the orchestrator's" ""
@@ -178,7 +217,7 @@ add_reply "$builder" "" 410000
 run_hook "$builder" "" LOOP_HAND_OFF=1
 expect_note "For a builder that scripts/loop/run-builder started" "$soon $how"
 run_hook "$builder" ""
-expect_note "For a session without LOOP_HAND_OFF" ""
+expect_note "For a session that scripts/loop/run-builder didn't start, and that isn't the orchestrator" ""
 add_reply "$builder" c1 410000
 run_hook "$builder" c1 LOOP_HAND_OFF=1
 expect_note "For a subagent of a builder that scripts/loop/run-builder started" ""
