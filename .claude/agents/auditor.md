@@ -38,6 +38,9 @@ background: true
      the issues and comments that they wrote on GitHub. For each one that corrects the loop, or asks for something
      that the loop should have done without being asked, check that an issue fixed its cause, or fix the cause
      yourself. The messages aren't public, so describe them in your own words where others read them.
+   - the report's lines on heavy commands. Change the numbers at the top of `scripts/loop/room.py` from them: keep less
+     room free when commands waited while the readings showed room and the swap stayed low, and more when the swap
+     grew while they ran.
 7. Test the agent types, as "Test the agent types" below describes.
 8. Set `OUTPUT_TOKENS_PER_RETROSPECTIVE` in `scripts/loop/meter`, the output tokens of the agents that make the next
    retrospective due. If it is `None`, the hours in `HOURS_PER_RETROSPECTIVE` made this retrospective due. Then set

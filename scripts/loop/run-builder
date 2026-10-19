@@ -58,6 +58,7 @@ import agent_log
 import paths
 import request_events
 from accounts import TOOLS, Account, AccountsError, claude_environment, load_accounts
+from machine import peak_memory_bytes
 
 # The checkout that holds this script. The script runs this checkout's checks, such as scripts/hooks/before-tool,
 # because the worktree's copies are files that the builder can change, and they would run outside Codex's sandbox.
@@ -366,8 +367,7 @@ def read_events(file: Path) -> list[dict[str, Any]]:
 def children_usage() -> dict[str, float]:
     """The CPU time of the processes that the run started, and the most memory that one of them used."""
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
-    # macOS gives the memory in bytes, and Linux in kilobytes.
-    peak_bytes = usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024)
+    peak_bytes = peak_memory_bytes(usage)
     return {"cpu_seconds": round(usage.ru_utime + usage.ru_stime, 1), "peak_memory_mb": agent_log.megabytes(peak_bytes)}
 
 

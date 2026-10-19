@@ -1,8 +1,11 @@
-"""Reads how much of the machine is in use: its free disk, load, free memory, swap, and GPU. It needs no root. A number
-that the machine doesn't give is None, never 0."""
+"""Reads how much of the machine is in use: its free disk, load, free memory, swap, GPU and CPU. It needs no root. A
+number that the machine doesn't give is None, never 0."""
 
+import ctypes
+import functools
 import os
 import re
+import resource
 import shutil
 import subprocess
 import sys
@@ -13,6 +16,9 @@ GIGABYTE = 1e9
 MEBIBYTE = 1024 * 1024
 KIBIBYTE = 1024
 MEMINFO = Path("/proc/meminfo")
+PROC_STAT = Path("/proc/stat")
+# The flavor of host_statistics that gives the ticks that all the cores spent in user, system, idle and nice time
+HOST_CPU_LOAD_INFO = 3
 MACOS_MEMORY = ["sysctl", "-n", "hw.memsize", "vm.swapusage"]
 VM_STAT = ["vm_stat"]
 # Prints 1 on a Mac with Apple silicon. An Intel Mac doesn't know the name, so sysctl fails there.
@@ -41,6 +47,17 @@ class Machine(TypedDict):
     gpu_shares_memory: bool | None
 
 
+class CpuTicks(NamedTuple):
+    """The ticks of the machine's clock that all its cores together spent busy, and in all, since the machine started."""
+
+    busy: int
+    total: int
+
+
+class CpuTicksError(Exception):
+    """The machine's CPU ticks can't be read. The message says from where."""
+
+
 class Memory(NamedTuple):
     free_bytes: int | None
     swap_used_bytes: int | None
@@ -59,7 +76,7 @@ def read_machine(folder: Path) -> Machine:
     """A reading of the machine now."""
     if sys.platform == "darwin":
         memory = macos_memory(output_of(MACOS_MEMORY), output_of(VM_STAT))
-        gpu = macos_gpu(output_of(IOREG), is_apple_silicon=output_of(APPLE_SILICON).strip() == "1")
+        gpu = macos_gpu(output_of(IOREG), is_apple_silicon=is_apple_silicon())
     else:
         memory = linux_memory(MEMINFO.read_text() if MEMINFO.exists() else "")
         gpu = nvidia_gpu(output_of(NVIDIA_SMI))
@@ -73,6 +90,81 @@ def read_machine(folder: Path) -> Machine:
         "gpu_memory_used_gb": gigabytes(gpu.memory_used_bytes),
         "gpu_shares_memory": gpu.shares_memory,
     }
+
+
+def read_cpu_ticks() -> CpuTicks:
+    """The machine's CPU ticks now, which busy_cores compares with an earlier reading. The load can't show the idle
+    cores, because it counts the processes that wait for the disk too: macOS gave a load of 69 on 10 cores while they
+    were 54% idle."""
+    if sys.platform == "darwin":
+        load = host_cpu_load()
+        ticks = None if load is None else macos_cpu_ticks(load)
+        source = "host_statistics"
+    else:
+        ticks = linux_cpu_ticks(PROC_STAT.read_text() if PROC_STAT.exists() else "")
+        source = str(PROC_STAT)
+    if ticks is None:
+        raise CpuTicksError(f"can't read the machine's CPU ticks from {source}")
+    return ticks
+
+
+def busy_cores(earlier: CpuTicks | None, later: CpuTicks | None, cores: int) -> float | None:
+    """The cores that were busy on average between two readings of the CPU ticks. None without both, or when the
+    counters started again from 0, as macOS's do after 49 days on 10 cores."""
+    if earlier is None or later is None or later.total <= earlier.total or later.busy < earlier.busy:
+        return None
+    return round(cores * (later.busy - earlier.busy) / (later.total - earlier.total), 2)
+
+
+@functools.cache
+def system_library() -> ctypes.CDLL:  # pragma: no cover, because only macOS has the library
+    library = ctypes.CDLL("/usr/lib/libSystem.dylib")
+    library.mach_host_self.restype = ctypes.c_uint32
+    return library
+
+
+@functools.cache
+def host_port() -> int:  # pragma: no cover, because only macOS has the library
+    """The port of the machine, which each call of mach_host_self adds a reference to, so the process asks once."""
+    port: int = system_library().mach_host_self()
+    return port
+
+
+def host_cpu_load() -> list[int] | None:  # pragma: no cover, because only macOS has host_statistics
+    """The ticks that all the cores spent in user, system, idle and nice time, or None if host_statistics fails."""
+    ticks = (ctypes.c_uint32 * 4)()
+    count = ctypes.c_uint32(len(ticks))
+    if system_library().host_statistics(host_port(), HOST_CPU_LOAD_INFO, ticks, ctypes.byref(count)) != 0:
+        return None
+    return list(ticks)
+
+
+def macos_cpu_ticks(load: list[int]) -> CpuTicks:
+    """The CPU ticks in the ticks of user, system, idle and nice time that host_statistics gives."""
+    user, system, idle, nice = load
+    return CpuTicks(user + system + nice, user + system + idle + nice)
+
+
+def linux_cpu_ticks(stat: str) -> CpuTicks | None:
+    """The CPU ticks in the first line of /proc/stat: user, nice, system, idle, iowait, irq, softirq and steal. The
+    time that waits for the disk, iowait, counts as idle."""
+    fields = stat.split("\n", 1)[0].split()
+    if not fields or fields[0] != "cpu":
+        return None
+    ticks = [int(field) for field in fields[1:9]]
+    user, nice, system, idle, iowait, irq, softirq, steal = ticks + [0] * (8 - len(ticks))
+    busy = user + nice + system + irq + softirq + steal
+    return CpuTicks(busy, busy + idle + iowait)
+
+
+def is_apple_silicon() -> bool:
+    return sys.platform == "darwin" and output_of(APPLE_SILICON).strip() == "1"
+
+
+def peak_memory_bytes(usage: resource.struct_rusage) -> int:
+    """The most memory that one of the processes that a resource usage covers used."""
+    # macOS gives the memory in bytes, and Linux in kibibytes.
+    return usage.ru_maxrss * (1 if sys.platform == "darwin" else KIBIBYTE)
 
 
 def output_of(command: list[str]) -> str:

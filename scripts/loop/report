@@ -32,6 +32,13 @@ The lines are:
                             scripts/loop/agent_time.py describes: the model's time, the tool calls that ran
                             scripts/check, ran a single test file, waited for CI, slept, ran another command or used
                             another tool, and the waits for the agents' background tasks and for the orchestrator.
+  Heavy command             A line for each command that scripts/loop/run-heavy ran, from .loop/heavy.jsonl: how many
+                            runs started and ended, and the median minutes, cores and memory of those that ended.
+                            Then how many runs waited, those that a signal stopped while they waited included, their
+                            minutes of waiting, and how many of those minutes the readings showed room for the
+                            command, before the reservations of the commands that ran and the room that the scheduler
+                            keeps free. A last line gives the median and the highest of the highest swap in use
+                            during each run.
   Machine                   A line for each number of the machine that scripts/loop/meter records in
                             .loop/meter.jsonl: free disk, free memory, swap in use, GPU use, GPU memory in use and
                             load. Each gives the median and the worst: the lowest of free disk and free memory, and
@@ -70,6 +77,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import agent_time
+import heavy_log
 import paths
 import request_events
 from agent_log import AgentRun, Period, agent_output_tokens, agent_transcripts, read_runs, started, working_periods
@@ -216,6 +224,7 @@ def main(argv: list[str] | None = None) -> int:
         orchestrator_line(agents),
         block_line(count_blocks(read_log("blocks.log"), since)),
         time_line(list(splits.values()), len(recent)),
+        *heavy_lines(heavy_log.read(paths.loop_dir() / heavy_log.NAME), since),
         *machine_lines(read_machine_readings(read_log("meter.jsonl"), since), periods_of(all_runs, transcripts_by_id)),
     ]
     if options.issues:
@@ -508,6 +517,45 @@ def orchestrator_line(agents: list[Agent]) -> str:
 def block_line(blocks: Counter[str]) -> str:
     parts = [f"{rule} {count}" for rule, count in sorted(blocks.items(), key=lambda item: (-item[1], item[0]))]
     return " | ".join([f"Hook blocks: {blocks.total()}", *parts])
+
+
+def heavy_lines(entries: list[dict[str, Any]], since: dt.datetime) -> list[str]:
+    """A line for each heavy command that started to wait, started, stopped or ended after the time, and one for the
+    swap."""
+    recent = [entry for entry in entries if dt.datetime.fromisoformat(entry["at"]) >= since]
+    if not recent:
+        return ["Heavy commands: none ran"]
+    commands = sorted({entry["command"] for entry in recent})
+    lines = [heavy_line(command, [entry for entry in recent if entry["command"] == command]) for command in commands]
+    return [*lines, swap_line([entry for entry in recent if entry["event"] == "end"])]
+
+
+def heavy_line(command: str, entries: list[dict[str, Any]]) -> str:
+    starts = [entry for entry in entries if entry["event"] == "start"]
+    ends = [entry for entry in entries if entry["event"] == "end"]
+    line = f"Heavy command {command}: {len(starts)} started, {len(ends)} ended"
+    if ends:
+        minutes = statistics.median(end["seconds"] for end in ends) / 60
+        cores = statistics.median(end["used"]["cores"] for end in ends)
+        memory = statistics.median(end["used"]["memory_gb"] for end in ends)
+        line += f", median {minutes:.1f} min, {cores:.1f} cores and {memory:.1f} GB"
+    waits = [entry for entry in entries if entry["event"] in ("start", "stop") and entry["waited_seconds"] > 0]
+    minutes_waited = sum(wait["waited_seconds"] for wait in waits) / 60
+    minutes_with_room = sum(wait["waited_with_room_seconds"] for wait in waits) / 60
+    return (
+        f"{line} | {len(waits)} waited, {minutes_waited:.1f} min in all, {minutes_with_room:.1f} min of it while "
+        "the readings showed room"
+    )
+
+
+def swap_line(ends: list[dict[str, Any]]) -> str:
+    swaps = [end["highest_swap_used_gb"] for end in ends if end["highest_swap_used_gb"] is not None]
+    if not swaps:
+        return "Swap while heavy commands ran: no readings"
+    return (
+        f"Swap while heavy commands ran, the highest in each run, GB: median {statistics.median(swaps):.1f}, "
+        f"highest {max(swaps):.1f}"
+    )
 
 
 class MachineReading(NamedTuple):
