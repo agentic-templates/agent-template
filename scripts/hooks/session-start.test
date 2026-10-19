@@ -382,17 +382,38 @@ new_worktree() {
 }
 builder_note="Session owner-1 is this repository's orchestrator, and keeps the loop's state in $main_checkout/.loop/state.md."
 
+# A builder that runs as a subagent has the orchestrator's pid, and its input can hold the orchestrator's session id.
+new_worktree "$running_process"
+echo '{"source": "compact", "session_id": "owner-1", "agent_id": "agent-7"}' >"$input_file"
+run_session_start CLAUDE_PID="$running_process"
+expect_output "After a compaction of a builder that runs as a subagent in a worktree" "$builder_note"
+expect_output_without "After a compaction of a builder that runs as a subagent in a worktree" "$state_text"
+
+new_worktree "$running_process"
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_output "After a compaction of a builder in a worktree, whose input has no agent_id" "$builder_note"
+expect_output_without "After a compaction of a builder in a worktree, whose input has no agent_id" "$state_text"
+
+new_state_file
+echo '{"source": "compact", "session_id": "owner-1", "agent_id": "agent-7"}' >"$input_file"
+run_session_start CLAUDE_PID="$running_process"
+expect_output "After a compaction of a subagent whose hook runs in the main checkout" "$other_note"
+expect_output_without "After a compaction of a subagent whose hook runs in the main checkout" "$state_text"
+
 new_worktree "$running_process"
 session_input startup builder-5
 run_session_start CLAUDE_PID="$new_process"
-expect_output "For a builder in a worktree, while the orchestrator's process runs" "$builder_note"
-expect_output_without "For a builder in a worktree, while the orchestrator's process runs" "$state_text"
+expect_output "For a builder in a worktree with a process of its own, while the orchestrator's process runs" "$builder_note"
+expect_output_without "For a builder in a worktree with a process of its own, while the orchestrator's process runs" \
+  "$state_text"
 
 new_worktree "$ended_process"
 session_input startup builder-5
 run_session_start CLAUDE_PID="$new_process"
-expect_output "For a builder in a worktree, after the orchestrator's process ended" "$builder_note"
-expect_output_without "For a builder in a worktree, after the orchestrator's process ended" "$state_text"
+expect_output "For a builder in a worktree with a process of its own, after the orchestrator's process ended" "$builder_note"
+expect_output_without "For a builder in a worktree with a process of its own, after the orchestrator's process ended" \
+  "$state_text"
 
 new_state_file
 rm -rf "$work/.git"
@@ -428,16 +449,26 @@ session_input startup someone-else
 run_session_start CLAUDE_PID="$new_process"
 expect_output "For another session, with a state file that has no session line" ""
 
-# Writes a state file of a size in bytes, with the orchestrator's lines at its start and "last" at its end:
-# long_state_file <bytes>
+# A line of 40 characters of two bytes each, so that a cut by bytes alone could split a character
+wide_line=$(printf 'é%.0s' $(seq 40))
+wide_line_bytes=$(($(printf '%s\n' "$wide_line" | wc -c)))
+
+# Writes a state file of a size in bytes: the orchestrator's lines, wide lines, and a last line of x's that ends with
+# "last" and fills the size: long_state_file <bytes>
 long_state_file() {
-  local start start_bytes
+  local start start_bytes wide_lines filler line
   start="session: owner-1"$'\n'"pid: $running_process"$'\n'
-  start_bytes=$(printf '%s' "$start" | wc -c)
+  start_bytes=$(($(printf '%s' "$start" | wc -c)))
+  # The last line takes at least the 5 bytes of "last" and its line break.
+  wide_lines=$((($1 - start_bytes - 5) / wide_line_bytes))
+  filler=$(($1 - start_bytes - 5 - wide_lines * wide_line_bytes))
   {
     printf '%s' "$start"
-    printf '%*s' "$(($1 - start_bytes - 4))" '' | tr ' ' x
-    printf last
+    for ((line = 0; line < wide_lines; line++)); do
+      printf '%s\n' "$wide_line"
+    done
+    printf '%*s' "$filler" '' | tr ' ' x
+    printf 'last\n'
   } >"$state_file"
 }
 
@@ -446,9 +477,20 @@ long_state_file() {
 expect_output_fits() {
   local description=$1 bytes
   case_count=$((case_count + 1))
-  bytes=$(($(printf '%s' "$hook_output" | wc -c)))
+  # The command substitution in run_session_start drops the line break at the end of the output.
+  bytes=$(($(printf '%s\n' "$hook_output" | wc -c)))
   if ((bytes > 10000)); then
     echo "error: $description, the hook's output must have at most 10,000 bytes, but it has $bytes." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks how the hook's output ends: expect_output_end <description> <text>
+expect_output_end() {
+  local description=$1 text=$2
+  case_count=$((case_count + 1))
+  if [[ $hook_output != *"$text" ]]; then
+    echo "error: $description, the hook's output must end with \"$text\", but it ends with \"${hook_output: -200}\"." >&2
     failed_cases=$((failed_cases + 1))
   fi
 }
@@ -467,7 +509,7 @@ expect_output_fits "With a state file that makes the output exactly 10,000 bytes
 long_state_file "$((fitting_bytes + 1))"
 run_session_start CLAUDE_PID="$running_process"
 expect_output "With a state file one byte too long" "$owner_note"$'\n'"$long_note"$'\n\n'"session: owner-1"
-expect_output_without "With a state file one byte too long" "last"
+expect_output_end "With a state file one byte too long, the output ends with a whole line" $'\n'"$wide_line"
 expect_output_fits "With a state file one byte too long"
 
 long_state_file "$fitting_bytes"
@@ -475,6 +517,16 @@ session_input compact owner-1
 run_session_start CLAUDE_PID="$running_process"
 expect_output "After a compaction, with a state file that fits only without the note about the compaction" \
   "$compacted"$'\n'"$owner_note"$'\n'"$long_note"
+expect_output_end "After a compaction, with a state file that fits only without the note about the compaction" \
+  $'\n'"$wide_line"
 expect_output_fits "After a compaction, with a state file that fits only without the note about the compaction"
+
+new_state_file
+printf 'session: owner-1\npid: %s\n%*s\nShip the importer.\n' "$running_process" 10000 '' >"$state_file"
+session_input startup owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_output_end "With a state file whose third line alone is too long, the output ends before it" \
+  "$owner_note"$'\n'"$long_note"$'\n\n'"session: owner-1"$'\n'"pid: $running_process"
+expect_output_fits "With a state file whose third line alone is too long"
 
 finish_tests
