@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Tests that for_each_simple_command in simple-commands.bash, which splits a command once and replays the split each
+# time that a check asks for the same command, calls a check's function as the plain splitter in
+# plain-simple-commands.bash does: for the same simple commands, in the same order, with the same words, redirections,
+# expansion notes, here-documents and folders.
+# shellcheck disable=SC2016 # The commands are the text that an agent sends, so their $ stays as written.
+set -euo pipefail
+# shellcheck source=scripts/hooks/testing.bash
+source "${BASH_SOURCE[0]%/*}/testing.bash"
+# shellcheck source=scripts/hooks/helpers.bash
+source "$hooks_folder/helpers.bash"
+# shellcheck source=scripts/hooks/plain-simple-commands.bash
+source "$hooks_folder/plain-simple-commands.bash"
+
+# The folder that each command starts in, with the folders that its cd commands change to
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+mkdir -p "$base/a/b"
+
+# Prints a name, the number of values and each value in <>: print_values <name> [<value>...]
+print_values() {
+  printf '%s %d' "$1" $(($# - 1))
+  shift
+  if (($# > 0)); then
+    printf ' <%s>' "$@"
+  fi
+  printf '\n'
+}
+
+# Prints what a check's function can read for a simple command, and follows a cd as the checks do:
+# record_simple_command <word>...
+record_simple_command() {
+  drop_command_prefixes "$@"
+  print_values words "$@"
+  print_values 'words to log' ${simple_command_words[@]+"${simple_command_words[@]}"}
+  print_values 'words that may expand' ${words_may_expand[@]+"${words_may_expand[@]}"}
+  print_values redirections ${redirections[@]+"${redirections[@]}"}
+  print_values here-documents ${heredocs[@]+"${heredocs[@]}"}
+  print_values 'here-documents that may expand' ${heredoc_note_expands[@]+"${heredoc_note_expands[@]}"}
+  print_values folder "${command_folder-}"
+  follow_cd
+}
+
+# Prints what a splitter gives the function of two checks for a command, with its exit code, after it split another
+# command: calls_of <for_each_simple_command or plain_for_each_simple_command> <command>
+calls_of() {
+  local status=0 output
+  output=$(
+    "$1" true ls
+    command_folder=$base
+    "$1" record_simple_command "$2"
+    echo "The next check:"
+    command_folder=$base
+    "$1" record_simple_command "$2"
+  ) || status=$?
+  printf '%s\nExit code: %s\n' "$output" "$status"
+}
+
+# Checks that both splitters give the function the same values for a command: expect_same_calls <command>
+expect_same_calls() {
+  local plain replayed
+  case_count=$((case_count + 1))
+  plain=$(calls_of plain_for_each_simple_command "$1")
+  replayed=$(calls_of for_each_simple_command "$1")
+  if [[ $replayed != "$plain" ]]; then
+    echo "error: for the command \"$1\", for_each_simple_command must call the function as the plain splitter does:" >&2
+    printf '%s\n' "$plain" "but it called it this way:" "$replayed" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Lists, pipes, background commands and line breaks
+expect_same_calls 'ls'
+expect_same_calls 'cd a && ls -la | wc -l || echo "no; folder" & wait'
+expect_same_calls $'ls\ncd a\nls'
+expect_same_calls $'ls \\\n  -la'
+expect_same_calls '! ls | grep -c x || true'
+expect_same_calls 'ls # cd a'
+
+# Subshells and the folders of the commands in them
+expect_same_calls '(cd a; cat < in.txt) | grep x; ls'
+expect_same_calls 'cd a; (cd b; ls); ls'
+expect_same_calls '( (cd a) ; ls ) && ls'
+expect_same_calls 'if true; then cd a; fi; ls'
+expect_same_calls 'for f in *; do cd a; done; ls'
+
+# Substitutions, nested and in quotes
+expect_same_calls 'echo $(cd a && pwd) $(ls) && ls'
+expect_same_calls 'echo `cd a; ls` done; ls'
+expect_same_calls 'echo "$(echo "$(cd a && ls)")"; ls'
+expect_same_calls 'tee >(cat) < <(ls)'
+expect_same_calls 'git commit -m "fix: a (b) c" && git push'
+
+# The words before a command, and env's folder
+expect_same_calls 'env -C a ls; ls'
+expect_same_calls 'env --chdir=a ls && ls'
+expect_same_calls 'env -i FOO=1 sudo git -C a push origin HEAD'
+expect_same_calls 'FOO=1 BAR=$(date) env -u HOME ls'
+
+# Quotes, escapes, expansions and redirections
+expect_same_calls "echo 'single \$x' \"double \\\$x \\\"q\\\"\" back\\ slash"
+expect_same_calls 'echo $((1 + 2)) ${HOME}/x ~/y "$HOME"'
+expect_same_calls 'ls 2>/dev/null >>log <in 3<>file 2>&1'
+
+# Here-documents, quoted and not, with substitutions in their bodies
+expect_same_calls $'gh pr create --title T --body "$(cat <<\'EOF\'\nA body with "quotes", $HOME and `ls`\nEOF\n)"'
+expect_same_calls $'cat <<EOF > notes.txt\nThe folder is $(cd a; pwd), and `ls` lists it.\nEOF\nls'
+expect_same_calls $'cat <<-"END"\n\tTabs and $(cd a)\n\tEND\necho done'
+expect_same_calls $'cat <<A <<B\nfirst $(cd a; ls)\nA\nsecond\nB\nls'
+
+finish_tests

@@ -87,7 +87,9 @@ split_substitution() {
 # Calls a function with the words of each simple command of a shell command, including the commands inside
 # substitutions: for_each_simple_command <function> <command>
 # scripts/hooks/before-tool splits the command with split_command before it runs the checks, which then don't split it
-# again, because splitting it took a third of the CPU time of each check, as issue #91 measured.
+# again. That cut the CPU time of the hooks' tests from 107 to 87 seconds, as pull request #122 measured.
+# simple-commands.test checks that the function gets the same values as from the plain splitter in
+# plain-simple-commands.bash, which splits the command for each check.
 for_each_simple_command() {
   if [[ -z ${split_command_text+set} || $split_command_text != "$2" ]]; then
     split_command "$2"
