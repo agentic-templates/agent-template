@@ -49,7 +49,7 @@ block_if_instruction_file() {
   relative=${path#"$repository_root"/}
   shopt -s nocasematch
   if [[ $relative =~ $instruction_file ]]; then
-    block "Blocked: $relative makes a tool skip AGENTS.md. Put its rules into AGENTS.md or a guide in docs/ instead."
+    block "Blocked: $relative makes a tool skip AGENTS.md. Put its rules into AGENTS.md or a guide in docs/ instead." "$1"
   fi
   shopt -u nocasematch
 }

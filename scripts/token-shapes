@@ -1,0 +1,18 @@
+# The shapes of the tokens that scripts/leak-scan finds in what a push would publish, and that the hooks leave out of
+# .loop/blocks.log. Each line holds these fields, separated by tabs:
+# - the kind of token
+# - how many of a token's first characters the scan's findings show
+# - the token's shape, which Python's re and grep -E read the same way
+# - the characters that can't follow a token, as in a bracket expression, for a shape of a fixed length
+# The scan counts a token only when no letter or digit comes just before it. The hooks leave out each word that holds
+# a token's shape.
+GitHub token	4	(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}
+GitHub token	11	github_pat_[A-Za-z0-9_]{30,}
+GitLab token	6	glpat-[A-Za-z0-9_-]{20,}
+Anthropic key	7	sk-ant-[A-Za-z0-9_-]{20,}
+OpenAI key	8	sk-(proj|svcacct|admin)-[A-Za-z0-9_-]{20,}
+OpenAI key	3	sk-[A-Za-z0-9]{20,}
+Stripe key	8	(sk|rk)_live_[A-Za-z0-9]{20,}
+AWS access key ID	4	(AKIA|ASIA)[A-Z0-9]{16}	A-Za-z0-9
+Slack token	5	xox[abeoprs]-[A-Za-z0-9-]{10,}
+Google API key	4	AIza[A-Za-z0-9_-]{35}	A-Za-z0-9_-

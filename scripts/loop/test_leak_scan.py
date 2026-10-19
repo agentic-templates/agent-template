@@ -467,6 +467,14 @@ class TokenTest(LeakScanTest):
         ]
         self.assert_planted_findings("token", cases)
 
+    def test_leaves_out_a_token_shape_inside_a_longer_word(self) -> None:
+        self.assert_planted_clean(
+            {"after-a-letter.txt": f"id x{TOKEN}\n"},
+            {"after-a-digit.txt": f"id 7{TOKENS[12]}\n"},
+            {"aws-and-more.txt": f"id {TOKENS[12]}X\n"},
+            {"google-and-more.txt": f"id {TOKENS[16]}-\n"},
+        )
+
     def test_finds_a_long_secret_assigned_to_a_name_that_says_that_its_a_secret(self) -> None:
         assignments = [
             "AWS_SECRET" + "_ACCESS_KEY=" + AWS_VALUE,
@@ -759,8 +767,9 @@ class HookTest(LeakScanTest):
         self.copy_scripts()
 
     def copy_scripts(self) -> None:
-        """Copies the hook, the installer and the scan into the checkout of the current folder."""
-        for name in ("leak-scan", "install-git-hooks", "git-hooks/pre-push", "loop/paths.py"):
+        """Copies the hook, the installer, and the scan with the files it reads, into the checkout of the current
+        folder."""
+        for name in ("leak-scan", "token-shapes", "install-git-hooks", "git-hooks/pre-push", "loop/paths.py"):
             (Path("scripts") / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(SCRIPTS / name, Path("scripts") / name)
         shutil.copy2(SCRIPTS.parent / ".python-version", ".python-version")

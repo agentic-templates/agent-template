@@ -22,6 +22,8 @@ fi
 
 # shellcheck source=scripts/minimum-gh-version
 source "${BASH_SOURCE[0]%/*}/../minimum-gh-version"
+# shellcheck source=scripts/loop-folder
+source "${BASH_SOURCE[0]%/*}/../loop-folder"
 home=${HOME%/}
 
 # Claude Code replaces a hook's output of more than 10,000 characters with its start, and doesn't ask Claude to read
@@ -214,13 +216,7 @@ in_main_checkout=""
 if [[ -n $repository && -n $session_id && -n ${CLAUDE_PID:-} ]] &&
   git_folder=$(git -C "$repository" rev-parse --absolute-git-dir 2>/dev/null) &&
   shared_git_folder=$(git -C "$repository" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
-  # The main checkout holds the git folder that its worktrees share, unless the repository keeps its git folder
-  # elsewhere, as a submodule does.
-  if [[ $shared_git_folder == */.git ]]; then
-    state_file=${shared_git_folder%/.git}/.loop/state.md
-  else
-    state_file=$repository/.loop/state.md
-  fi
+  state_file=$(loop_folder "$shared_git_folder" "$repository")/state.md
   if [[ $git_folder == "$shared_git_folder" ]]; then
     in_main_checkout=yes
   fi
