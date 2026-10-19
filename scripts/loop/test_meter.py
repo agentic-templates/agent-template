@@ -50,21 +50,26 @@ sys.exit(answer.get("status", 0))
 """
 
 
-def usage_output(session: float, session_reset: str = "4:30am", week: float = 30.0) -> dict[str, str]:
+def usage_output(
+    session: float, session_reset: str = "4:30am", week: float = 30.0, model_week: float | None = None
+) -> dict[str, str]:
     """An answer of claude -p /usage, with reset times in New York."""
-    return {
-        "stdout": f"Current session: {session:g}% used · resets {session_reset} (America/New_York)\n"
+    output = (
+        f"Current session: {session:g}% used · resets {session_reset} (America/New_York)\n"
         f"Current week (all models): {week:g}% used · resets Oct 24 at 5pm (America/New_York)\n"
-    }
+    )
+    if model_week is not None:
+        output += f"Current week (Fable): {model_week:g}% used · resets Oct 24 at 5pm (America/New_York)\n"
+    return {"stdout": output}
 
 
 def github_answer(
-    last: str | None = "2026-10-11T14:00:00Z", release: tuple[str, str] | None = None, merged: int = 12
+    merges: tuple[str, ...] = ("2026-10-11T14:00:00Z",), release: tuple[str, str] | None = None, merged: int = 12
 ) -> dict[str, Any]:
-    nodes = [{"committedDate": last}] if last else []
+    """gh's answers, with the times when the retrospectives' pull requests merged."""
     repository = {
         "latestRelease": {"tagName": release[0], "publishedAt": release[1]} if release else None,
-        "defaultBranchRef": {"target": {"history": {"nodes": nodes}}},
+        "pullRequests": {"nodes": [{"mergedAt": merge} for merge in merges]},
     }
     return {
         "repository": {"stdout": json.dumps({"data": {"repository": repository}})},
@@ -77,10 +82,13 @@ def meters(
     week: float = 30.0,
     session_reset: dt.datetime | None = NOW + dt.timedelta(hours=2),
     week_reset: dt.datetime | None = NOW + dt.timedelta(days=3),
+    model_week: float | None = None,
 ) -> dict[str, Any]:
     found = {"week": {"used": week, "resets": week_reset.isoformat() if week_reset else None}}
     if session is not None:
         found["session"] = {"used": session, "resets": session_reset.isoformat() if session_reset else None}
+    if model_week is not None:
+        found["week (Fable)"] = {"used": model_week, "resets": (NOW + dt.timedelta(days=3)).isoformat()}
     return found
 
 
@@ -183,52 +191,74 @@ class MeterTest(unittest.TestCase):
 
 class AdviseTest(unittest.TestCase):
     def test_goes_and_reads_every_30_minutes_below_80_percent(self) -> None:
-        self.assertEqual(meter.advise(meters(40.0), 0.2, NOW), ("go", 98.0, 1800))
+        self.assertEqual(meter.advise(meters(40.0), 0.2, NOW, False), ("go", 98.0, 1800, []))
 
     def test_goes_on_an_account_without_a_session_meter(self) -> None:
-        self.assertEqual(meter.advise(meters(None), None, NOW)[0::2], ("go", 1800))
+        self.assertEqual(meter.advise(meters(None), None, NOW, False)[0::2], ("go", 1800))
 
     def test_watches_and_reads_every_10_minutes_past_80_percent(self) -> None:
-        self.assertEqual(meter.advise(meters(81.0), 0.2, NOW)[0::2], ("watch", 600))
-        self.assertEqual(meter.advise(meters(10.0, week=85.0), 0.2, NOW)[0::2], ("watch", 600))
-        self.assertEqual(meter.advise(meters(79.0), 0.2, NOW)[0], "go")
+        self.assertEqual(meter.advise(meters(81.0), 0.2, NOW, False)[0::2], ("watch", 600))
+        self.assertEqual(meter.advise(meters(10.0, week=85.0), 0.2, NOW, False)[0::2], ("watch", 600))
+        self.assertEqual(meter.advise(meters(79.0), 0.2, NOW, False)[0], "go")
 
     def test_keeps_8_minutes_of_usage_and_at_least_2_percent_before_the_session_stop_point(self) -> None:
-        self.assertEqual(meter.advise(meters(40.0), 1.0, NOW)[1], 92.0)
-        self.assertEqual(meter.advise(meters(40.0), 0.1, NOW)[1], 98.0)
-        self.assertAlmostEqual(meter.advise(meters(40.0), None, NOW)[1], 97.6)
+        self.assertEqual(meter.advise(meters(40.0), 1.0, NOW, False)[1], 92.0)
+        self.assertEqual(meter.advise(meters(40.0), 0.1, NOW, False)[1], 98.0)
+        self.assertAlmostEqual(meter.advise(meters(40.0), None, NOW, False)[1], 97.6)
 
     def test_is_near_within_3_percent_of_the_session_stop_point(self) -> None:
-        self.assertEqual(meter.advise(meters(95.0), 0.2, NOW)[0::2], ("near", 150))
-        self.assertEqual(meter.advise(meters(94.9), 0.2, NOW)[0], "watch")
+        self.assertEqual(meter.advise(meters(95.0), 0.2, NOW, False)[0::2], ("near", 150))
+        self.assertEqual(meter.advise(meters(94.9), 0.2, NOW, False)[0], "watch")
 
     def test_is_near_within_1_percent_of_the_weekly_stop(self) -> None:
-        self.assertEqual(meter.advise(meters(10.0, week=98.0), 0.2, NOW)[0], "near")
-        self.assertEqual(meter.advise(meters(10.0, week=97.9), 0.2, NOW)[0], "watch")
+        self.assertEqual(meter.advise(meters(10.0, week=98.0), 0.2, NOW, False)[0], "near")
+        self.assertEqual(meter.advise(meters(10.0, week=97.9), 0.2, NOW, False)[0], "watch")
 
     def test_stops_at_the_session_stop_point_until_a_minute_after_the_reset(self) -> None:
-        self.assertEqual(meter.advise(meters(98.0), 0.2, NOW)[0::2], ("stop", 2 * 3600 + 60))
-        self.assertEqual(meter.advise(meters(98.0, session_reset=None), 0.2, NOW)[0::2], ("stop", 600))
+        self.assertEqual(meter.advise(meters(98.0), 0.2, NOW, False)[0::2], ("stop", 2 * 3600 + 60))
+        self.assertEqual(meter.advise(meters(98.0, session_reset=None), 0.2, NOW, False)[0::2], ("stop", 600))
 
     def test_stops_at_the_weekly_stop_less_than_10_hours_before_its_reset(self) -> None:
         week_reset = NOW + dt.timedelta(hours=10)
-        self.assertEqual(meter.advise(meters(10.0, 99.0, week_reset=week_reset), 0.2, NOW)[0::2], ("stop", 36060))
+        self.assertEqual(
+            meter.advise(meters(10.0, 99.0, week_reset=week_reset), 0.2, NOW, False)[0::2], ("stop", 36060)
+        )
 
     def test_parks_at_the_weekly_stop_more_than_10_hours_before_its_reset(self) -> None:
         week_reset = NOW + dt.timedelta(hours=10, seconds=1)
-        self.assertEqual(meter.advise(meters(10.0, 99.0, week_reset=week_reset), 0.2, NOW)[0::2], ("parked", 36061))
-        self.assertEqual(meter.advise(meters(10.0, 99.0, week_reset=None), 0.2, NOW)[0::2], ("parked", 600))
+        self.assertEqual(
+            meter.advise(meters(10.0, 99.0, week_reset=week_reset), 0.2, NOW, False)[0::2], ("parked", 36061)
+        )
+        self.assertEqual(meter.advise(meters(10.0, 99.0, week_reset=None), 0.2, NOW, False)[0::2], ("parked", 600))
+
+    def test_counts_the_weekly_meter_of_each_model(self) -> None:
+        advice = meter.advise(meters(8.0, 40.0, model_week=100.0), None, NOW, False)
+        self.assertEqual(
+            (advice.state, advice.wait_seconds, advice.meters_at_stop), ("parked", 3 * 86400 + 60, ["week (Fable)"])
+        )
+        self.assertEqual(meter.advise(meters(8.0, 40.0, model_week=98.0), None, NOW, False)[0], "near")
+        self.assertEqual(meter.advise(meters(8.0, 40.0, model_week=85.0), None, NOW, False)[0], "watch")
+
+    def test_stays_at_the_session_stop_point_that_it_reached_until_the_reset(self) -> None:
+        self.assertEqual(meter.advise(meters(93.0), 0.02, NOW, True)[0::2], ("stop", 2 * 3600 + 60))
+        self.assertEqual(meter.advise(meters(93.0), 0.02, NOW, False)[0], "watch")
+
+    def test_waits_for_the_last_reset_of_the_meters_at_their_stop(self) -> None:
+        both = meters(98.0, 99.0, week_reset=NOW + dt.timedelta(hours=1))
+        self.assertEqual(meter.advise(both, 0.2, NOW, False)[0::2], ("stop", 2 * 3600 + 60))
+        self.assertEqual(sorted(meter.advise(both, 0.2, NOW, False).meters_at_stop), ["session", "week"])
+        self.assertEqual(meter.advise(meters(98.0, 99.0), 0.2, NOW, False)[0::2], ("parked", 3 * 86400 + 60))
 
     def test_reads_again_before_a_fast_rate_reaches_the_stop_point(self) -> None:
         # At 1 % a minute, 79 % reaches the stop point of 92 % in 13 minutes. The next reading comes after half of them.
-        self.assertEqual(meter.advise(meters(79.0), 1.0, NOW)[0::2], ("go", 390))
+        self.assertEqual(meter.advise(meters(79.0), 1.0, NOW, False)[0::2], ("go", 390))
 
     def test_reads_at_most_once_a_minute(self) -> None:
-        self.assertEqual(meter.advise(meters(91.5), 1.0, NOW)[2], 60)
+        self.assertEqual(meter.advise(meters(91.5), 1.0, NOW, False)[2], 60)
 
     def test_reads_at_the_default_rate_when_the_meter_did_not_rise(self) -> None:
         # At the default rate of 0.3 % a minute, 97 % reaches the stop point of 98 % in 200 seconds.
-        self.assertEqual(meter.advise(meters(97.0), 0.0, NOW)[0::2], ("near", 100))
+        self.assertEqual(meter.advise(meters(97.0), 0.0, NOW, False)[0::2], ("near", 100))
 
 
 class RateTest(unittest.TestCase):
@@ -270,6 +300,31 @@ class AccountLineTest(MeterTest):
             "claude 03:28 | session 14% resets 04:30 | week 30% resets Sat 17:00 | rate 0.30%/min | stop at 98% | go",
         )
 
+    def test_gives_the_weekly_meter_of_each_model(self) -> None:
+        self.answer("claude", [usage_output(8, week=40, model_week=100)])
+        self.assertEqual(
+            self.run_meter()[1][0],
+            "claude 03:08 | session 8% resets 04:30 | week 40% resets Sat 17:00 | week (Fable) 100% resets Sat 17:00 | "
+            "rate unknown | stop at 98% | parked",
+        )
+
+    def test_stays_at_stop_until_the_reset_when_the_rate_falls(self) -> None:
+        readings = [
+            (dt.timedelta(minutes=2), 90, "watch"),
+            (dt.timedelta(minutes=4), 92, "stop"),
+            (dt.timedelta(minutes=54), 93, "stop"),
+        ]
+        for since_now, used, advice in readings:
+            self.clock.time = NOW + since_now
+            self.answer("claude", [usage_output(used, "5:12am")])
+            self.assertTrue(self.run_meter()[1][0].endswith(f" | {advice}"), (since_now, advice))
+        self.answer("claude", [usage_output(94, "5:12am")])
+        self.assertTrue(self.run_meter("--wake")[1][0].endswith(" | stop"))
+        self.assertEqual(self.clock.sleeps, [3000])
+        self.clock.time = dt.datetime(2026, 10, 18, 5, 13, tzinfo=NEW_YORK)
+        self.answer("claude", [usage_output(1, "10:12am")])
+        self.assertTrue(self.run_meter()[1][0].endswith(" | go"))
+
     def test_adds_each_reading_to_the_log(self) -> None:
         self.run_meter()
         self.assertEqual(
@@ -281,6 +336,7 @@ class AccountLineTest(MeterTest):
                     "session": {"used": 8.0, "resets": "2026-10-18T04:30:00-04:00"},
                     "week": {"used": 30.0, "resets": "2026-10-24T17:00:00-04:00"},
                 },
+                "meters_at_stop": [],
             },
         )
 
@@ -566,12 +622,15 @@ class RetrospectiveTest(MeterTest):
             "retrospective not due: 29 of 30 merged pull requests since the last one, and no release",
         )
 
-    def test_counts_the_pull_requests_merged_after_the_last_change_to_the_records(self) -> None:
+    def test_counts_the_pull_requests_merged_after_the_last_retrospective(self) -> None:
+        self.answer(
+            "gh", github_answer(merges=("2026-10-01T09:00:00Z", "2026-10-11T14:00:00Z", "2026-10-05T09:00:00Z"))
+        )
         self.run_meter()
         repository, search = self.calls("gh")
         self.assertEqual(repository["args"][:4], ["api", "graphql", "-f", f"query={meter.REPOSITORY_QUERY}"])
         self.assertEqual(
-            repository["args"][4:], ["-F", "owner={owner}", "-F", "name={repo}", "-F", "records=docs/retros"]
+            repository["args"][4:], ["-F", "owner={owner}", "-F", "name={repo}", "-F", "label=retrospective"]
         )
         self.assertEqual(
             search["args"][4:], ["-F", "search=repo:{owner}/{repo} is:pr is:merged merged:>2026-10-11T14:00:00Z"]
@@ -579,10 +638,10 @@ class RetrospectiveTest(MeterTest):
         self.assertEqual(Path(search["cwd"]), paths.main_checkout())
 
     def test_counts_every_merged_pull_request_before_the_first_retrospective(self) -> None:
-        self.answer("gh", github_answer(last=None, merged=31))
+        self.answer("gh", github_answer(merges=(), merged=31))
         self.assertEqual(self.retrospective(), "retrospective due: 31 merged pull requests with no retrospective yet")
         self.assertEqual(self.calls("gh")[1]["args"][4:], ["-F", "search=repo:{owner}/{repo} is:pr is:merged"])
-        self.answer("gh", github_answer(last=None, release=("v0.1.0", "2026-10-01T09:00:00Z"), merged=1))
+        self.answer("gh", github_answer(merges=(), release=("v0.1.0", "2026-10-01T09:00:00Z"), merged=1))
         self.assertEqual(self.retrospective(), "retrospective due: release v0.1.0 with no retrospective yet")
 
     def test_is_unknown_when_gh_fails(self) -> None:

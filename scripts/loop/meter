@@ -5,19 +5,19 @@ Each account's line ends with its advice:
 
   go      Start work freely.
   watch   A meter is at 80% or more.
-  near    The session meter is within 3 percentage points of its stop point, or the weekly meter within 1 point of
-          its stop.
-  stop    The session meter reached its stop point, or the weekly meter reached its stop less than 10 hours before
-          its reset. Start nothing on the account until the reset.
-  parked  The weekly meter reached its stop more than 10 hours before its reset. Start nothing on the account until
-          the reset.
+  near    The session meter is within 3 percentage points of its stop point, or a weekly meter within 1 point of its
+          stop.
+  stop    The session meter reached its stop point, or a weekly meter reached its stop less than 10 hours before its
+          reset. Start nothing on the account until that reset. The advice stays stop until then.
+  parked  A weekly meter reached its stop more than 10 hours before its reset. Start nothing on the account until that
+          reset.
 
 The session meter's stop point is 100% minus the larger of 2 percentage points and the usage of 8 minutes at the rate
-between the last two readings. The weekly meter's stop is 99%.
+between the last two readings. Each weekly meter, the one for all models and each model's own, stops at 99%.
 
 The last line gives the machine's free disk and load, the orchestrator's context size, and whether a retrospective is
-due. One is due after a release, and after 30 merged pull requests, since the last retrospective. The last
-retrospective is the newest commit on the default branch that changed docs/retros/.
+due. One is due after a release, and after 30 merged pull requests, since the last retrospective: the newest merged
+pull request with the label retrospective.
 
 With --wake, the meter keeps reading, and prints and ends when an account's advice changes, when an account gives no
 reading, and 50 minutes after it started while an account's advice is stop. Run it in the background, so that its
@@ -63,6 +63,7 @@ DEFAULT_RATE = 0.3
 SAME_WINDOW_DRIFT = dt.timedelta(minutes=10)
 # /usage gives whole percents, so two readings closer than this would give a rate far above the real one.
 SHORTEST_RATE_INTERVAL = dt.timedelta(seconds=30)
+# The stop of each meter other than the session's
 WEEK_STOP_PERCENT = 99.0
 WEEK_NEAR_MARGIN_PERCENT = 1.0
 # Waiting at a stop wakes the orchestrator every 50 minutes, and each wake spends some of the week. So a weekly stop
@@ -73,6 +74,7 @@ SHORTEST_WAIT_SECONDS = 60
 # A wait for a reset ends this long after it, so that the next reading sees the new window.
 AFTER_RESET_SECONDS = 60
 UNKNOWN_RESET_WAIT_SECONDS = 10 * 60
+LATEST_TIME = dt.datetime.max.replace(tzinfo=dt.UTC)
 # Less than an hour, so that the orchestrator wakes while a prompt cache that lasts an hour still holds its context.
 WAKE_EVERY = dt.timedelta(minutes=50)
 CLAUDE_TIMEOUT_SECONDS = 120
@@ -81,14 +83,17 @@ CODEX_SNAPSHOT_AGE = dt.timedelta(days=8)
 # The meter reads only the end of a transcript, where the last call is. An orchestrator's transcript of 218 MB took
 # 0.25 seconds and about 0.5 GB of memory to read whole.
 TRANSCRIPT_TAIL_BYTES = 400_000
-RETROSPECTIVE_RECORDS = "docs/retros"
+RETROSPECTIVE_LABEL = "retrospective"
 MERGES_PER_RETROSPECTIVE = 30
 
+# GitHub can't order pull requests by when they merged, so the meter takes the latest merge of the newest ones.
 REPOSITORY_QUERY = """
-query($owner: String!, $name: String!, $records: String!) {
+query($owner: String!, $name: String!, $label: String!) {
   repository(owner: $owner, name: $name) {
     latestRelease { tagName publishedAt }
-    defaultBranchRef { target { ... on Commit { history(first: 1, path: $records) { nodes { committedDate } } } } }
+    pullRequests(labels: [$label], states: MERGED, first: 100, orderBy: {field: CREATED_AT, direction: DESC}) {
+      nodes { mergedAt }
+    }
   }
 }"""
 SEARCH_COUNT_QUERY = "query($search: String!) { search(query: $search, type: ISSUE) { issueCount } }"
@@ -102,8 +107,10 @@ class Account(TypedDict):
 
 class Advice(NamedTuple):
     state: str
+    # The session meter's stop point
     stop_at: float
     wait_seconds: int
+    meters_at_stop: list[str]
 
 
 class Readings(NamedTuple):
@@ -223,11 +230,17 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
             lines.append(f"{account['name']} | no reading: {problem}")
             has_every_account = False
             continue
-        reading = {"at": reading_time.isoformat(timespec="seconds"), "account": account["name"], "meters": meters}
-        rate = rate_per_minute(last_reading(log, account["name"]), reading)
+        reading: dict[str, Any] = {
+            "at": reading_time.isoformat(timespec="seconds"),
+            "account": account["name"],
+            "meters": meters,
+        }
+        previous = last_reading(log, account["name"])
+        rate = rate_per_minute(previous, reading)
+        result = advise(meters, rate, reading_time, is_held_at_session_stop(previous, reading))
+        reading["meters_at_stop"] = result.meters_at_stop
         with log.open("a") as handle:
             handle.write(json.dumps(reading) + "\n")
-        result = advise(meters, rate, reading_time)
         advice[account["name"]] = result.state
         waits.append(result.wait_seconds)
         lines.append(account_line(account["name"], meters, rate, result, notes, reading_time))
@@ -341,42 +354,64 @@ def last_reading(log: Path, account: str) -> dict[str, Any] | None:
 
 def rate_per_minute(previous: dict[str, Any] | None, current: dict[str, Any]) -> float | None:
     """How fast the session meter rose between two readings of the same window, in percent per minute, or None."""
-    if not previous or "session" not in previous["meters"] or "session" not in current["meters"]:
-        return None
-    before, after = previous["meters"]["session"], current["meters"]["session"]
-    if before["resets"] is None or after["resets"] is None:
-        return None
-    if (
-        abs(dt.datetime.fromisoformat(after["resets"]) - dt.datetime.fromisoformat(before["resets"]))
-        > SAME_WINDOW_DRIFT
-    ):
+    if not previous or not is_same_session_window(previous, current):
         return None
     interval = dt.datetime.fromisoformat(current["at"]) - dt.datetime.fromisoformat(previous["at"])
     if interval < SHORTEST_RATE_INTERVAL:
         return None
-    return max(0.0, float(after["used"] - before["used"]) / (interval.total_seconds() / 60))
+    used = float(current["meters"]["session"]["used"] - previous["meters"]["session"]["used"])
+    return max(0.0, used / (interval.total_seconds() / 60))
 
 
-def advise(meters: dict[str, Meter], rate: float | None, reading_time: dt.datetime) -> Advice:
-    session = meters.get("session")
-    week = meters.get("week")
+def is_held_at_session_stop(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    """Whether the session meter reached its stop earlier in the current window. It stays at its stop until the reset,
+    because otherwise a rate that falls once the agents finish would lift the stop."""
+    if not previous or "session" not in previous.get("meters_at_stop", []):
+        return False
+    return is_same_session_window(previous, current)
+
+
+def is_same_session_window(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+    before, after = previous["meters"].get("session"), current["meters"].get("session")
+    if not before or not after or before["resets"] is None or after["resets"] is None:
+        return False
+    drift = dt.datetime.fromisoformat(after["resets"]) - dt.datetime.fromisoformat(before["resets"])
+    return abs(drift) <= SAME_WINDOW_DRIFT
+
+
+def advise(
+    meters: dict[str, Meter], rate: float | None, reading_time: dt.datetime, is_held_at_session_stop: bool
+) -> Advice:
     stop_at = 100.0 - max(STOP_FLOOR_PERCENT, (DEFAULT_RATE if rate is None else rate) * STOP_MINUTES_OF_USAGE)
-    if week and week["used"] >= WEEK_STOP_PERCENT:
-        reset = reset_time(week)
-        state = "stop" if reset and reset - reading_time <= LONGEST_STOP else "parked"
-        return Advice(state, stop_at, wait_for_reset(week, reading_time))
-    if session and session["used"] >= stop_at:
-        return Advice("stop", stop_at, wait_for_reset(session, reading_time))
-    state = state_before_the_stops(session, week, stop_at)
-    return Advice(state, stop_at, before_the_stop_point(READ_EVERY_SECONDS[state], session, rate, stop_at))
+    at_stop = [name for name, meter in meters.items() if meter["used"] >= stop_percent(name, stop_at)]
+    if is_held_at_session_stop and "session" not in at_stop:
+        at_stop.append("session")
+    if not at_stop:
+        state = state_before_the_stops(meters, stop_at)
+        wait = before_the_stop_point(READ_EVERY_SECONDS[state], meters.get("session"), rate, stop_at)
+        return Advice(state, stop_at, wait, [])
+    parking = [name for name in at_stop if name != "session" and is_far_from_reset(meters[name], reading_time)]
+    # The account waits for the last reset of the meters that hold it. An unknown reset could be the last.
+    waiting_for = max(parking or at_stop, key=lambda name: reset_time(meters[name]) or LATEST_TIME)
+    state = "parked" if parking else "stop"
+    return Advice(state, stop_at, wait_for_reset(meters[waiting_for], reading_time), at_stop)
 
 
-def state_before_the_stops(session: Meter | None, week: Meter | None, stop_at: float) -> str:
-    is_session_near = session is not None and session["used"] >= stop_at - NEAR_MARGIN_PERCENT
-    is_week_near = week is not None and week["used"] >= WEEK_STOP_PERCENT - WEEK_NEAR_MARGIN_PERCENT
-    if is_session_near or is_week_near:
-        return "near"
-    if any(meter["used"] >= WATCH_PERCENT for meter in (session, week) if meter):
+def is_far_from_reset(meter: Meter, reading_time: dt.datetime) -> bool:
+    reset = reset_time(meter)
+    return reset is None or reset - reading_time > LONGEST_STOP
+
+
+def stop_percent(name: str, session_stop_at: float) -> float:
+    return session_stop_at if name == "session" else WEEK_STOP_PERCENT
+
+
+def state_before_the_stops(meters: dict[str, Meter], stop_at: float) -> str:
+    for name, meter in meters.items():
+        margin = NEAR_MARGIN_PERCENT if name == "session" else WEEK_NEAR_MARGIN_PERCENT
+        if meter["used"] >= stop_percent(name, stop_at) - margin:
+            return "near"
+    if any(meter["used"] >= WATCH_PERCENT for meter in meters.values()):
         return "watch"
     return "go"
 
@@ -407,7 +442,7 @@ def account_line(
     name: str, meters: dict[str, Meter], rate: float | None, advice: Advice, notes: list[str], reading_time: dt.datetime
 ) -> str:
     parts = [f"{name} {reading_time:%H:%M}"]
-    parts += [f"{kind} {describe(meters[kind], reading_time)}" for kind in ("session", "week") if kind in meters]
+    parts += [f"{meter_name} {describe(meter, reading_time)}" for meter_name, meter in meters.items()]
     if "session" in meters:
         parts.append("rate unknown" if rate is None else f"rate {rate:.2f}%/min")
         parts.append(f"stop at {advice.stop_at:.0f}%")
@@ -480,17 +515,16 @@ def context_tokens(transcript: Path) -> int | None:
 
 def read_retrospective(checkout: Path) -> str:
     try:
-        repository = github(
-            REPOSITORY_QUERY, {"owner": "{owner}", "name": "{repo}", "records": RETROSPECTIVE_RECORDS}, checkout
-        )["repository"]
-        commits = repository["defaultBranchRef"]["target"]["history"]["nodes"]
+        variables = {"owner": "{owner}", "name": "{repo}", "label": RETROSPECTIVE_LABEL}
+        repository = github(REPOSITORY_QUERY, variables, checkout)["repository"]
+        merges = [dt.datetime.fromisoformat(node["mergedAt"]) for node in repository["pullRequests"]["nodes"]]
+        last = max(merges, default=None)
         search = "repo:{owner}/{repo} is:pr is:merged"
-        if commits:
-            search += f" merged:>{commits[0]['committedDate']}"
+        if last:
+            search += f" merged:>{last.astimezone(dt.UTC):%Y-%m-%dT%H:%M:%SZ}"
         merged = github(SEARCH_COUNT_QUERY, {"search": search}, checkout)["search"]["issueCount"]
     except MeterError as error:
         return f"retrospective unknown: {error}"
-    last = dt.datetime.fromisoformat(commits[0]["committedDate"]) if commits else None
     latest = repository["latestRelease"]
     release = Release(latest["tagName"], dt.datetime.fromisoformat(latest["publishedAt"])) if latest else None
     return retrospective_note(last, release, merged)

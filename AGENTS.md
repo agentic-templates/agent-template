@@ -56,6 +56,8 @@ A status label says what an issue is waiting for. The status labels are:
 
 The `ready` label marks the issues that a maintainer wants built, and isn't a status label.
 
+The `retrospective` label marks the pull request of a retrospective. `scripts/loop/meter` counts the merged pull requests since the newest one.
+
 Dependabot adds `dependencies` to its own pull requests.
 
 ## Make a change
