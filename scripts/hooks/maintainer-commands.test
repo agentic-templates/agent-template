@@ -362,6 +362,20 @@ expect_from "$orchestrator" "" scripts/configure-github 2 "$unlike_main"
 git -C "$main_checkout" checkout --quiet -- .gitignore
 rm "$main_checkout/scripts/hooks/notes.txt"
 TEST_GITIGNORE="" expect_from "$orchestrator" "" scripts/configure-github 2 "$unlike_main"
+# A new file, while git's config names another folder in core.worktree, whose files git would list instead: in the
+# shared git folder's config, or in the main checkout's config.worktree, which git reads with extensions.worktreeConfig
+other_work_tree=$folders/other-work-tree
+mkdir "$other_work_tree"
+echo "Notes" >"$main_checkout/scripts/hooks/notes.txt"
+git -C "$main_checkout" config core.worktree "$other_work_tree"
+expect_from "$orchestrator" "" scripts/configure-github 2 "$unlike_main"
+git -C "$main_checkout" config --unset core.worktree
+git -C "$main_checkout" config extensions.worktreeConfig true
+git -C "$main_checkout" config --worktree core.worktree "$other_work_tree"
+expect_from "$orchestrator" "" scripts/configure-github 2 "$unlike_main"
+git -C "$main_checkout" config --worktree --unset core.worktree
+git -C "$main_checkout" config --unset extensions.worktreeConfig
+rm "$main_checkout/scripts/hooks/notes.txt"
 # A new .gitignore in the folder that ignores itself and the files beside it
 mkdir "$main_checkout/scripts/extra"
 echo "*" >"$main_checkout/scripts/extra/.gitignore"
