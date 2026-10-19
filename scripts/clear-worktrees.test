@@ -58,24 +58,29 @@ chmod +x "$base/bin/gh"
 save_subject="chore: save the unfinished work of a stopped session"
 issue_branches=$'12 12-fix-totals\n13 13-export-csv'
 
-# Makes a repository for a case, and sets case_dir to its folder and start to its first commit. The folder holds
-# origin.git, the repository on GitHub, and main, the repository's main folder, with main checked out. GitHub has the
-# branches of issues 12 and 13, as gh issue develop makes them, and main has them too: new_case
+# Each case starts from a copy of this folder, because making its repositories again takes a dozen git commands. It
+# holds origin.git, the repository on GitHub, and main, the repository's main folder, with main checked out. GitHub has
+# the branches of issues 12 and 13, as gh issue develop makes them, and main has them too. start is its first commit.
+starting_case=$base/starting-case
+git init --quiet --bare "$starting_case/origin.git"
+git init --quiet --initial-branch=main "$starting_case/main"
+mkdir "$starting_case/main/scripts"
+cp scripts/clear-worktrees "$starting_case/main/scripts/clear-worktrees"
+printf 'January: 120\n' >"$starting_case/main/totals.txt"
+git -C "$starting_case/main" add --all
+git -C "$starting_case/main" commit --quiet -m "feat: total the expenses"
+git -C "$starting_case/main" remote add origin "$starting_case/origin.git"
+git -C "$starting_case/main" push --quiet origin main main:12-fix-totals main:13-export-csv
+git -C "$starting_case/main" fetch --quiet origin
+git -C "$starting_case/main" branch --quiet --track 12-fix-totals origin/12-fix-totals
+git -C "$starting_case/main" branch --quiet --track 13-export-csv origin/13-export-csv
+start=$(git -C "$starting_case/main" rev-parse HEAD)
+
+# Makes a copy of the starting folder for a case, and sets case_dir to it: new_case
 new_case() {
   case_dir=$(mktemp -d "$base/case.XXXXXX")
-  git init --quiet --bare "$case_dir/origin.git"
-  git init --quiet --initial-branch=main "$case_dir/main"
-  mkdir "$case_dir/main/scripts"
-  cp scripts/clear-worktrees "$case_dir/main/scripts/clear-worktrees"
-  printf 'January: 120\n' >"$case_dir/main/totals.txt"
-  git -C "$case_dir/main" add --all
-  git -C "$case_dir/main" commit --quiet -m "feat: total the expenses"
-  git -C "$case_dir/main" remote add origin "$case_dir/origin.git"
-  git -C "$case_dir/main" push --quiet origin main main:12-fix-totals main:13-export-csv
-  git -C "$case_dir/main" fetch --quiet origin
-  git -C "$case_dir/main" branch --quiet --track 12-fix-totals origin/12-fix-totals
-  git -C "$case_dir/main" branch --quiet --track 13-export-csv origin/13-export-csv
-  start=$(git -C "$case_dir/main" rev-parse HEAD)
+  cp -R "$starting_case/." "$case_dir"
+  git -C "$case_dir/main" remote set-url origin "$case_dir/origin.git"
 }
 
 # Adds a worktree in the case's folder with a branch checked out: add_worktree <name> <branch>

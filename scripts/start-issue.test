@@ -64,21 +64,26 @@ chmod +x "$base/bin/gh"
 
 needs_triage="error: issue 12 has needs-triage, so no maintainer has accepted it yet. If a maintainer asked you to work on it, remove the label with gh issue edit 12 --remove-label needs-triage, and run the command again. Otherwise, leave the issue for the maintainer to triage."
 
-# Makes a repository for a case, and sets case_dir to its folder and start to its first commit. The folder holds
-# origin.git, the repository on GitHub, and main, a clone of it with main checked out and copies of the scripts:
-# new_case
+# Each case starts from a copy of this folder, because making its repositories again takes ten git commands. It holds
+# origin.git, the repository on GitHub, and main, a clone of it with main checked out and copies of the scripts.
+# start is its first commit.
+starting_case=$base/starting-case
+git init --quiet --bare --initial-branch=main "$starting_case/origin.git"
+git init --quiet --initial-branch=main "$starting_case/main"
+mkdir "$starting_case/main/scripts"
+cp scripts/start-issue scripts/needs-triage "$starting_case/main/scripts/"
+printf 'January: 120\n' >"$starting_case/main/totals.txt"
+git -C "$starting_case/main" add --all
+git -C "$starting_case/main" commit --quiet -m "feat: total the expenses"
+git -C "$starting_case/main" remote add origin "$starting_case/origin.git"
+git -C "$starting_case/main" push --quiet --set-upstream origin main
+start=$(git -C "$starting_case/main" rev-parse HEAD)
+
+# Makes a copy of the starting folder for a case, and sets case_dir to it: new_case
 new_case() {
   case_dir=$(mktemp -d "$base/case.XXXXXX")
-  git init --quiet --bare --initial-branch=main "$case_dir/origin.git"
-  git init --quiet --initial-branch=main "$case_dir/main"
-  mkdir "$case_dir/main/scripts"
-  cp scripts/start-issue scripts/needs-triage "$case_dir/main/scripts/"
-  printf 'January: 120\n' >"$case_dir/main/totals.txt"
-  git -C "$case_dir/main" add --all
-  git -C "$case_dir/main" commit --quiet -m "feat: total the expenses"
-  git -C "$case_dir/main" remote add origin "$case_dir/origin.git"
-  git -C "$case_dir/main" push --quiet --set-upstream origin main
-  start=$(git -C "$case_dir/main" rev-parse HEAD)
+  cp -R "$starting_case/." "$case_dir"
+  git -C "$case_dir/main" remote set-url origin "$case_dir/origin.git"
 }
 
 # Adds a commit from the given time to a branch on GitHub, from a clone of its own. A branch that GitHub doesn't

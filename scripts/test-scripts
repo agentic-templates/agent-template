@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Runs the tests of the scripts and hooks in three groups at the same time: the hooks' tests, the cases of
-# scripts/test-check and each scripts/*.test. Running the groups in sequence took 10m14s in CI run 38080017684,
-# above the ten-minute limit. Each group's output stays together, and a failure in any group fails the script.
+# Runs the tests of the scripts and hooks, each test file in a process of its own, all at the same time: the hooks'
+# tests, the cases of scripts/test-check and each scripts/*.test. It prints the outputs of the files in that order, so
+# that they don't mix. A failure in any file fails the script.
 # scripts/check runs it, and so do the script-tests and bash-3-2 jobs in .github/workflows/ci.yml.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -24,34 +24,34 @@ stop_tests() {
 }
 trap stop_tests EXIT
 
-# Each group writes its output and errors to files named for its place in the list. A group that doesn't start
-# leaves its place empty.
+# Each test file writes its output and errors to files named for its place in the list.
 process_ids=()
+
+# Starts a test file in the background: start_test <command>...
+start_test() {
+  local index=${#process_ids[@]}
+  "$@" >"$outputs/$index.out" 2>"$outputs/$index.err" &
+  process_ids[index]=$!
+}
+
 if [[ -n $runs_hooks_tests ]]; then
-  bash scripts/test-hooks >"$outputs/0.out" 2>"$outputs/0.err" &
-  process_ids[0]=$!
+  start_test bash scripts/test-hooks
 fi
-(
-  # The ShellCheck cases run shellcheck, which the bash-3-2 job doesn't install, so they run only where shellcheck is
-  # installed, in CI too.
-  if command -v shellcheck >/dev/null; then
-    bash scripts/test-check --shellcheck-only
+# The ShellCheck cases run shellcheck, which the bash-3-2 job doesn't install, so they run only where shellcheck is
+# installed, in CI too.
+if command -v shellcheck >/dev/null; then
+  start_test bash scripts/test-check --shellcheck-only
+fi
+start_test bash scripts/test-check
+# -f skips the pattern itself, which the loop gets when no test matches it.
+for script_test in scripts/*.test; do
+  if [[ -f $script_test ]]; then
+    start_test bash "$script_test"
   fi
-  bash scripts/test-check
-) >"$outputs/1.out" 2>"$outputs/1.err" &
-process_ids[1]=$!
-(
-  # -f skips the pattern itself, which the loop gets when no test matches it.
-  for script_test in scripts/*.test; do
-    if [[ -f $script_test ]]; then
-      bash "$script_test"
-    fi
-  done
-) >"$outputs/2.out" 2>"$outputs/2.err" &
-process_ids[2]=$!
+done
 
 status=0
-for index in "${!process_ids[@]}"; do
+for ((index = 0; index < ${#process_ids[@]}; index++)); do
   if wait "${process_ids[index]}"; then
     test_status=0
   else

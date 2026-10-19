@@ -114,33 +114,34 @@ cp "$case_dir/scripts/child" "$case_dir/scripts/test-hooks"
 cp "$case_dir/scripts/child" "$case_dir/scripts/test-check"
 chmod +x "$case_dir/scripts/version.test" "$case_dir/scripts/child"
 run_step
-expect_result "uses the current bash for all three groups and child scripts" 0 "$BASH_VERSION"$'\n'"$BASH_VERSION"$'\n'"$BASH_VERSION"$'\n'"$BASH_VERSION"
+expect_result "uses the current bash for every test file and child scripts" 0 "$BASH_VERSION"$'\n'"$BASH_VERSION"$'\n'"$BASH_VERSION"$'\n'"$BASH_VERSION"
 
-# Each group must start before any group finishes. Sequential execution times out.
+# Each test file must start before any of them ends. Run one after another, they time out.
 new_case
-for group in hooks check scripts; do
-  case "$group" in
+for name in hooks check first second; do
+  case "$name" in
     hooks) file=test-hooks ;;
     check) file=test-check ;;
-    scripts) file=meeting.test ;;
+    *) file=$name.test ;;
   esac
   cat > "$case_dir/scripts/$file" <<TEST
 #!/usr/bin/env bash
-echo "$group started"
-touch "$group.started"
+echo "$name started"
+touch "$name.started"
 for ((tries = 0; tries < 100; tries++)); do
-  if [[ -f hooks.started && -f check.started && -f scripts.started ]]; then
-    echo "$group passed"
+  if [[ -f hooks.started && -f check.started && -f first.started && -f second.started ]]; then
+    echo "$name passed"
     exit 0
   fi
   sleep 0.1
 done
-echo "error: the three groups did not start together." >&2
+echo "error: the test files did not start together." >&2
 exit 1
 TEST
 done
 run_step
-expect_result "runs all three groups at the same time and keeps their output together" 0 $'hooks started\nhooks passed\ncheck started\ncheck passed\nscripts started\nscripts passed'
+expect_result "runs every test file at the same time and keeps the output of each together" 0 \
+  $'hooks started\nhooks passed\ncheck started\ncheck passed\nfirst started\nfirst passed\nsecond started\nsecond passed'
 
 for group in test-hooks test-check; do
   new_case

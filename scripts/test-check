@@ -14,7 +14,6 @@ if (($# > 0)); then
 fi
 
 copy=""
-failed_cases=0
 case_count=0
 # A case sets this to make the copy's scripts/check skip the tests of the scripts and hooks, with SKIP_SCRIPT_TESTS.
 skip_script_tests=""
@@ -22,6 +21,19 @@ skip_script_tests=""
 # Only --shellcheck-only runs real ShellCheck. The other cases test what scripts/check finds by itself.
 # Stand-ins for skipped tools come first on each copy's PATH and fail if a copy runs one.
 stand_ins=$(mktemp -d)
+# Each case writes its errors to a file named for its number, and the process that runs it is at the same place in
+# case_process_ids.
+results=$(mktemp -d)
+case_process_ids=()
+stop_cases() {
+  local process_id
+  for process_id in $(jobs -pr); do
+    kill "$process_id" 2>/dev/null || true
+  done
+  rm -rf "$stand_ins" "$results"
+}
+trap stop_cases EXIT
+
 for tool in shellcheck actionlint zizmor; do
   if [[ $tool == shellcheck && -n $shellcheck_only ]]; then
     continue
@@ -31,26 +43,17 @@ for tool in shellcheck actionlint zizmor; do
   chmod +x "$stand_ins/$tool"
 done
 
-remove_copy() {
-  if [[ -n "$copy" ]]; then
-    rm -rf "$copy"
+# Each case copies this git repository, which holds the tracked files as they are on disk, with one cp, because
+# copying the files one by one took most of a case's time.
+starting_copy=$results/starting-copy
+# -f skips the submodules and deleted files that git ls-files also lists.
+git ls-files -z | while IFS= read -r -d '' file; do
+  if [[ -f $file ]]; then
+    mkdir -p "$starting_copy/$(dirname "$file")"
+    cp -p "$file" "$starting_copy/$file"
   fi
-}
-trap 'remove_copy; rm -rf "$stand_ins"' EXIT
-
-# Copies the tracked files, as they are on disk, into a new git repository at $copy.
-make_copy() {
-  remove_copy
-  copy=$(mktemp -d)
-  # -f skips the submodules and deleted files that git ls-files also lists.
-  git ls-files -z | while IFS= read -r -d '' file; do
-    if [[ -f $file ]]; then
-      mkdir -p "$copy/$(dirname "$file")"
-      cp -p "$file" "$copy/$file"
-    fi
-  done
-  git -C "$copy" init --quiet
-}
+done
+git -C "$starting_copy" init --quiet
 
 # Checks that scripts/check recorded the tree of the copy's files in .git/check-passed if it passed, and nothing if it failed
 # or skipped the tests of the scripts and hooks because of SKIP_SCRIPT_TESTS.
@@ -81,11 +84,11 @@ check_record() {
   fi
 }
 
-# Runs one case: run_case <function> <pass or fail> [<text that the output must hold>...]
+# Starts one case in the background, because one after another the cases took a minute:
+# run_case <function> <pass or fail> [<text that the output must hold>...]
 # The function gets a fresh copy at $copy, and adds the files that the case needs to it.
 run_case() {
-  local case_function=$1 expected=$2 text output actual=pass check_under_test=1
-  shift 2
+  local case_function=$1 check_under_test=1
   if [[ -n $shellcheck_only ]]; then
     if [[ $case_function != shellcheck_* && $case_function != project_check_that_fails ]]; then
       return
@@ -95,8 +98,17 @@ run_case() {
     return
   fi
   case_count=$((case_count + 1))
-  make_copy
-  skip_script_tests=""
+  copy=$results/copy-$case_count
+  check_case "$check_under_test" "$@" >"$results/$case_count.err" 2>&1 &
+  case_process_ids[case_count]=$!
+}
+
+# Runs one case in a new copy at $copy, and fails with its errors if it fails:
+# check_case <CHECK_UNDER_TEST> <function> <pass or fail> [<text>...]
+check_case() (
+  local check_under_test=$1 case_function=$2 expected=$3 text output actual=pass is_failed=""
+  shift 3
+  cp -Rp "$starting_copy" "$copy"
   "$case_function"
   git -C "$copy" add --all
   # CHECK_UNDER_TEST stops the copy's scripts/check from running this script again.
@@ -108,24 +120,25 @@ run_case() {
   if [[ $actual != "$expected" ]]; then
     echo "error: in the case $case_function, scripts/check must $expected, but the result was: $actual. Its output:" >&2
     printf '%s\n' "$output" >&2
-    failed_cases=$((failed_cases + 1))
-    return
+    exit 1
   fi
   if ! check_record "$case_function" "$actual"; then
-    failed_cases=$((failed_cases + 1))
-    return
+    exit 1
   fi
   for text in "$@"; do
     if [[ $output != *"$text"* ]]; then
       echo "error: in the case $case_function, the output of scripts/check must hold \"$text\". Its output:" >&2
       printf '%s\n' "$output" >&2
-      failed_cases=$((failed_cases + 1))
+      is_failed=yes
     fi
   done
-}
+  if [[ -n $is_failed ]]; then
+    exit 1
+  fi
+)
 
 # Replaces each copy of a text in a file of the copy: replace_text <file> <text> <new text>
-# Stops the tests if the file doesn't hold the text, because the case would then test nothing.
+# Fails the case if the file doesn't hold the text, because the case would then test nothing.
 replace_text() {
   local file=$1 text=$2 new_text=$3 content replaced=""
   content=$(<"$copy/$file")
@@ -656,6 +669,15 @@ project_check_that_fails() {
 run_case project_check_that_fails pass
 
 # Add a case for each check in scripts/check here.
+
+# Prints each failed case's errors, in the order of the cases.
+failed_cases=0
+for ((number = 1; number <= case_count; number++)); do
+  if ! wait "${case_process_ids[number]}"; then
+    failed_cases=$((failed_cases + 1))
+    cat "$results/$number.err" >&2
+  fi
+done
 
 if ((failed_cases > 0)); then
   echo "error: $failed_cases of the $case_count cases in scripts/test-check failed. The errors above say which." >&2
