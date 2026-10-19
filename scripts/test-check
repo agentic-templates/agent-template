@@ -56,7 +56,8 @@ mkdir "$starting_copy"
 # -f skips the submodules and deleted files that git ls-files also lists. The ShellCheck cases test how scripts/check
 # finds and checks the shell files, and scripts/check's own run checks this repository's files. So their copies leave
 # out the tests and the hooks' checks, which took nine of the eleven seconds of ShellCheck on a copy, as issue #91
-# measured. tar copies the files in one process, with -h for the file that a symlink points to.
+# measured. tar copies the files faster than a cp for each file, and -h copies the file that a symlink points to, as
+# cp does.
 git ls-files -z | while IFS= read -r -d '' file; do
   if [[ -f $file && ! (-n $shellcheck_only && ($file == *.test || $file == *.check)) ]]; then
     printf '%s\0' "$file"

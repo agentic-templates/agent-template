@@ -72,7 +72,8 @@ tools_for() {
   esac
 }
 
-# Runs one check on an input, as scripts/hooks/before-tool runs it, and prints what the check prints:
+# Runs one check on an input, with the variables that scripts/hooks/before-tool sets for the checks, and prints what
+# the check prints:
 # run_check <check, such as posted-text> <input>
 run_check() {
   local fields
@@ -80,14 +81,16 @@ run_check() {
   (
     eval "$fields"
     export HOOK_TOOL_NAME HOOK_COMMAND HOOK_FILE_PATH HOOK_CWD LC_ALL=C
-    "$hooks_folder/$1.check"
+    bash "$hooks_folder/$1.check"
   )
 }
 
 # Runs the hook on an input, and sets hook_status and hook_message: run_hook <input>
+# run_check and run_hook start the script with bash, without the env of its first line, because the cases start them
+# about 2,000 times, and env would add a process each time. scripts/hooks/settings.test runs the hook as the tools do.
 run_hook() {
   hook_status=0
-  hook_message=$(HOME=$test_home "$hooks_folder/before-tool" 2>&1 >/dev/null <<<"$1") || hook_status=$?
+  hook_message=$(HOME=$test_home bash "$hooks_folder/before-tool" 2>&1 >/dev/null <<<"$1") || hook_status=$?
 }
 
 # Checks the hook's result for one case: expect_result <description> <exit code> <message>
