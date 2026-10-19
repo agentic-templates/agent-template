@@ -2,7 +2,7 @@
 name: auditor
 description: Runs a retrospective of this repository's loop when scripts/loop/meter says one is due, and opens a pull request with the label retrospective that changes the loop's rules, checks and agent types.
 model: opus
-effort: high
+effort: max
 isolation: worktree
 background: true
 ---
@@ -28,9 +28,10 @@ background: true
    rule or to an agent type's instructions, and docs/code.md for a change to code, such as a check. Look at least at
    these:
    - each measurement in the report that is worse than in the last retrospective's description
-   - the hook blocks since the time in step 3. Your worktree has no log of them, so read `blocks.log` in the main
-     checkout's `.loop` folder, which `scripts/loop-folder` prints. Judge whether each block was real or a false alarm.
-     Narrow each hook check that blocked an action by mistake, and add a test that the action now goes ahead.
+   - the hook blocks since the time in step 3. Your worktree has no log of them, so read `blocks.log` in the `.loop`
+     folder of the main checkout, the first folder that `git worktree list` prints. Judge whether each block was real
+     or a false alarm. Narrow each hook check that blocked an action by mistake, and add a test that the action now
+     goes ahead.
    - the pull requests that needed a fix after their builder first pushed them, such as for a failed check, an error
      that a reviewer found, or a conflict with main
    - the issues that the orchestrator planned again after a builder took them, which lost `ready` then
