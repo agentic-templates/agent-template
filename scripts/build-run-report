@@ -10,8 +10,6 @@
 # - the open code scanning alerts, each with its security severity, or with its severity when it has none
 # - the open pull requests of Dependabot's into main, each with whether auto-merge is on, and whether it's in the merge
 #   queue, is DIRTY, has a failed check or was ever removed from the merge queue
-# - whether the latest run of .github/workflows/ci.yml on main, for a push, passed, failed or is still running. A run
-#   that finished with any conclusion but success counts as failed, such as a cancelled or timed-out run.
 # It reads the merged pull requests from GitHub's API instead of its search, which can lag behind a merge. When it
 # can't get a fact, it prints an error that says which, prints the other facts, and exits with code 1. It asks gh
 # about the repository of this checkout, or the one in GH_REPO.
@@ -168,27 +166,6 @@ dependabot_pull_requests() {
   done <<<"$pull_requests"
 }
 
-# Prints whether the latest run of .github/workflows/ci.yml on main passed, failed or is still running, or nothing if
-# it never ran there: latest_ci_run
-latest_ci_run() {
-  local run status conclusion
-  if ! run=$(gh run list --workflow ci.yml --branch main --event push --limit 1 --json status,conclusion --jq '.[] | [.status, .conclusion] | @tsv' 2>&1); then
-    echo "error: can't read the latest run of .github/workflows/ci.yml on main, because gh failed: $run" >&2
-    return 1
-  fi
-  if [[ -z $run ]]; then
-    return 0
-  fi
-  IFS=$'\t' read -r status conclusion <<<"$run"
-  if [[ $status != completed ]]; then
-    echo "still running"
-  elif [[ $conclusion == success ]]; then
-    echo passed
-  else
-    echo failed
-  fi
-}
-
 is_fact_missing=""
 
 # Prints a fact under a line that names it, with the items that a function prints, or none if it prints none. When
@@ -219,7 +196,6 @@ print_fact "Open issues with needs-decision:" decision_issues
 print_fact "Open ready issues, and what each one waits for:" ready_issues_and_reasons
 print_fact "Open code scanning alerts:" code_scanning_alerts
 print_fact "Open pull requests of Dependabot's into main:" dependabot_pull_requests
-print_fact "The latest run of .github/workflows/ci.yml on main:" latest_ci_run
 
 if [[ -n $is_fact_missing ]]; then
   exit 1

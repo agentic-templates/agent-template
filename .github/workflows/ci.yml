@@ -3,15 +3,14 @@ name: CI
 on:
   pull_request:
   # The merge queue waits for the required check "check" on each group of pull requests that it tests.
+  # The merge group tested the commit that lands on main, so a push to main starts no run.
   merge_group:
-  push:
-    branches: [main]
 
 permissions:
   contents: read
 
 # A new push to a pull request cancels the older run.
-# Each push to main and each group in the merge queue gets its own group, so GitHub never cancels a waiting run there.
+# Each group in the merge queue gets its own group, so GitHub never cancels a waiting run there.
 concurrency:
   group: ${{ github.workflow }}-${{ case(github.event_name == 'pull_request', github.ref, github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -61,7 +60,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # GitHub's compare API lists at most 300 files, so a merge group or a push with more runs the tests.
+      # GitHub's compare API lists at most 300 files, so a merge group with more runs the tests.
       - id: decide
         name: Decide whether the tests of the scripts and hooks run
         env:
@@ -70,7 +69,6 @@ jobs:
           PULL_REQUEST: ${{ github.event.pull_request.number }}
           BASE: ${{ github.event.merge_group.base_sha }}
           HEAD: ${{ github.event.merge_group.head_sha }}
-          BEFORE: ${{ github.event.before }}
         run: |
           paths=scripts/
           case $EVENT in
@@ -78,11 +76,7 @@ jobs:
               paths=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST/files" \
                 --jq '.[] | .filename, (.previous_filename // empty)') || paths=scripts/
               ;;
-            merge_group | push)
-              if [[ $EVENT == push ]]; then
-                BASE=$BEFORE
-                HEAD=$GITHUB_SHA
-              fi
+            merge_group)
               paths=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE...$HEAD" \
                 --jq 'if (.files | length) < 300 then (.files[] | .filename, (.previous_filename // empty)) else "scripts/" end') ||
                 paths=scripts/
