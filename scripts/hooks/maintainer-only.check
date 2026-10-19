@@ -512,10 +512,15 @@ check_gh_api() {
 # Succeeds if the gh command in command_words has the flag --help, so that it only prints its help. -h doesn't count,
 # because gh repo create and gh repo edit read it as --homepage. gh reads a word after -- as an argument, and the word
 # after a flag that takes a value as that value, as in --description --help. The hook doesn't know which flags take a
-# value, so --help counts only after a word that isn't a flag, or after a flag that gives its value after =.
+# value, so --help counts only after a word that isn't a flag, or after a flag that gives its value after =. It counts
+# only before the first word with an expansion, such as $text, because that word can become --, or nothing, as in
+# --body $text --help.
 prints_help() {
   local i previous
   for ((i = 2; i < ${#command_words[@]}; i++)); do
+    if [[ -n ${command_word_may_expand[i - 1]:-} ]]; then
+      return 1
+    fi
     previous=${command_words[i - 1]}
     case ${command_words[i]} in
       --) return 1 ;;

@@ -318,6 +318,15 @@ expect_block Bash 'gh repo edit -R someone/else' "$(other_repository someone/els
 expect_block Bash 'gh repo edit someone/else --description --help' "$(other_repository someone/else)"
 expect_block Bash 'gh release upload v1 -R someone/else -- --help' "$(other_repository someone/else)"
 expect_block Bash 'gh repo edit someone/else -h https://example.com' "$(other_repository someone/else)"
+expect_allow Bash "gh issue comment 5 -R someone/else --body '' --help"
+# A word with an expansion can become nothing, so that --help is the value of the flag before it, or it can become --.
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so the expansions stay as written.
+for command in 'gh issue comment 5 -R someone/else --body $EMPTY --help' \
+  'gh issue comment 5 -R someone/else --body ${EMPTY} --help' \
+  'gh issue comment 5 -R someone/else --body $(true) --help' \
+  'gh release upload v1 -R someone/else $separator notes.md --help'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
 # shellcheck disable=SC2016 # The command is the text that the agent sends, so $repo stays as written.
 expect_allow Bash 'gh pr comment 5 -R "$repo" --body Hello'
 # Without a repository, gh posts to the one that origin names in the folder it runs in.
