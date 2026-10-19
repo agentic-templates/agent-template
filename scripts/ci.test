@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Runs the bash 3.2 job's test runner on small sets of tests, and checks that the script-tests job runs it too.
+# Runs the bash 3.2 job's test runner on small sets of tests, and checks that the script-tests job runs it too, and
+# that the matrix of each job lists every part.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -41,12 +42,91 @@ done
 case_count=0
 failed_cases=0
 
+# Cases for the matrices of the script-tests and bash-3-2 jobs, which must list every part, because a part that's left
+# out leaves its test files untested.
+
+# Prints the parts that the matrix of a job lists, one to a line: matrix_parts <workflow> <job>
+matrix_parts() {
+  awk -v job="$2" '
+    $0 == "  " job ":" { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:/ { exit }
+    in_job && /^        part: \[/ {
+      sub(/^        part: \[/, "")
+      sub(/\][[:space:]]*$/, "")
+      gsub(/,[[:space:]]*/, "\n")
+      print
+      exit
+    }
+  ' "$1"
+}
+
+# Prints an error and fails unless the matrix of a job lists each part from 1/<count> to <count>/<count>, in order,
+# with the count of its first part: check_matrix <workflow> <job>
+check_matrix() {
+  local workflow=$1 job=$2 listed count number expected=""
+  listed=$(matrix_parts "$workflow" "$job")
+  if [[ -z $listed ]]; then
+    echo "error: the $job job in $workflow has no matrix of parts. Give it one, such as \"part: [1/2, 2/2]\", because its test step runs scripts/test-scripts --part." >&2
+    return 1
+  fi
+  listed=${listed//$'\n'/, }
+  count=${listed%%,*}
+  count=${count#*/}
+  if [[ ! $count =~ ^[1-9][0-9]*$ ]]; then
+    count=1
+  fi
+  for ((number = 1; number <= count; number++)); do
+    expected+=${expected:+, }$number/$count
+  done
+  if [[ $listed != "$expected" ]]; then
+    echo "error: the matrix of the $job job in $workflow lists the parts $listed, so some test files don't run. List the parts $expected." >&2
+    return 1
+  fi
+}
+
+# Checks the result of check_matrix: expect_matrix <description> <workflow> <job> <exit code> <errors>
+expect_matrix() {
+  local description=$1 matrix_status=0 errors
+  case_count=$((case_count + 1))
+  errors=$(check_matrix "$2" "$3" 2>&1) || matrix_status=$?
+  if [[ $matrix_status != "$4" || $errors != "$5" ]]; then
+    echo "error: the check of the matrix $description. Expected status $4 and errors \"$5\", got status $matrix_status and errors \"$errors\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Writes a workflow whose job tests lists the parts given: write_matrix_workflow <file> [<part list>]
+write_matrix_workflow() {
+  {
+    printf '%s\n' "jobs:" "  tests:" "    runs-on: ubuntu-latest"
+    if [[ -n ${2:-} ]]; then
+      printf '%s\n' "    strategy:" "      matrix:" "        part: [$2]"
+    fi
+    printf '%s\n' "  other:" "    strategy:" "      matrix:" "        part: [1/1]"
+  } >"$1"
+}
+
+write_matrix_workflow "$base/complete.yml" "1/3, 2/3, 3/3"
+expect_matrix "passes for every part from 1/3 to 3/3" "$base/complete.yml" tests 0 ""
+write_matrix_workflow "$base/missing.yml" "1/4, 2/4, 4/4"
+expect_matrix "fails when a part is missing" "$base/missing.yml" tests 1 \
+  "error: the matrix of the tests job in $base/missing.yml lists the parts 1/4, 2/4, 4/4, so some test files don't run. List the parts 1/4, 2/4, 3/4, 4/4."
+write_matrix_workflow "$base/extra.yml" "1/2, 2/2, 3/2"
+expect_matrix "fails when a part is above the count" "$base/extra.yml" tests 1 \
+  "error: the matrix of the tests job in $base/extra.yml lists the parts 1/2, 2/2, 3/2, so some test files don't run. List the parts 1/2, 2/2."
+write_matrix_workflow "$base/none.yml"
+expect_matrix "fails when the job has no matrix" "$base/none.yml" tests 1 \
+  "error: the tests job in $base/none.yml has no matrix of parts. Give it one, such as \"part: [1/2, 2/2]\", because its test step runs scripts/test-scripts --part."
+for job in script-tests bash-3-2; do
+  expect_matrix "of the $job job in .github/workflows/ci.yml lists every part" .github/workflows/ci.yml "$job" 0 ""
+done
+
 # Makes a folder for a case, with a copy of the runner and of the file it reads, an empty scripts/hooks/, a stand-in
-# for scripts/test-check that does nothing, and a stand-in for jq, and sets case_dir to it. The step runs the whole
-# list of test files, as part 1 of 1, unless the case sets part: new_case
+# for scripts/test-check that does nothing, a stand-in for jq and an empty temporary folder, and sets case_dir to it.
+# The step runs the whole list of test files, as part 1 of 1, unless the case sets part: new_case
 new_case() {
   case_dir=$(mktemp -d "$base/case.XXXXXX")
-  mkdir -p "$case_dir/scripts/hooks" "$case_dir/tools"
+  mkdir -p "$case_dir/scripts/hooks" "$case_dir/tools" "$case_dir/tmp"
   cp scripts/test-scripts scripts/missing-tools "$case_dir/scripts/"
   printf '%s\n' '#!/usr/bin/env bash' > "$case_dir/scripts/test-check"
   add_tool jq
@@ -59,20 +139,23 @@ add_tool() {
   chmod +x "$case_dir/tools/$1"
 }
 
-# Runs the step in the case's folder, with CI set to the value given or empty, and the matrix's part in PART, and sets
-# status and output: run_step [<CI>]
+# Runs the step in the case's folder, with CI set to the value given or empty, the matrix's part in PART and the case's
+# temporary folder in TMPDIR, and sets status and output: run_step [<CI>]
 # GitHub's bash shell exits on a failing command and sets pipefail.
 run_step() {
   status=0
-  output=$(cd "$case_dir" && CI=${1:-} PART=$part PATH=$case_dir/tools:$commands \
+  output=$(cd "$case_dir" && CI=${1:-} PART=$part TMPDIR=$case_dir/tmp PATH=$case_dir/tools:$commands \
     "$BASH" --noprofile --norc -eo pipefail "$base/step" 2>&1) || status=$?
 }
 
+# Checks the result of run_step, and that the step left no files in the case's temporary folder:
+# expect_result <description> <exit code> <output>
 expect_result() {
-  local description=$1 expected_status=$2 expected_output=$3
+  local description=$1 expected_status=$2 expected_output=$3 left_files
   case_count=$((case_count + 1))
-  if [[ $status != "$expected_status" || $output != "$expected_output" ]]; then
-    echo "error: the script-test step $description. Expected status $expected_status and output \"$expected_output\", got status $status and output \"$output\"." >&2
+  left_files=$(ls -A "$case_dir/tmp")
+  if [[ $status != "$expected_status" || $output != "$expected_output" || -n $left_files ]]; then
+    echo "error: the script-test step $description. Expected status $expected_status, output \"$expected_output\" and no files left in TMPDIR, got status $status, output \"$output\" and these files in TMPDIR: \"$left_files\"." >&2
     failed_cases=$((failed_cases + 1))
   fi
 }
@@ -218,7 +301,6 @@ wait_for_file() {
 # the temporary folder: stop_runner
 stop_runner() {
   local runner
-  mkdir "$case_dir/tmp"
   # exec makes the runner the process that kill stops.
   (cd "$case_dir" && TMPDIR=$case_dir/tmp PATH=$case_dir/tools:$commands exec scripts/test-scripts >/dev/null 2>&1) &
   runner=$!
