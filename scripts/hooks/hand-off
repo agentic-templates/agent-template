@@ -40,11 +40,6 @@ find_loop_folder() {
   loop_folder "${git_folders%%$'\n'*}" "${git_folders#*$'\n'}"
 }
 
-# Succeeds if the state file names the session as the orchestrator's: is_orchestrators_session <loop folder>
-is_orchestrators_session() {
-  [[ -f $1/state.md && -n $session_id && $(state_field "$1/state.md" session) == "$session_id" ]]
-}
-
 # Prints the size of the context that the latest call of a transcript read, or nothing if it can't tell:
 # context_size <transcript>
 # The size is the call's input tokens, cached or not. The transcript gives most replies the output tokens from the
@@ -81,7 +76,7 @@ tell() {
 tell_orchestrator() {
   local loop size told note
   loop=$(find_loop_folder) || return 0
-  if ! is_orchestrators_session "$loop"; then
+  if ! is_orchestrators_session "$loop" "$session_id"; then
     return 0
   fi
   size=$(context_size "$transcript")
@@ -135,7 +130,7 @@ fi
 
 loop=$(find_loop_folder) || exit 0
 if [[ -n $agent_id ]]; then
-  if ! is_orchestrators_session "$loop"; then
+  if ! is_orchestrators_session "$loop" "$session_id"; then
     exit 0
   fi
   # Claude Code writes the depth at which the agent started next to its transcript: 1 for an agent that the session

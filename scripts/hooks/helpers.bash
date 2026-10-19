@@ -37,6 +37,8 @@ fi
 # - patch: the patch text that Codex's apply_patch applies, or empty.
 # - file_path: the file that Read, Write or Edit uses, or empty.
 # - cwd: the folder the agent works in, or empty if the tool doesn't send it.
+# - session_id: the session's id, or empty if the tool doesn't send it. A subagent's input has its session's id.
+# - agent_id: a subagent's id, which Claude Code sends only for the actions of a subagent, or empty.
 read_input() {
   tool_name=${HOOK_TOOL_NAME:-}
   if [[ $tool_name == Shell ]]; then
@@ -51,6 +53,8 @@ read_input() {
   fi
   file_path=${HOOK_FILE_PATH:-}
   cwd=${HOOK_CWD:-}
+  session_id=${HOOK_SESSION_ID:-}
+  agent_id=${HOOK_AGENT_ID:-}
 }
 
 # Blocks the action, tells the agent why, and logs the block with the part of the action that the check matched:
@@ -74,6 +78,13 @@ hook_loop_folder() {
   local git_folders
   git_folders=$(git -C "$hooks_folder" rev-parse --path-format=absolute --git-common-dir --show-toplevel) || return 1
   loop_folder "${git_folders%%$'\n'*}" "${git_folders#*$'\n'}"
+}
+
+# Prints the main checkout of this hook's repository, by its physical path, as git prints the folders.
+hook_main_checkout() {
+  local git_folders
+  git_folders=$(git -C "$hooks_folder" rev-parse --path-format=absolute --git-common-dir --show-toplevel) || return 1
+  main_checkout "${git_folders%%$'\n'*}" "${git_folders#*$'\n'}"
 }
 
 # Adds a line to blocks.log in the loop's folder of this hook's repository. HOOK_BLOCK_LOG names another file, as in

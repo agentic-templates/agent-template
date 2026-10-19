@@ -33,8 +33,6 @@ Publish a release when a maintainer asks you to, and when a goal is done, which 
    ```sh
    gh run watch <run-id> --exit-status && gh release edit <version> --draft=false
    ```
-
-   If the release starts a workflow that waits for approval, such as one that publishes a package, tell the maintainer to approve it.
 5. Tell the maintainer about each advisory that step 1 listed.
 6. If you told the maintainer about any advisories in step 5, tell the maintainer to start a new session to check whether they're fixed, because an agent performs worse when its context also holds the work of publishing the release.
 

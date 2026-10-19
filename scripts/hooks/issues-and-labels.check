@@ -19,7 +19,7 @@ change_headings=("What should change" "Why" "Done when")
 research_headings=("Question" "What depends on the answer" "Done when")
 
 heading_rule="An issue's body has the headings \"What should change\", \"Why\" and \"Done when\", and a research issue's body has \"Question\", \"What depends on the answer\" and \"Done when\" instead."
-label_commands="Blocked: scripts/configure-github creates the project's labels, the ones that \"Labels\" in AGENTS.md names. To add, change or remove a label, change both files in a pull request, as docs/rules.md describes, and a maintainer runs the script after the merge."
+label_commands="Blocked: scripts/configure-github creates the project's labels, the ones that \"Labels\" in AGENTS.md names. To add, change or remove a label, change both files in a pull request, as docs/rules.md describes, and the orchestrator runs the script after the merge."
 
 # A Markdown heading at any level. Group 2 holds its text.
 heading_line='^ {0,3}#{1,6}([[:space:]]+(.*))?$'

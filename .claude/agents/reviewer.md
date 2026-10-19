@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Reads a pull request's diff before it merges, and reports each error with a case that shows it. It changes nothing.
+description: Reads a pull request's diff before it merges, and reports each error with a case that shows it, or for a security problem, in words. It changes nothing.
 model: opus
 effort: high
 isolation: worktree

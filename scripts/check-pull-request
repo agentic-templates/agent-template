@@ -19,7 +19,7 @@
 #   under it besides HTML comments.
 # - The title and the body have no path into a home folder, and no semicolon or dash between words in prose, as
 #   scripts/text-rules finds them.
-# - If the pull request changes scripts/configure-github, the body says that a maintainer needs to run it.
+# - If the pull request changes scripts/configure-github, the body says that the orchestrator runs it after the merge.
 # - No commit has a Co-authored-by trailer.
 # It prints each problem as an error for GitHub Actions, and fails once it has checked everything.
 set -euo pipefail
@@ -219,11 +219,11 @@ while IFS= read -r problem; do
   report "$problem"
 done < <(title_problems "$title"; body_problems "$body")
 
-configure_github_sentence="A maintainer with admin access needs to run scripts/configure-github after the merge."
+configure_github_sentence="The orchestrator runs scripts/configure-github after the merge."
 # The files that the pull request changes. --no-renames lists a renamed file under its old path too.
 changed_files=$(git diff --name-only --no-renames "$base...$head")
 if grep -Fx scripts/configure-github >/dev/null <<<"$changed_files" && [[ $text != *"$configure_github_sentence"* ]]; then
-  report "The pull request changes scripts/configure-github, and the body doesn't say that a maintainer needs to run it. Add this sentence under \"What changed and why\": $configure_github_sentence"
+  report "The pull request changes scripts/configure-github, and the body doesn't say that the orchestrator runs it after the merge. Add this sentence under \"What changed and why\": $configure_github_sentence"
 fi
 
 # git prints each commit's short hash, its subject and the people that its Co-authored-by trailers name, in any case,

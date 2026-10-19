@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Blocks the commands that wait for a maintainer:
-# - running scripts/configure-github again on a repository whose settings were applied, because the loop
-#   can merge a change to the script that nobody read. The repository is the one that the script would change.
+# - running scripts/configure-github again on a repository whose settings were applied, unless the orchestrator's
+#   session runs it in the main checkout, as a command of its own, while the checkout's scripts folder and .gitignore
+#   are the same as on the repository's main on GitHub, because a reviewer read each change to them before it merged.
+#   The repository is the one that the script would change. No hook protects the state file, which names the orchestrator's session, so a
+#   builder that scripts/loop/run-builder started, which has a session id of its own, could write its id there and
+#   count as the orchestrator.
 # - checking out, fetching or merging a pull request from a fork, because a checkout brings in the pull
 #   request's hook scripts and AGENTS.md, and only a maintainer decides to put a fork's code on main
 # - merging a pull request while the rules for main no longer require a check that scripts/configure-github
@@ -9,6 +13,8 @@
 # - changing a code scanning or Dependabot alert, such as dismissing it, because only a maintainer decides
 #   that an alert is wrong
 # For the first three, it asks gh about the repository, and allows the command when gh fails, such as without a network.
+# The exception is the orchestrator's run of scripts/configure-github, which gh's answer about main allows, so a
+# failure blocks it.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 
@@ -127,25 +133,165 @@ is_configure_github() {
   [[ $1 == scripts/configure-github || $1 == */scripts/configure-github ]]
 }
 
-# Succeeds if the command in command_words runs scripts/configure-github.
+# Succeeds if the command in command_words runs scripts/configure-github, and sets script_word to the word that names
+# the script.
 runs_configure_github() {
-  local program=${command_words[0]}
+  script_word=${command_words[0]}
   # bash or sh can run the script too.
-  if [[ ${program##*/} == bash || ${program##*/} == sh ]]; then
+  if [[ ${script_word##*/} == bash || ${script_word##*/} == sh ]]; then
     read_shell_arguments
     # An interactive shell runs the file that --rcfile or --init-file names, and the hook can't tell whether the
     # shell is interactive, such as when it reads a terminal. So that file counts as a run, whatever the other flags are.
     if is_configure_github "$shell_rcfile"; then
+      script_word=$shell_rcfile
       return 0
     elif $shell_only_reads; then
       return 1
     fi
-    program=$shell_operand
+    script_word=$shell_operand
   fi
-  is_configure_github "$program"
+  is_configure_github "$script_word"
 }
 
-# Blocks a run of scripts/configure-github on a repository whose settings were applied before:
+# Succeeds if the action comes from the orchestrator's session, and not from a subagent of it, such as a builder,
+# whose input has the session's id too.
+is_orchestrator() {
+  local loop
+  if [[ -n $agent_id ]]; then
+    return 1
+  fi
+  loop=$(hook_loop_folder 2>/dev/null) || return 1
+  is_orchestrators_session "$loop" "$session_id"
+}
+
+# Adds 1 to other_commands for a simple command other than a cd without redirections, because a redirection can write
+# a file, also on a cd: count_other_command <word>...
+count_other_command() {
+  if [[ $1 != cd || ${#redirections[@]} != 0 ]]; then
+    other_commands=$((other_commands + 1))
+  fi
+}
+
+# Prints the number of simple commands in the shell command other than a cd without redirections.
+other_command_count() {
+  other_commands=0
+  for_each_simple_command count_other_command "$shell_command"
+  echo "$other_commands"
+}
+
+# Succeeds if the command in command_words runs the main checkout's scripts/configure-github in the main checkout, and
+# nothing else in the shell command can change what the run reads after this hook compares the scripts folder with
+# GitHub's: no word before the script, such as a variable, env or bash, no redirection, and no simple command other than
+# a cd without redirections. A variable such as BASH_ENV or PATH can run other code, and a redirection can write a file:
+# runs_alone_in_main_checkout <main checkout> <number of the words before the command's name>
+# other_command_count runs in a subshell, because its for_each_simple_command changes command_folder after a command
+# that runs through env -C.
+runs_alone_in_main_checkout() {
+  [[ $2 == 0 && ${#redirections[@]} == 0 && $script_word == "${command_words[0]}" &&
+    $(physical_path "$command_folder" /) == "$1" &&
+    $(physical_path "$script_word" "$command_folder") == "$1/scripts/configure-github" &&
+    $(other_command_count) == 1 ]]
+}
+
+# Prints the tree of the scripts folder on the main branch of a repository on GitHub, and on the next line the mode and
+# blob of its .gitignore, or an empty line when main has none: scripts_and_gitignore_on_github <owner/name>
+scripts_and_gitignore_on_github() {
+  local answer
+  answer=$(gh api "repos/$1/git/trees/main" 2>/dev/null) || return 1
+  jq -r '(first(.tree[] | select(.path == "scripts" and .type == "tree") | .sha) // error("main has no scripts folder")),
+    (first(.tree[] | select(.path == ".gitignore") | "\(.mode) \(.sha)") // "")' <<<"$answer" 2>/dev/null
+}
+
+# Prints an entry for git update-index -z --index-info for each path that standard input lists, separated by NUL
+# characters, as the path is on disk in a checkout: disk_entries <checkout>
+# It hashes the bytes on disk and takes the mode from the disk, because git add would follow settings in the shared git
+# folder that can make it store a file as main has it while the file on disk differs, such as a clean filter, a
+# conversion of line endings or core.fileMode=false. A symbolic link is a blob of its target, as git stores it. A path
+# that is neither a file nor a symbolic link gets no entry, such as a file that's gone or a folder in its place, whose
+# files are listed too. It fails for a folder that holds a repository of its own, which git lists with a / at the end
+# rather than its files.
+disk_entries() {
+  local path target blob blobs files=() modes=() i=0
+  while IFS= read -r -d '' path; do
+    if [[ -L $1/$path ]]; then
+      target=$(readlink "$1/$path") || return 1
+      blob=$(printf '%s' "$target" | git -C "$1" hash-object -w --stdin 2>/dev/null) || return 1
+      printf '120000 %s\t%s\0' "$blob" "$path"
+    elif [[ -f $1/$path ]]; then
+      files+=("$path")
+      if [[ -x $1/$path ]]; then
+        modes+=(100755)
+      else
+        modes+=(100644)
+      fi
+    elif [[ $path == */ ]]; then
+      return 1
+    fi
+  done
+  if ((${#files[@]} == 0)); then
+    return 0
+  fi
+  # One git hash-object for all the files takes 0.01 seconds for the 165 files in scripts, and one for each file 0.8.
+  blobs=$(git -C "$1" hash-object -w --no-filters -- "${files[@]}" 2>/dev/null) || return 1
+  while IFS= read -r blob; do
+    printf '%s %s\t%s\0' "${modes[i]}" "$blob" "${files[i]}"
+    i=$((i + 1))
+  done <<<"$blobs"
+}
+
+# Prints the tree of a checkout's scripts folder as it is on disk, as disk_entries finds the files: the files of HEAD,
+# the ones that git doesn't track, other than the ones that a .gitignore ignores, and each .gitignore, also one that
+# ignores itself. It lists them with an index that it reads from HEAD, rather than with a copy of the checkout's index,
+# which can hold flags, such as assume-unchanged and skip-worktree, that make git skip a file that differs. It reads
+# only the rules of .gitignore files, which scripts_and_gitignore_on_disk compares with main's, and not the ones of the
+# shared git folder: scripts_tree_on_disk <checkout>
+scripts_tree_on_disk() {
+  local folder status=0
+  folder=$(mktemp -d) || return 1
+  if ! GIT_INDEX_FILE=$folder/head-index git -C "$1" read-tree HEAD 2>/dev/null ||
+    ! GIT_INDEX_FILE=$folder/head-index git -C "$1" ls-files -z --cached --others --exclude-per-directory=.gitignore \
+      -- scripts >"$folder/paths" 2>/dev/null ||
+    ! GIT_INDEX_FILE=$folder/head-index git -C "$1" ls-files -z --others -- ':(glob)scripts/**/.gitignore' \
+      >>"$folder/paths" 2>/dev/null ||
+    ! disk_entries "$1" <"$folder/paths" >"$folder/entries" ||
+    ! GIT_INDEX_FILE=$folder/disk-index git -C "$1" update-index -z --index-info <"$folder/entries" 2>/dev/null ||
+    ! GIT_INDEX_FILE=$folder/disk-index git -C "$1" write-tree --prefix=scripts/ 2>/dev/null; then
+    status=1
+  fi
+  rm -rf "$folder"
+  return "$status"
+}
+
+# Prints the tree of a checkout's scripts folder and the mode and blob of its .gitignore, as they are on disk, in the
+# form of scripts_and_gitignore_on_github. The .gitignore counts, because its rules decide which new files in the
+# scripts folder scripts_tree_on_disk leaves out: scripts_and_gitignore_on_disk <checkout>
+scripts_and_gitignore_on_disk() {
+  local tree entry
+  tree=$(scripts_tree_on_disk "$1") || return 1
+  entry=$(printf '.gitignore\0' | disk_entries "$1" | tr '\0' '\n') || return 1
+  printf '%s\n%s\n' "$tree" "${entry%%$'\t'*}"
+}
+
+# Blocks the orchestrator's run of scripts/configure-github, unless it runs alone in the main checkout while the
+# checkout's scripts folder and .gitignore are the same as on the repository's main on GitHub. Each worktree can move
+# origin/main, because they share the git folder, so the hook asks GitHub:
+# check_orchestrators_run <owner/name> <number of the words before the command's name>
+check_orchestrators_run() {
+  local main on_github on_disk
+  main=$(hook_main_checkout 2>/dev/null) || main=""
+  if [[ -z $main ]] || ! runs_alone_in_main_checkout "$main" "$2"; then
+    block "Blocked: the orchestrator runs scripts/configure-github again only in the main checkout, as a command of its own, without a variable, env, bash, sh or a redirection: cd ${main:-<main checkout>} && scripts/configure-github."
+  fi
+  if ! on_github=$(scripts_and_gitignore_on_github "$1") || ! on_disk=$(scripts_and_gitignore_on_disk "$main"); then
+    block "Blocked: this hook can't compare the main checkout's scripts folder and .gitignore with the ones on main on GitHub, because gh or git failed, or the folder holds a repository of its own. Check that gh can reach GitHub, remove any repository inside the folder, and try again."
+  fi
+  if [[ $on_github != "$on_disk" ]]; then
+    block "Blocked: the orchestrator runs scripts/configure-github again only while the main checkout's scripts folder, with its untracked files, and its .gitignore are the same as on main on GitHub, because a reviewer read each change to them before it merged. Bring the main checkout up to date with git fetch origin && git merge --ff-only origin/main, undo any other change to its .gitignore and its scripts folder, remove any new file in the folder, also a .gitignore that ignores itself, and run the script again."
+  fi
+}
+
+# Blocks a run of scripts/configure-github on a repository whose settings were applied before, unless the orchestrator
+# runs it as check_orchestrators_run allows:
 # check_configure_github [<word that drop_command_prefixes dropped, such as GH_REPO=owner/name>]...
 check_configure_github() {
   local word repository sets_gh_repo=false gh_repo=""
@@ -166,9 +312,13 @@ check_configure_github() {
   else
     repository=$(script_repository "$command_folder") || return 0
   fi
-  if settings_applied_before "$repository"; then
-    block "Blocked: this repository's settings were applied before, so a maintainer with admin access runs scripts/configure-github again. $report"
+  if ! settings_applied_before "$repository"; then
+    return 0
   fi
+  if ! is_orchestrator; then
+    block "Blocked: this repository's settings were applied before, so only the orchestrator or a maintainer with admin access runs scripts/configure-github again. Go on with the other work, and list the command in your report."
+  fi
+  check_orchestrators_run "$repository" "$#"
 }
 
 check_gh_pr() {

@@ -83,7 +83,7 @@ run_check() {
   fields=$(jq -r -f "$hooks_folder/input.jq" <<<"$2")
   (
     eval "$fields"
-    export HOOK_TOOL_NAME HOOK_COMMAND HOOK_FILE_PATH HOOK_CWD LC_ALL=C
+    export HOOK_TOOL_NAME HOOK_COMMAND HOOK_FILE_PATH HOOK_CWD HOOK_SESSION_ID HOOK_AGENT_ID LC_ALL=C
     bash "$hooks_folder/$1.check"
   )
 }
