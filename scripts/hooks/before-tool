@@ -48,14 +48,36 @@ case $HOOK_TOOL_NAME in
   *) exit 0 ;;
 esac
 
-for check in "${BASH_SOURCE[0]%/*}"/*.check; do
-  if [[ ! -x $check ]]; then
-    continue
+# Each check runs in a subshell of this one, which has read helpers.bash, rather than in a bash process of its own,
+# because starting bash and reading helpers.bash took half the CPU time of a check, as issue #91 measured. The subshell
+# ends with the code of the first check that blocks the action, or with code 1 when helpers.bash fails.
+(
+  # shellcheck source=scripts/hooks/helpers.bash
+  source "${BASH_SOURCE[0]%/*}/helpers.bash"
+  # The checks find the simple commands of a shell command split already, as for_each_simple_command in
+  # simple-commands.bash describes. When splitting fails, the subshell ends with code 1, as each check would.
+  read_input
+  if [[ $tool_name == Bash ]]; then
+    split_command "$shell_command"
   fi
-  reason=$("$check" 2>&1 >/dev/null </dev/null)
-  if (($? == 2)); then
-    printf '%s\n' "$reason" >&2
-    exit 2
-  fi
-done
+  # The options and the trap of helpers.bash would turn a check's code 2 into a failure of this subshell. Each check
+  # turns them on again for itself when it sources helpers.bash.
+  set +eEu +o pipefail
+  trap - ERR
+  for check in "${BASH_SOURCE[0]%/*}"/*.check; do
+    if [[ ! -x $check ]]; then
+      continue
+    fi
+    # With set -e, a check that bash can't parse ends with code 2, as it would in a process of its own.
+    # shellcheck source=/dev/null # ShellCheck checks each check as a file of its own.
+    reason=$(set -e && source "$check" 2>&1 >/dev/null </dev/null)
+    if (($? == 2)); then
+      printf '%s\n' "$reason" >&2
+      exit 2
+    fi
+  done
+)
+if (($? == 2)); then
+  exit 2
+fi
 exit 0
