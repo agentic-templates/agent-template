@@ -2,10 +2,10 @@
 # Blocks opening a pull request with gh pr create, or its alias gh pr new, until scripts/check has passed on the
 # pull request's files, because a pull request that fails in CI costs a round trip.
 # scripts/check records the tree of the files it passed on, as check-passed.bash describes. This check compares that
-# record with the tree of HEAD, or of the branch that --head names, in the folder that gh runs in: the folder the agent
-# works in, or the one that a cd before gh changes to, as follow_cd in helpers.bash finds it. It allows the command
-# when it has nothing to compare: outside a git repository, before the first commit, when this repository has no
-# branch of that name, and after a cd to a folder that it can't tell.
+# record with the tree of the pull request's latest commit, as find_head_commit in helpers.bash finds it, in the folder
+# that gh runs in: the folder the agent works in, or the one that a cd before gh changes to, as follow_cd in
+# helpers.bash finds it. It allows the command when it has nothing to compare: outside a git repository, before the
+# first commit, when this repository has no branch that --head names, and after a cd to a folder that it can't tell.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 # shellcheck source=scripts/hooks/check-passed.bash
@@ -15,21 +15,16 @@ not_checked="Blocked: scripts/check hasn't passed on these files. Run it, fix wh
 not_committed="Blocked: scripts/check passed on the files on disk, but some of their changes aren't committed. Commit them first, and then run gh pr create in a command of its own."
 
 check_gh_pr_create() {
-  local branch head_tree pull_request_tree record passed_tree disk_tree
+  local head_tree pull_request_tree record passed_tree disk_tree
   if ! opens_pull_request; then
     return 0
   fi
-  # --head can name the branch as <user>:<branch>.
-  branch=${pr_head#*:}
-
   if [[ -z $command_folder ]] || ! cd -- "$command_folder" 2>/dev/null; then
     return 0
   fi
   head_tree=$(git rev-parse --verify --quiet 'HEAD^{tree}') || return 0
-  pull_request_tree=$head_tree
-  if [[ -n $branch ]]; then
-    pull_request_tree=$(git rev-parse --verify --quiet "refs/heads/$branch^{tree}") || return 0
-  fi
+  find_head_commit || return 0
+  pull_request_tree=$(git rev-parse "$head_commit^{tree}")
 
   record=$(pass_record_path)
   if [[ ! -f $record ]]; then

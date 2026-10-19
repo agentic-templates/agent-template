@@ -132,6 +132,9 @@ expect_block Bash 'gh pr create --head first --title "Add notes" --body "Closes 
 expect_block Bash 'gh pr create -H jtmpl:first --title "Add notes" --body "Closes #1"' "$not_checked"
 # With no branch of that name here, the hook has nothing to compare.
 expect_allow Bash 'gh pr create --head missing --title "Add notes" --body "Closes #1"'
+# With no branch after the colon, the pull request's commit is HEAD.
+forget_pass
+expect_block Bash 'gh pr create --head jtmpl: --title "Add notes" --body "Closes #1"' "$not_checked"
 
 # Commands that don't open a pull request, and flags whose values look like flags
 forget_pass
