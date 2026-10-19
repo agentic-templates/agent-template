@@ -19,20 +19,20 @@ mkdir -p "$base/bin"
 case_folder=$base/case
 
 # A stand-in for gh, first on the PATH. It answers from the files in TEST_CASE_FOLDER:
-# - the command that lists the ready issues, with the file issues, as the script's --jq filter prints it
-# - the command in scripts/pull-request-state, with the file pull-requests-<issue>, as that script's --jq filter
+# - the GraphQL query that lists the ready issues, with the file issues, as the script's --jq filter prints it
+# - the GraphQL query in scripts/pull-request-state, with the file pull-requests-<issue>, as that script's --jq filter
 #   prints it, or with nothing when the issue has no such file
 # - the command that reads an issue's labels, with feature and ready, or with only feature when the issue is in the
 #   file lost-ready
 # - the command that lists an issue's branches, with the file branches-<issue>, or with nothing when the issue has no
 #   such file
 # It accepts the commands that assign an issue to the current account and remove that assignment, and writes each one
-# to the file edits, one to a line. It fails the commands that start with TEST_FAILING_CALL, as gh does without the
+# to the file edits, one to a line. It fails the commands that contain TEST_FAILING_CALL, as gh does without the
 # network, and every command it doesn't know.
 cat >"$base/bin/gh" <<'STAND_IN'
 #!/usr/bin/env bash
 folder=$TEST_CASE_FOLDER
-if [[ -n $TEST_FAILING_CALL && $* == "$TEST_FAILING_CALL"* ]]; then
+if [[ -n $TEST_FAILING_CALL && $* == *"$TEST_FAILING_CALL"* ]]; then
   echo "error connecting to api.github.com" >&2
   exit 1
 fi
@@ -40,7 +40,7 @@ if [[ $1 == issue && $2 == edit ]]; then
   echo "$*" >>"$folder/edits"
 fi
 case "$*" in
-  "issue list --label ready --limit 200 --json number,labels,assignees,blockedBy,subIssuesSummary --jq "*)
+  "api graphql "*'issues(labels: ["ready"], states: OPEN'*)
     cat "$folder/issues"
     ;;
   "api graphql "*)
@@ -300,14 +300,14 @@ expect_result "When the only issue that fits lost ready before the script assign
 
 new_case
 add_issue 12 0 0 0 feature
-failing_call="issue list"
+failing_call='issues(labels: ["ready"]'
 run_take_next_issue
 expect_result "When gh can't list the ready issues" 1 \
   "error: can't list the ready issues, because gh failed: error connecting to api.github.com" ""
 
 new_case
 add_issue 12 0 0 0 feature
-failing_call="api graphql"
+failing_call="closedByPullRequestsReferences"
 run_take_next_issue
 expect_result "When scripts/pull-request-state fails" 1 \
   "error: can't list the pull requests of issue #12, because gh failed: error connecting to api.github.com" ""
