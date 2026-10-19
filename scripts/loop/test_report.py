@@ -38,7 +38,8 @@ REQUEST = {
 # A stand-in for gh. It writes each call's arguments to calls.jsonl in STANDIN_DIR. For a list of runs it prints the
 # lines under "runs" in gh.json. For a GraphQL query of runs it gives the jobs under "jobs" for each id that the query
 # names, and no node for an id that "jobs" doesn't hold. For a query of pull requests it gives the facts under
-# "pull_requests" for each number that the query names.
+# "pull_requests" for each number that the query names. For a query of the retrospectives it gives the times under
+# "retrospectives" as the times when they merged.
 # An answer under "fail" makes each call print it to stderr and exit with code 1. -S keeps coverage, which starts in
 # each Python process of the tests, out of the stand-in.
 STANDIN = f"""#!{sys.executable} -S
@@ -51,7 +52,10 @@ if "fail" in answers:
     sys.stderr.write(answers["fail"])
     sys.exit(1)
 query = next((argument for argument in sys.argv if argument.startswith("query=")), "")
-if "pullRequest(" in query:
+if "mergedAt" in query:
+    nodes = [{{"mergedAt": merged}} for merged in answers["retrospectives"]]
+    print(json.dumps({{"data": {{"repository": {{"pullRequests": {{"nodes": nodes}}}}}}}}))
+elif "pullRequest(" in query:
     numbers = re.findall(r"pr([0-9]+): pullRequest", query)
     facts = {{"pr" + number: answers["pull_requests"][number] for number in numbers}}
     print(json.dumps({{"data": {{"repository": facts}}}}))
@@ -97,10 +101,16 @@ class ReportTest(unittest.TestCase):
         self.runs: list[dict[str, str]] = []
         self.jobs: dict[str, list[dict[str, str]]] = {}
         self.pull_requests: dict[str, dict[str, Any]] = {}
+        self.retrospectives: list[str] = []
         self.answer()
 
     def answer(self) -> None:
-        answers = {"runs": self.runs, "jobs": self.jobs, "pull_requests": self.pull_requests}
+        answers = {
+            "runs": self.runs,
+            "jobs": self.jobs,
+            "pull_requests": self.pull_requests,
+            "retrospectives": self.retrospectives,
+        }
         (self.standins / "gh.json").write_text(json.dumps(answers))
 
     def add_pull_request(
@@ -179,6 +189,7 @@ class EmptyPeriodTest(ReportTest):
                 0,
                 [
                     "Since 2026-10-11T14:00:00+00:00",
+                    "Before: from the first agent, because no retrospective merged before then",
                     "CI runs that passed: 0",
                     "Types: no agent started",
                     "Requests of the agents of a session that have no event: 0 of 0",
@@ -217,7 +228,7 @@ class CiTest(ReportTest):
         for _ in range(101):
             self.add_run(1, job("tests", 1))
         self.assertEqual(self.line("CI runs"), "CI runs that passed: 101, median 1.0 min")
-        queries = [call for call in self.calls() if call[1] == "graphql"]
+        queries = [call for call in self.calls() if f"query={report.JOBS_QUERY}" in call]
         self.assertEqual([sum(argument.startswith("ids[]=") for argument in query) for query in queries], [100, 1])
 
     def test_skips_a_run_that_was_deleted_after_the_listing(self) -> None:
@@ -499,6 +510,83 @@ class TypeTest(ReportTest):
         status, lines, errors = self.run_report()
         self.assertEqual((status, lines), (1, []))
         self.assertIn("Could not resolve to a PullRequest", errors)
+
+
+class ComparisonTest(ReportTest):
+    def builders(self, first: int, minute: float, opened: int, failed: int) -> list[dict[str, Any]]:
+        """The lines of builders that started at the minute and opened pull requests from the number first on, of
+        which the first ones failed a check."""
+        lines = []
+        for number in range(first, first + opened):
+            lines += [start(f"a{number}", minute), end(f"a{number}", minute + 1, pull_request=number)]
+            self.add_pull_request(number, conclusions=("FAILURE",) if number < first + failed else ())
+        return lines
+
+    def counts_part(self) -> str:
+        """The Type line from the counts of the pull requests on."""
+        line = self.line("Type builder:")
+        return line[line.index("| pull requests:") :]
+
+    def test_names_the_counts_whose_difference_from_the_period_before_is_larger_than_chance(self) -> None:
+        cases = {
+            # Fisher's exact test gives 0.73 for 7 of 20 against 5 of 18.
+            (20, 7, 18, 5): "no difference larger than chance",
+            # It gives 2/20 for 3 of 3 against 0 of 3, and 2/70 for 4 of 4 against 0 of 4.
+            (3, 3, 3, 0): "no difference larger than chance",
+            (4, 4, 4, 0): "larger than chance: failed a check",
+        }
+        for (opened, failed, opened_before, failed_before), verdict in cases.items():
+            with self.subTest(now=(failed, opened), before=(failed_before, opened_before)):
+                self.pull_requests.clear()
+                before = self.builders(1, -10, opened_before, failed_before)
+                self.log_agents(*before, *self.builders(100, 1, opened, failed))
+                self.assertEqual(
+                    self.counts_part(),
+                    f"| pull requests: {opened}, 0 needed a fix after review, {failed} failed a check, 0 left the merge "
+                    f"queue unmerged, 0 got a second builder | before: pull requests: {opened_before}, 0 needed a fix "
+                    f"after review, {failed_before} failed a check, 0 left the merge queue unmerged, 0 got a second "
+                    f"builder | {verdict}",
+                )
+
+    def test_compares_with_the_period_from_the_last_retrospective_that_merged_before_the_time(self) -> None:
+        self.retrospectives += [at(-100), at(-30), at(5)]
+        self.log_agents(*self.builders(1, -50, 4, 0), *self.builders(10, -20, 4, 4), *self.builders(20, 1, 4, 0))
+        self.assertEqual(
+            self.line("Before"),
+            "Before: from 2026-10-11T13:30:00+00:00, when the last retrospective before then merged",
+        )
+        self.assertIn("| before: pull requests: 4, 0 needed a fix after review, 4 failed a check", self.counts_part())
+
+    def test_compares_with_every_agent_before_the_time_when_the_only_retrospective_merged_at_the_time(self) -> None:
+        self.retrospectives.append(SINCE.isoformat())
+        self.log_agents(*self.builders(1, -5000, 2, 0), *self.builders(10, -20, 2, 2), *self.builders(20, 1, 4, 0))
+        self.assertEqual(
+            self.line("Before"), "Before: from the first agent, because no retrospective merged before then"
+        )
+        self.assertIn("| before: pull requests: 4, 0 needed a fix after review, 2 failed a check", self.counts_part())
+
+    def test_compares_nothing_when_either_period_has_no_pull_requests_of_the_type(self) -> None:
+        self.log_agents(
+            start("old builder", -10),
+            end("old builder", -9),
+            start("old reviewer", -10, agent_type="reviewer"),
+            end("old reviewer", -9, pull_request=56),
+            *self.builders(57, 1, 1, 0),
+            start("reviewer", 1, agent_type="reviewer"),
+        )
+        self.add_pull_request(56)
+        status, lines, errors = self.run_report()
+        self.assertEqual((status, errors), (0, ""))
+        self.assertEqual(
+            [line.split(" | ", 2)[-1] for line in lines if line.startswith("Type")],
+            [
+                (
+                    "pull requests: 1, 0 needed a fix after review, 0 failed a check, 0 left the merge queue unmerged, "
+                    "0 got a second builder"
+                ),
+                "pull requests: 0",
+            ],
+        )
 
 
 class AgentTimeTest(ReportTest):

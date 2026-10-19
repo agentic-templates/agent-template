@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from unittest import mock
 
+import github
 import paths
 from test_meter import NEW_YORK, MeterTest, github_answer, meter
 from test_transcripts import call_line, prompt_line, write_transcript
@@ -167,7 +168,7 @@ class RetrospectiveTest(RetrospectiveNoteTest):
             self.retrospective(*agents), "retrospective not due: 1.5 of 30 hours of agents' work since the last one"
         )
         (repository,) = self.calls("gh")
-        self.assertEqual(repository["args"][:4], ["api", "graphql", "-f", f"query={meter.REPOSITORY_QUERY}"])
+        self.assertEqual(repository["args"][:4], ["api", "graphql", "-f", f"query={github.RETROSPECTIVES_QUERY}"])
         self.assertEqual(
             repository["args"][4:], ["-F", "owner={owner}", "-F", "name={repo}", "-F", "label=retrospective"]
         )

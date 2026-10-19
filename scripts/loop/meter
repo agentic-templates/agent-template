@@ -63,7 +63,7 @@ import agent_log
 import paths
 import request_events
 from accounts import Account, AccountsError, claude_environment, load_accounts
-from github import GitHubError, gh_api
+from github import GitHubError, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, note_files
 from machine import Machine, read_machine
 from usage import Meter, parse_usage
@@ -102,22 +102,11 @@ CODEX_SNAPSHOT_AGE = dt.timedelta(days=8)
 TRANSCRIPT_TAIL_BYTES = 400_000
 # How often meter --wake looks for a new note of scripts/hooks/hand-off between two readings
 HAND_OFF_CHECK_SECONDS = 60
-RETROSPECTIVE_LABEL = "retrospective"
 # .claude/agents/auditor.md says when a retrospective sets this.
 OUTPUT_TOKENS_PER_RETROSPECTIVE: int | None = None
 HOURS_PER_RETROSPECTIVE = 30.0
 # A retrospective doesn't look back on the work of an earlier one.
 AUDITOR = "auditor"
-
-# GitHub can't order pull requests by when they merged, so the meter takes the latest merge of the newest ones.
-REPOSITORY_QUERY = """
-query($owner: String!, $name: String!, $label: String!) {
-  repository(owner: $owner, name: $name) {
-    pullRequests(labels: [$label], states: MERGED, first: 100, orderBy: {field: CREATED_AT, direction: DESC}) {
-      nodes { mergedAt }
-    }
-  }
-}"""
 
 
 class Advice(NamedTuple):
@@ -607,12 +596,9 @@ def context_tokens(transcript: Path) -> int | None:
 
 def read_retrospective(checkout: Path, loop_folder: Path) -> str:
     try:
-        variables = {"owner": "{owner}", "name": "{repo}", "label": RETROSPECTIVE_LABEL}
-        repository = github(REPOSITORY_QUERY, variables, checkout)["repository"]
+        last = max(retrospective_merges(checkout), default=None)
     except GitHubError as error:
         return f"retrospective unknown: {error}"
-    merges = [dt.datetime.fromisoformat(node["mergedAt"]) for node in repository["pullRequests"]["nodes"]]
-    last = max(merges, default=None)
     runs = agent_log.read_runs(loop_folder / "agents.jsonl")
     counted = [run for run in runs if not run.start["test"] and run.start["type"] != AUDITOR]
     transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
@@ -668,15 +654,6 @@ def hours_note(last: dt.datetime | None, hours: float) -> str:
     # Rounded down, so that 29.98 hours don't show as 30.0 of 30
     shown = math.floor(hours * 10) / 10
     return f"retrospective not due: {shown:.1f} of {HOURS_PER_RETROSPECTIVE:g} hours of agents' work {since}"
-
-
-def github(query: str, variables: dict[str, str], checkout: Path) -> Any:
-    """The data that GitHub gives for a GraphQL query about the checkout's repository. gh fills in {owner} and {repo}
-    in the variables."""
-    options = ["-f", f"query={query}"]
-    for name, value in variables.items():
-        options += ["-F", f"{name}={value}"]
-    return json.loads(gh_api("graphql", options, checkout))["data"]
 
 
 if __name__ == "__main__":
