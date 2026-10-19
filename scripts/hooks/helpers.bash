@@ -9,6 +9,8 @@ trap 'exit 1' ERR
 
 # shellcheck source=scripts/loop-folder
 source "${BASH_SOURCE[0]%/*}/../loop-folder"
+# shellcheck source=scripts/hooks/words-without-secrets.bash
+source "${BASH_SOURCE[0]%/*}/words-without-secrets.bash"
 
 # This file's folder, as an absolute path, because some checks change to the folder that the agent works in.
 hooks_folder=${BASH_SOURCE[0]%/*}
@@ -52,87 +54,6 @@ block() {
     log_block ${simple_command_words[@]+"${simple_command_words[@]}"} 2>/dev/null || true
   fi
   exit 2
-}
-
-# The parts of a name that say that its value could be a secret, in any case. Names of other values hold them too,
-# such as --path, but a list of whole names would miss some secrets.
-secret_name='(token|key|secret|pass|pwd|pat|cookie|auth|bearer|credential)'
-# A name that holds a secret's name, then an = or a colon, as in GH_TOKEN=, "api_key": or Cookie:
-named_secret="[A-Za-z0-9_.-]*${secret_name}[A-Za-z0-9_.-]*[\"']?[[:blank:]]*[:=][[:blank:]]*"
-# The word Bearer and the spaces after it, as in "Bearer abc"
-bearer='(^|[^A-Za-z0-9_.-])bearer[[:blank:]]*'
-# A URL up to its password, and the password, which can hold a /, as in https://someone:password@example.com
-url_password='(://[^:/@[:space:]]*:)[^[:space:]]*@'
-left_out='[left out]'
-
-# Prints the words, joined by spaces, with each value that could hold a secret left out:
-# - each word that holds a token's shape from scripts/token-shapes
-# - the word after a flag whose name holds a secret's name, such as --token or --pat, or after -p, unless that word is
-#   a flag too
-# - the password in user:password after -u or --user, and in a URL
-# - the rest of a word after a name that holds a secret's name and an = or a colon, as in GH_TOKEN= or Cookie:, or
-#   after Bearer, or the next word when nothing follows them
-# Line breaks and other control characters become spaces, so that the words take one line. Fails when it can't read
-# the token shapes: words_without_secrets <word>...
-words_without_secrets() {
-  local word original follows="" leaves_out_next token_shape
-  local -a kept=()
-  token_shape=$(token_shapes) || return 1
-  for original in "$@"; do
-    word=$original
-    if [[ $follows == word && $word != -* ]]; then
-      word=$left_out
-    elif [[ $follows == password && $word == *:* ]]; then
-      word=${word%%:*}:$left_out
-    fi
-    if [[ $word =~ $token_shape ]]; then
-      word=$left_out
-    fi
-    shopt -s nocasematch
-    if [[ $word =~ $url_password ]]; then
-      word=${word/"${BASH_REMATCH[0]}"/"${BASH_REMATCH[1]}$left_out@"}
-    fi
-    if [[ $word =~ $named_secret ]]; then
-      leave_out_after "${BASH_REMATCH[0]}"
-    elif [[ $word =~ $bearer ]]; then
-      leave_out_after "${BASH_REMATCH[0]}"
-    fi
-    kept+=("$word")
-
-    leaves_out_next=""
-    if [[ $original == -p || ($original == -* && $original != *=* && $original =~ $secret_name) ]]; then
-      leaves_out_next=word
-    elif [[ $original =~ ${named_secret}$ || $original =~ ${bearer}$ ]]; then
-      leaves_out_next=word
-    elif [[ $original == -u || $original == --user ]]; then
-      leaves_out_next=password
-    fi
-    follows=$leaves_out_next
-    shopt -u nocasematch
-  done
-  # tr, because bash 3.2 takes minutes to replace the characters in a text of 60 KB with line breaks.
-  printf '%s' "${kept[*]}" | tr '[:cntrl:]' ' '
-}
-
-# Prints one extended regular expression that matches each shape that scripts/token-shapes lists, or fails when it
-# can't read the file.
-token_shapes() {
-  local kind shape pattern=""
-  while IFS=$'\t' read -r kind _ shape _; do
-    if [[ $kind != '#'* ]]; then
-      pattern+="${pattern:+|}($shape)"
-    fi
-  done <"$hooks_folder/../token-shapes" || return 1
-  printf '%s\n' "$pattern"
-}
-
-# Leaves out the text in word after the first time that a part appears in it, unless nothing follows the part, because
-# then the value is the next word: leave_out_after <part>
-leave_out_after() {
-  local before=${word%%"$1"*}
-  if ((${#before} + ${#1} < ${#word})); then
-    word=$before$1$left_out
-  fi
 }
 
 # Prints the loop's folder of this hook's repository, which is the one whose rules apply, even when the agent works in
@@ -229,37 +150,103 @@ read_tool_paths() {
   esac
 }
 
-# Changes command_folder as a cd command in command_words would, or empties it when the hook can't tell the folder,
-# such as when the target doesn't exist yet, or a variable other than HOME decides it. command_folder is the folder
-# that the next simple command runs in, and split_simple_commands keeps a cd in a subshell inside it. A check sets it
-# to ${cwd:-$PWD} before the first simple command, because Cursor doesn't send the folder the agent works in, and then
-# the hook's own folder counts.
+# Changes command_folder as a cd command in command_words would, or empties it when the hook can't tell the folder.
+# command_folder is the folder that the next simple command runs in, and split_simple_commands keeps a cd in a subshell
+# inside it. A check sets it to ${cwd:-$PWD} before the first simple command, because Cursor doesn't send the folder
+# the agent works in, and then the hook's own folder counts.
 follow_cd() {
   if [[ ${command_words[0]} != cd ]]; then
     return 0
   fi
-  if ((${#command_words[@]} != 2)) || [[ ${command_words[1]} == -* ]] || ! expand_home "${command_words[1]}"; then
+  if ((${#command_words[@]} != 2)) || [[ ${command_words[1]} == -* ]]; then
     command_folder=""
     return 0
   fi
-  if [[ -n $command_folder ]]; then
+  change_command_folder "${command_words[1]}"
+}
+
+# Changes command_folder to the folder that a word names, starting from command_folder, or empties it when the hook
+# can't tell the folder, such as when it doesn't exist yet, or a variable other than HOME decides it:
+# change_command_folder <word>
+change_command_folder() {
+  if ! expand_home "$1"; then
+    command_folder=""
+    return 0
+  fi
+  # A check that doesn't read the folder doesn't set it.
+  if [[ -n ${command_folder:-} ]]; then
     command_folder=$(CDPATH='' cd -- "$command_folder" 2>/dev/null && CDPATH='' cd -- "$expanded_path" 2>/dev/null && pwd) ||
       command_folder=""
   fi
 }
 
-# Sets the array command_words to a simple command's words from the command's name on, without the sudo,
-# env and NAME=value words before it: drop_command_prefixes <word>...
-drop_command_prefixes() {
-  command_words=("$@")
-  command_word_may_expand=(${words_may_expand[@]+"${words_may_expand[@]}"})
-  while ((${#command_words[@]} > 0)); do
-    if [[ ${command_words[0]} != sudo && ${command_words[0]} != env && ! ${command_words[0]} =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-      return 0
+# Reads one of env's options, and sets env_option_words to the number of words that it takes: 2 when its value is the
+# next word, otherwise 1. -C changes command_folder for the command that env runs, and split_simple_commands changes it
+# back after that command. Blocks each option that the hooks don't read, because they can't tell then which word is the
+# command, as with -S, whose value holds the command, or --uns, which GNU's env reads as --unset:
+# read_env_option <option> <next word, or empty>
+read_env_option() {
+  local option=$1 name value
+  env_option_words=1
+  case $option in
+    --ignore-environment | --null | --debug) return 0 ;;
+    --unset | --chdir) name=$option value=$2 env_option_words=2 ;;
+    --unset=* | --chdir=*) name=${option%%=*} value=${option#*=} ;;
+    *)
+      # A group of the options that take no value, as in -i0, can end in one that takes a value. Its value is the rest
+      # of the word, as in -iuNAME, or the next word.
+      if [[ $option =~ ^-[0iv]*$ ]]; then
+        return 0
+      fi
+      if [[ ! $option =~ ^-[0iv]*([uCP])(.*)$ ]]; then
+        block "Blocked: the hooks can't tell which command env runs after its option $option, so they can't check that command. Run the command without that option. The hooks read only env's options -i, -0, -u, -C, -P and -v, and their long forms."
+      fi
+      name=-${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
+      if [[ -z $value ]]; then
+        value=$2 env_option_words=2
+      fi
+      ;;
+  esac
+  if [[ $name == -C || $name == --chdir ]]; then
+    if [[ -z ${folder_after_command+set} ]]; then
+      folder_after_command=${command_folder-}
     fi
-    command_words=("${command_words[@]:1}")
-    command_word_may_expand=("${command_word_may_expand[@]:1}")
+    change_command_folder "$value"
+  fi
+}
+
+# Sets the array command_words to a simple command's words from the command's name on, without the words before it:
+# sudo, env, env's options and their values, and the words that set variables. Sets runs_through_env to true if env is
+# among them: drop_command_prefixes <word>...
+# The shell reads a word as setting a variable when it starts with a name and =, as in NAME=value, but env reads each
+# word with = that way.
+drop_command_prefixes() {
+  local -a prefixed=("$@")
+  local i=0 word is_after_env=false reads_env_options=false
+  runs_through_env=false
+  while ((i < ${#prefixed[@]})); do
+    word=${prefixed[i]}
+    if [[ $reads_env_options == true && $word == -- ]]; then
+      reads_env_options=false
+    elif [[ $reads_env_options == true && $word == -* ]]; then
+      read_env_option "$word" "${prefixed[i + 1]-}"
+      i=$((i + env_option_words - 1))
+    elif [[ $word =~ ^[A-Za-z_][A-Za-z0-9_]*= || ($is_after_env == true && $word == *=*) ]]; then
+      reads_env_options=false
+    elif [[ $word == sudo ]]; then
+      is_after_env=false
+      reads_env_options=false
+    elif [[ ${word##*/} == env ]]; then
+      is_after_env=true
+      reads_env_options=true
+      runs_through_env=true
+    else
+      break
+    fi
+    i=$((i + 1))
   done
+  command_words=(${prefixed[@]+"${prefixed[@]:i}"})
+  command_word_may_expand=(${words_may_expand[@]+"${words_may_expand[@]:i}"})
 }
 
 # Reads the -C options at the start of a git command, and sets these variables:
@@ -725,6 +712,11 @@ split_simple_commands() {
       if ((${#words[@]} > 0)); then
         simple_command_words=("${words[@]}")
         "$function" "${words[@]}"
+        # env -C changes the folder only for the command that env runs.
+        if [[ -n ${folder_after_command+set} ]]; then
+          command_folder=$folder_after_command
+          unset folder_after_command
+        fi
       fi
       words=()
       words_may_expand=()
