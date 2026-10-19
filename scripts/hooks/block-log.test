@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# Tests that the checks of scripts/hooks/before-tool add a line to .loop/blocks.log in the main checkout for each
+# action that they block. The hook finds the log from the repository that it's in, so the cases run copies of the
+# scripts in a git repository and in a worktree of it.
+set -euo pipefail
+# shellcheck source=scripts/hooks/testing.bash
+source "${BASH_SOURCE[0]%/*}/testing.bash"
+# The cases check the log that the hook finds on its own.
+unset HOOK_BLOCK_LOG
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+# git looks for no repository above the temporary folder, and reads none of the person's settings.
+export GIT_CEILING_DIRECTORIES=$base GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
+main_checkout=$base/main
+worktree=$base/worktree
+git init --quiet "$main_checkout"
+git -C "$main_checkout" commit --quiet --allow-empty -m Start
+git -C "$main_checkout" worktree add --quiet --detach "$worktree"
+cp -R "${hooks_folder%/*}" "$main_checkout/scripts"
+cp -R "${hooks_folder%/*}" "$worktree/scripts"
+log=$main_checkout/.loop/blocks.log
+
+env_message="Blocked: .env holds secrets, and AGENTS.md says never to read them. .env.example lists the variables."
+token_message="Blocked: this command prints the token that gh uses, and AGENTS.md says never to read or print secrets. gh commands use the token without it."
+
+# Runs the copy of the hook in a checkout on Claude Code's input, and sets hook_status and hook_message:
+# run_copy <checkout> <tool name> <command or path>
+run_copy() {
+  hook_status=0
+  hook_message=$(HOME=$test_home "$1/scripts/hooks/before-tool" 2>&1 >/dev/null <<<"$(sample_input claude-code "$2" "$3")") ||
+    hook_status=$?
+}
+
+# Prints the number of lines in a file, or 0 if it doesn't exist: line_count <file>
+line_count() {
+  if [[ -f $1 ]]; then
+    wc -l <"$1" | tr -d ' '
+  else
+    echo 0
+  fi
+}
+
+# Checks the number of lines in the log: expect_line_count <description> <number>
+expect_line_count() {
+  local count
+  case_count=$((case_count + 1))
+  count=$(line_count "$log")
+  if [[ $count != "$2" ]]; then
+    echo "error: $1, the log must have $2 lines, but it has $count." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks that the last line of a log is the time in UTC, a space and a text:
+# expect_last_line <description> <text> [<log>]
+expect_last_line() {
+  local description=$1 text=$2 file=${3:-$log} last="" time='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
+  case_count=$((case_count + 1))
+  if [[ -f $file ]]; then
+    last=$(tail -n 1 "$file")
+  fi
+  if [[ ! $last =~ ^$time\ (.*)$ || ${BASH_REMATCH[1]} != "$text" ]]; then
+    echo "error: $description, the last line of $file must be the time and \"$text\", but it's \"$last\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks that a folder doesn't exist: expect_no_folder <description> <folder>
+expect_no_folder() {
+  case_count=$((case_count + 1))
+  if [[ -e $2 ]]; then
+    echo "error: $1, the hook must not create $2." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks the line that the block of a git credential fill command adds, after the time and the check's file name:
+# expect_line_for <command> <text>
+expect_line_for() {
+  run_copy "$main_checkout" Bash "$1"
+  expect_result "For $1, the hook" 2 "$token_message"
+  expect_last_line "After $1" "forbidden-commands.check $2"
+}
+
+# An action that goes ahead adds no line.
+run_copy "$main_checkout" Bash 'cat README.md'
+expect_result "For cat README.md, the hook" 0 ""
+expect_no_folder "After an action that goes ahead" "$main_checkout/.loop"
+
+# A block adds a line with the time, the check's file name and what the check matched, here the path.
+run_copy "$main_checkout" Bash 'cat .env'
+expect_result "For cat .env, the hook" 2 "$env_message"
+expect_line_count "After one block" 1
+expect_last_line "After cat .env" "secret-files.check .env"
+
+# A worktree's block goes in the main checkout's log.
+run_copy "$worktree" Read "$worktree/.env"
+expect_result "For a Read of the worktree's .env, the hook" 2 "Blocked: $worktree/.env holds secrets, and AGENTS.md says never to read them. .env.example lists the variables."
+expect_line_count "After a block in the worktree" 2
+expect_last_line "After a Read of the worktree's .env" "secret-files.check $worktree/.env"
+expect_no_folder "After a block in the worktree" "$worktree/.loop"
+
+# A check of the file-writing tools gives the path that the tool would write.
+run_copy "$main_checkout" Write "$main_checkout/CLAUDE.md"
+expect_result "For a Write of CLAUDE.md, the hook" 2 "Blocked: CLAUDE.md makes a tool skip AGENTS.md. Put its rules into AGENTS.md or a guide in docs/ instead."
+expect_last_line "After a Write of CLAUDE.md" "instruction-files.check $main_checkout/CLAUDE.md"
+
+# Unless the check gives what it matched, the line holds the simple command that the check blocked.
+expect_line_for 'cd app && git credential fill' 'git credential fill'
+
+# The line leaves out each value that could hold a secret.
+expect_line_for 'GH_TOKEN=abc123 git credential fill' 'GH_TOKEN=[left out] git credential fill'
+expect_line_for 'git credential fill --password abc123' 'git credential fill --password [left out]'
+expect_line_for 'git credential fill --API-KEY=abc123' 'git credential fill --API-KEY=[left out]'
+expect_line_for "git credential fill 'Authorization: Bearer abc123'" 'git credential fill Authorization: [left out]'
+expect_line_for "git credential fill '{\"private_key\": \"abc123\"}'" 'git credential fill {"private_key": [left out]'
+expect_line_for 'git credential fill https://someone:abc123@example.com/repository' \
+  'git credential fill https://[left out]@example.com/repository'
+
+# The word after a flag named for a secret stays when it's a flag too, because then it's no secret.
+expect_line_for 'git credential fill --with-token --verbose' 'git credential fill --with-token --verbose'
+
+# A command that spans lines takes one line.
+expect_line_for $'git credential fill "first line\nsecond line"' 'git credential fill first line second line'
+
+# HOOK_BLOCK_LOG names another log.
+blocks_before=$(line_count "$log")
+HOOK_BLOCK_LOG=$base/other.log run_copy "$main_checkout" Bash 'cat .env'
+expect_result "With HOOK_BLOCK_LOG, the hook" 2 "$env_message"
+expect_last_line "With HOOK_BLOCK_LOG" "secret-files.check .env" "$base/other.log"
+expect_line_count "With HOOK_BLOCK_LOG" "$blocks_before"
+
+# A log that can't be written changes neither the block nor its message.
+rm "$log"
+mkdir "$log"
+run_copy "$main_checkout" Bash 'cat .env'
+expect_result "With a folder in place of the log, the hook" 2 "$env_message"
+rm -rf "$main_checkout/.loop"
+echo "Not a folder" >"$main_checkout/.loop"
+run_copy "$main_checkout" Bash 'cat .env'
+expect_result "With .loop as a file, the hook" 2 "$env_message"
+
+finish_tests

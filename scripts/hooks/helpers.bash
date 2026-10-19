@@ -7,6 +7,15 @@
 set -eEuo pipefail
 trap 'exit 1' ERR
 
+# shellcheck source=scripts/loop-folder
+source "${BASH_SOURCE[0]%/*}/../loop-folder"
+
+# This file's folder, as an absolute path, because some checks change to the folder that the agent works in.
+hooks_folder=${BASH_SOURCE[0]%/*}
+if [[ $hooks_folder != /* ]]; then
+  hooks_folder=$PWD/$hooks_folder
+fi
+
 # Sets these variables from the fields of the tool's input, which scripts/hooks/before-tool reads once for all the
 # checks. Every tool sends Claude Code's form: one JSON object, with the tool in tool_name and its input in tool_input.
 # - tool_name: the tool, such as Bash or Read. Cursor's Shell counts as Bash.
@@ -30,10 +39,80 @@ read_input() {
   cwd=${HOOK_CWD:-}
 }
 
-# Blocks the action, and tells the agent why: block <reason>
+# Blocks the action, tells the agent why, and logs the block with the part of the action that the check matched:
+# block <reason> [<part>]
+# The part is the simple command that the check reads, unless the check gives another, such as a file's path.
 block() {
   printf '%s\n' "$1" >&2
+  # A log that can't be written, such as on a full disk, must not end the check with an error, which would allow the
+  # action.
+  if (($# > 1)); then
+    log_block "$2" || true
+  else
+    log_block ${simple_command_words[@]+"${simple_command_words[@]}"} || true
+  fi
   exit 2
+}
+
+# The names that say that a value is a secret, in any case, as in --token, GH_TOKEN= or "Authorization: Bearer".
+secret_name='(secret|token|passw(or)?d|api[_-]?key|access[_-]?key|private[_-]?key|auth[_-]?key|credential|authorization)'
+# A secret's name and the = or colon after it, as in GH_TOKEN=, "api_key": or Authorization:
+named_secret="${secret_name}[A-Za-z0-9_.-]*[\"']?[[:blank:]]*[:=][[:blank:]]*"
+# The user and password in a URL, as in https://someone:password@example.com
+url_credentials='://[^/@[:space:]]+@'
+left_out='[left out]'
+
+# Prints the words, joined by spaces, with each value that could hold a secret left out:
+# - the word after a flag named for a secret, such as --token, unless that word is a flag too
+# - the rest of a word after a secret's name, such as GH_TOKEN= or Authorization:
+# - the user and password in a URL
+# Line breaks and other control characters become spaces, so that the words take one line:
+# words_without_secrets <word>...
+words_without_secrets() {
+  local word text="" is_secret_flag follows_secret_flag=""
+  shopt -s nocasematch
+  for word in "$@"; do
+    is_secret_flag=""
+    if [[ $word == -* && $word != *=* && $word =~ $secret_name ]]; then
+      is_secret_flag=yes
+    fi
+    if [[ -n $follows_secret_flag && $word != -* ]]; then
+      word=$left_out
+    fi
+    if [[ $word =~ $url_credentials ]]; then
+      word=${word/"${BASH_REMATCH[0]}"/"://$left_out@"}
+    fi
+    if [[ $word =~ $named_secret ]]; then
+      word=${word%%"${BASH_REMATCH[0]}"*}${BASH_REMATCH[0]}$left_out
+    fi
+    follows_secret_flag=$is_secret_flag
+    text+=" $word"
+  done
+  shopt -u nocasematch
+  text=${text# }
+  printf '%s\n' "${text//[[:cntrl:]]/ }"
+}
+
+# Adds a line to blocks.log in the loop's folder of this hook's repository, which is the one whose rules blocked the
+# action, even when the agent works in another one. HOOK_BLOCK_LOG names another file, as in the hooks' tests.
+# The line holds the time, the check's file name and the words, with the values that could hold a secret left out, so
+# that its reader can tell a real block from a false alarm: log_block <word>...
+log_block() {
+  local log=${HOOK_BLOCK_LOG:-} git_folders shared_git_folder checkout line words
+  if [[ -z $log ]]; then
+    git_folders=$(git -C "$hooks_folder" rev-parse --path-format=absolute --git-common-dir --show-toplevel 2>/dev/null) || return 0
+    shared_git_folder=${git_folders%%$'\n'*}
+    checkout=${git_folders#*$'\n'}
+    log=$(loop_folder "$shared_git_folder" "$checkout")/blocks.log
+    mkdir -p "${log%/*}" 2>/dev/null || return 0
+  fi
+  line="$(date -u +%Y-%m-%dT%H:%M:%SZ) ${0##*/}"
+  words=$(words_without_secrets "$@")
+  if [[ -n $words ]]; then
+    line+=" $words"
+  fi
+  # Any error goes to /dev/null, because the check's errors become the reason that the agent reads.
+  { printf '%s\n' "$line" >>"$log"; } 2>/dev/null
 }
 
 # Sets the array command_words to a simple command's words from the command's name on, without the sudo,
@@ -278,7 +357,8 @@ for_each_simple_command() {
 # Simple commands end at &&, ||, ;, |, &, a parenthesis and a line break. Words end at spaces and tabs.
 # Quotes and backslashes are removed as the shell removes them, but nothing is expanded, so "$HOME" stays $HOME.
 # Redirections, such as "< .env" or "2>/dev/null", aren't words. Before each call, the array redirections
-# holds them as pairs: the operator, such as < or 2>, then its target.
+# holds them as pairs: the operator, such as < or 2>, then its target. The array simple_command_words holds the
+# words, which block logs. block can't read the array words, because some checks have a local array of that name.
 # It leaves substitution text in the surrounding word, because body checks inspect the original text.
 split_simple_commands() {
   local function=$1 text=$2
@@ -286,7 +366,7 @@ split_simple_commands() {
   local word="" has_word=false quote="" descriptor="" operator="" starts_redirection word_may_expand=""
   local substitution_body substitution_end rest chunk
   local -a redirections=()
-  local -a words=() words_may_expand=()
+  local -a words=() words_may_expand=() simple_command_words=()
 
   for ((i = 0; i <= length; i++)); do
     # Inside quotes, the text up to the next character that matters joins the word in one step, because adding one
@@ -407,6 +487,7 @@ split_simple_commands() {
     elif ((i == length)) || [[ $char != [[:blank:]] ]]; then
       # A line break, ;, &, |, a parenthesis or the end of the command ends the simple command.
       if ((${#words[@]} > 0)); then
+        simple_command_words=("${words[@]}")
         "$function" "${words[@]}"
       fi
       words=()

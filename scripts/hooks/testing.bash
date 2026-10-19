@@ -14,6 +14,10 @@ test_home=/home-for-tests/someone
 # The folder the agent works in, which the sample inputs send. A test file can change it.
 test_cwd=$test_home/project
 
+# The checks log each block here, in place of .loop/blocks.log, so that the tests' blocks stay out of the
+# repository's log.
+export HOOK_BLOCK_LOG=/dev/null
+
 # Prints a sample of what a tool sends the hook before an action: sample_input <tool> <tool name> <command, patch or path>
 # The tool names are Bash, Read, Write, Edit and Codex's apply_patch. Every tool uses Claude Code's field names.
 sample_input() {

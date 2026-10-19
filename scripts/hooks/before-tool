@@ -2,6 +2,7 @@
 # The agent's tool runs this hook before each action, because .claude/settings.json and .codex/hooks.json list it.
 # It reads the fields of the tool's input that the checks use, and runs each check in this folder, the files that end
 # in .check. A check blocks the action with exit code 2 and the reason on stderr, and this script passes both on.
+# The check also adds a line to .loop/blocks.log in the main checkout, as log_block in helpers.bash describes.
 # To add a check, add its .check file and its .test file. A check for a tool that isn't in the list below also adds
 # the tool there. Neither hook file needs a change. A check must allow the command true, because the hook files run
 # this hook on it to tell whether the hook can run.
