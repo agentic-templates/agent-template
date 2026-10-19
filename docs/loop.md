@@ -184,6 +184,10 @@ Ask the maintainer each question that only they can answer, in an issue with `ne
 When a hook or the permission classifier blocks something that the loop needs, don't work around it. Ask in the
 same way for the permission that lets the loop do it itself.
 
+Each time you write a question for the maintainer in an issue with `needs-decision`, or an agent's report names an
+issue where it wrote one, send the maintainer a push notification with the issue's title and link, using the
+`PushNotification` tool.
+
 ## Start a retrospective
 
 When the meter's `machine` line says `retrospective due`, start an `auditor` agent, unless one runs or its pull
