@@ -23,43 +23,59 @@ left_out='[left out]'
 # Line breaks and other control characters become spaces, so that the words take one line. Fails when it can't read
 # the token shapes: words_without_secrets <word>...
 words_without_secrets() {
-  local word original follows="" leaves_out_next token_shape
-  local -a kept=()
+  local word original follows="" token_shape
+  local -a words=("$@") kept=()
   token_shape=$(token_shapes) || return 1
-  for original in "$@"; do
+  # bash 3.2 takes longer for each function call the more arguments the calling function has, so the loop reads the
+  # words from an array, with no arguments left. With them, 3,000 words took 10 seconds instead of 1, as issue #96
+  # measured.
+  set --
+  for original in "${words[@]}"; do
     word=$original
-    if [[ $follows == word && $word != -* ]]; then
-      word=$left_out
-    elif [[ $follows == password && $word == *:* ]]; then
-      word=${word%%:*}:$left_out
-    fi
-    if [[ $word =~ $token_shape ]]; then
-      word=$left_out
-    fi
-    shopt -s nocasematch
-    if [[ $word =~ $url_password ]]; then
-      word=${word/"${BASH_REMATCH[0]}"/"${BASH_REMATCH[1]}$left_out@"}
-    fi
-    if [[ $word =~ $named_secret ]]; then
-      leave_out_after "${BASH_REMATCH[0]}"
-    elif [[ $word =~ $bearer ]]; then
-      leave_out_after "${BASH_REMATCH[0]}"
-    fi
+    leave_secrets_out_of_word
     kept+=("$word")
-
-    leaves_out_next=""
-    if [[ $original == -p || ($original == -* && $original != *=* && $original =~ $secret_name) ]]; then
-      leaves_out_next=word
-    elif [[ $original =~ ${named_secret}$ || $original =~ ${bearer}$ ]]; then
-      leaves_out_next=word
-    elif [[ $original == -u || $original == --user ]]; then
-      leaves_out_next=password
-    fi
-    follows=$leaves_out_next
-    shopt -u nocasematch
+    find_what_follows "$original"
   done
   # tr, because bash 3.2 takes minutes to replace the characters in a text of 60 KB with line breaks.
   printf '%s' "${kept[*]}" | tr '[:cntrl:]' ' '
+}
+
+# Leaves out of word each value that could hold a secret, as words_without_secrets lists them. It reads what the word
+# before leaves out of this one in follows, as find_what_follows sets it, and the shapes of tokens in token_shape.
+leave_secrets_out_of_word() {
+  if [[ $follows == word && $word != -* ]]; then
+    word=$left_out
+  elif [[ $follows == password && $word == *:* ]]; then
+    word=${word%%:*}:$left_out
+  fi
+  if [[ $word =~ $token_shape ]]; then
+    word=$left_out
+  fi
+  shopt -s nocasematch
+  if [[ $word =~ $url_password ]]; then
+    word=${word/"${BASH_REMATCH[0]}"/"${BASH_REMATCH[1]}$left_out@"}
+  fi
+  if [[ $word =~ $named_secret ]]; then
+    leave_out_after "${BASH_REMATCH[0]}"
+  elif [[ $word =~ $bearer ]]; then
+    leave_out_after "${BASH_REMATCH[0]}"
+  fi
+  shopt -u nocasematch
+}
+
+# Sets follows to what a word leaves out of the word after it: word for the whole word, as after --token, password
+# for the password in user:password, as after -u, or nothing: find_what_follows <word>
+find_what_follows() {
+  follows=""
+  shopt -s nocasematch
+  if [[ $1 == -p || ($1 == -* && $1 != *=* && $1 =~ $secret_name) ]]; then
+    follows=word
+  elif [[ $1 =~ ${named_secret}$ || $1 =~ ${bearer}$ ]]; then
+    follows=word
+  elif [[ $1 == -u || $1 == --user ]]; then
+    follows=password
+  fi
+  shopt -u nocasematch
 }
 
 # Prints one extended regular expression that matches each shape that scripts/token-shapes lists, or fails when it

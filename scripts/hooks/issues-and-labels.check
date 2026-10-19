@@ -209,7 +209,7 @@ check_issue_create() {
 }
 
 check_issue_edit() {
-  local issue answer labels label current_body
+  local issue
   read_issue_command "$issue_edit_flags_with_value"
   if [[ -n $asks_for_help ]] || ((${#issue_arguments[@]} == 0)); then
     return 0
@@ -221,25 +221,32 @@ check_issue_edit() {
     read_body "the issue's headings"
   fi
   for issue in "${issue_arguments[@]}"; do
-    answer=$(gh issue view "$issue" ${repository[@]+"${repository[@]}"} --json labels,body 2>/dev/null) || continue
-    labels=$(jq -r '.labels[].name' <<<"$answer") || continue
-    current_body=$(jq -r '.body // ""' <<<"$answer") || continue
-    current_labels=()
-    while IFS= read -r label; do
-      if [[ -n $label ]]; then
-        current_labels+=("$label")
-      fi
-    done <<<"$labels"
-    find_type_labels
-    if ((${#added_labels[@]} > 0 || ${#removed_labels[@]} > 0)); then
-      check_type_labels "issue $issue" "Add it with --add-label <label>." "Remove the others with --remove-label <label>."
-    fi
-    if [[ -n $body_source ]]; then
-      check_headings "the new body of issue $issue" "$body" ""
-    elif [[ ${type_labels_before[*]-} != "${type_labels_after[*]-}" ]]; then
-      check_headings "the body of issue $issue" "$current_body" " Change the body in the same command, with --body or --body-file."
-    fi
+    check_edited_issue "$issue"
   done
+}
+
+# Blocks the edit that read_issue_command read if it would leave an issue without exactly one type label, or without
+# the headings for that label: check_edited_issue <issue>
+check_edited_issue() {
+  local issue=$1 answer labels label current_body
+  answer=$(gh issue view "$issue" ${repository[@]+"${repository[@]}"} --json labels,body 2>/dev/null) || return 0
+  labels=$(jq -r '.labels[].name' <<<"$answer") || return 0
+  current_body=$(jq -r '.body // ""' <<<"$answer") || return 0
+  current_labels=()
+  while IFS= read -r label; do
+    if [[ -n $label ]]; then
+      current_labels+=("$label")
+    fi
+  done <<<"$labels"
+  find_type_labels
+  if ((${#added_labels[@]} > 0 || ${#removed_labels[@]} > 0)); then
+    check_type_labels "issue $issue" "Add it with --add-label <label>." "Remove the others with --remove-label <label>."
+  fi
+  if [[ -n $body_source ]]; then
+    check_headings "the new body of issue $issue" "$body" ""
+  elif [[ ${type_labels_before[*]-} != "${type_labels_after[*]-}" ]]; then
+    check_headings "the body of issue $issue" "$current_body" " Change the body in the same command, with --body or --body-file."
+  fi
 }
 
 check_simple_command() {
