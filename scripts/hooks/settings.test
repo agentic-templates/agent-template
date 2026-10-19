@@ -107,7 +107,7 @@ settings=$PWD/.claude/settings.json
 for checkout in "$repository" "$other"; do
   git init --quiet --initial-branch=main "$checkout"
   mkdir -p "$checkout/scripts/hooks" "$checkout/scripts/loop"
-  for hook in hooks/before-tool hooks/after-tool hooks/after-edit hooks/session-start loop/agent-log; do
+  for hook in hooks/before-tool hooks/after-tool hooks/after-edit hooks/hand-off hooks/session-start loop/agent-log; do
     # The stand-in reads its input before it prints its path. Otherwise it could exit before the command's printf
     # writes the input, and where SIGPIPE is ignored, as in CI, printf would print an I/O error.
     # shellcheck disable=SC2016 # $0 expands when the hook runs.
@@ -123,7 +123,7 @@ mkdir "$checkouts/plain"
 # Checks which hook the commands for an event in .claude/settings.json run from the repository's main checkout:
 # expect_hook <event> <tool> <folder the agent works in> <checkout whose hook must run> [<matcher>]
 # The tool is claude-code, copilot-cli or cursor. For SessionStart and SubagentStop, only Claude Code counts, because
-# the other tools send no such event. For PostToolUse, the matcher picks the commands: Bash or Edit|Write.
+# the other tools send no such event. For PostToolUse, the matcher picks the commands: Bash, Edit|Write or *.
 expect_hook() {
   local event=$1 tool=$2 checkout=$4 matcher=${5:-} input expected encoded_command command output commands=0
   test_cwd=$3
@@ -136,6 +136,9 @@ expect_hook() {
   elif [[ $event == PostToolUse && $matcher == Bash ]]; then
     input=$(sample_input "$tool" Bash ls)
     expected=$checkout/scripts/hooks/after-tool
+  elif [[ $event == PostToolUse && $matcher == '*' ]]; then
+    input=$(sample_input "$tool" Read README.md)
+    expected=$checkout/scripts/hooks/hand-off
   elif [[ $event == PostToolUse ]]; then
     input=$(sample_input "$tool" Edit README.md)
     expected=$checkout/scripts/hooks/after-edit
@@ -169,6 +172,7 @@ expect_hook SessionStart claude-code "$worktree" "$worktree"
 expect_hook SubagentStop claude-code "$worktree" "$worktree"
 expect_hook PostToolUse claude-code "$worktree" "$worktree" Bash
 expect_hook PostToolUse claude-code "$worktree" "$worktree" "Edit|Write"
+expect_hook PostToolUse claude-code "$worktree" "$worktree" '*'
 
 # The main checkout
 expect_hook PreToolUse claude-code "$repository" "$repository"
@@ -184,6 +188,7 @@ expect_hook SessionStart claude-code "$other" "$repository"
 expect_hook SubagentStop claude-code "$other" "$repository"
 expect_hook PostToolUse claude-code "$other" "$repository" Bash
 expect_hook PostToolUse claude-code "$other" "$repository" "Edit|Write"
+expect_hook PostToolUse claude-code "$other" "$repository" '*'
 
 # A folder outside any repository, and a folder that doesn't exist
 expect_hook PreToolUse claude-code "$checkouts/plain" "$repository"

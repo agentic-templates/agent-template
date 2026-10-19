@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# Tests scripts/hooks/hand-off in a small repository, with transcripts in a folder of Claude Code's form.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+
+case_count=0
+failed_cases=0
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+export GIT_CEILING_DIRECTORIES=$base GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+repository=$base/repository
+mkdir -p "$repository/scripts/hooks" "$repository/.loop"
+cp -p scripts/hooks/hand-off "$repository/scripts/hooks/"
+cp -p scripts/loop-folder "$repository/scripts/"
+git -C "$repository" init --quiet
+orchestrator=11111111-aaaa-4bbb-8ccc-000000000001
+echo "session: $orchestrator" >"$repository/.loop/state.md"
+projects=$base/projects/-repository
+notes=$repository/.loop/hand-offs
+
+soon="Your context has passed 400k tokens. Hand off your work at your next stopping point, so that a fresh agent continues it."
+now="Your context has passed 500k tokens. Hand off your work as soon as the step you're on ends, so that a fresh agent continues it."
+how="To hand off, push your branch if you have one. Then write a comment on your issue or pull request with what's done, what's left, the commands you ran and where their outputs are, and the open questions. End with a report that says that you handed off, with the comment's link."
+
+# Prints a reply of a transcript, whose call read the given number of tokens: reply <tokens>
+# The call's input splits into its three parts, so that a hook that leaves one out reads a smaller size.
+reply() {
+  jq -c -n --argjson tokens "$1" '{type: "assistant", message: {role: "assistant",
+    usage: {input_tokens: 3, cache_read_input_tokens: ($tokens - 1003), cache_creation_input_tokens: 1000,
+      output_tokens: 900000}}}'
+}
+
+# Adds lines to the transcript of a session, or of a subagent of it: add_lines <session> <agent id or ""> <line>...
+add_lines() {
+  local transcript=$projects/$1.jsonl
+  if [[ -n $2 ]]; then
+    transcript=$projects/$1/subagents/agent-$2.jsonl
+  fi
+  shift 2
+  mkdir -p "${transcript%/*}"
+  printf '%s\n' "$@" >>"$transcript"
+}
+
+# Adds a reply to a transcript, with a tool result after it: add_reply <session> <agent id or ""> <tokens>
+add_reply() {
+  add_lines "$1" "$2" "$(reply "$3")" \
+    '{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "content": "a \"usage\" line"}]}}'
+}
+
+# Runs the hook after a tool call of a session or a subagent, and sets output:
+# run_hook <session> <agent id or ""> [<NAME=value>...]
+run_hook() {
+  local input
+  input=$(jq -n --arg session "$1" --arg agent "$2" --arg transcript "$projects/$1.jsonl" --arg cwd "$repository" \
+    '{session_id: $session, transcript_path: $transcript, cwd: $cwd, hook_event_name: "PostToolUse", tool_name: "Read",
+      tool_input: {file_path: "README.md"}} + (if $agent == "" then {} else {agent_id: $agent, agent_type: "builder"} end)')
+  shift 2
+  output=$(env -u LOOP_HAND_OFF -u LOOP_DIR "$@" "$repository/scripts/hooks/hand-off" <<<"$input" 2>&1) || true
+}
+
+# Checks what the hook told the agent: expect_note <description> <message, or nothing>
+expect_note() {
+  local description=$1 message=$2 actual_message=""
+  case_count=$((case_count + 1))
+  if [[ -n $output ]]; then
+    actual_message=$(jq -r .hookSpecificOutput.additionalContext <<<"$output" 2>/dev/null) || actual_message=$output
+  fi
+  if [[ $actual_message != "$message" ]]; then
+    echo "error: $description, the hook must tell \"$message\", but it told \"$actual_message\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks the files of the notes that the hook gave: expect_note_files <description> <file names, or nothing>
+expect_note_files() {
+  local description=$1 expected=$2 file files=""
+  case_count=$((case_count + 1))
+  for file in "$notes"/*; do
+    if [[ -e $file ]]; then
+      files+=" ${file##*/}"
+    fi
+  done
+  if [[ ${files# } != "$expected" ]]; then
+    echo "error: $description, the hook must leave the files \"$expected\" in .loop/hand-offs, but it left \"${files# }\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# A subagent of the orchestrator's session, as its context grows
+add_reply "$orchestrator" a1 120000
+run_hook "$orchestrator" a1
+expect_note "Under 400k tokens" ""
+add_reply "$orchestrator" a1 400000
+run_hook "$orchestrator" a1
+expect_note "At 400k tokens" ""
+add_reply "$orchestrator" a1 400001
+run_hook "$orchestrator" a1
+expect_note "Just past 400k tokens" "$soon $how"
+expect_note_files "Just past 400k tokens" "a1.400000"
+add_reply "$orchestrator" a1 430000
+run_hook "$orchestrator" a1
+expect_note "After the note for 400k tokens" ""
+add_reply "$orchestrator" a1 500000
+run_hook "$orchestrator" a1
+expect_note "At 500k tokens" ""
+add_reply "$orchestrator" a1 500001
+run_hook "$orchestrator" a1
+expect_note "Just past 500k tokens" "$now $how"
+add_reply "$orchestrator" a1 520000
+run_hook "$orchestrator" a1
+expect_note "After the note for 500k tokens" ""
+expect_note_files "After both notes" "a1.400000 a1.500000"
+
+# A subagent whose context is far past each threshold at its first tool call
+add_reply "$orchestrator" a2 480000
+run_hook "$orchestrator" a2
+expect_note "Far past 400k tokens" "$soon $how"
+add_reply "$orchestrator" a3 900000
+run_hook "$orchestrator" a3
+expect_note "Far past 500k tokens" "$now $how"
+add_reply "$orchestrator" a3 450000
+run_hook "$orchestrator" a3
+expect_note "After a compaction to past 400k tokens, once the note for 500k tokens came" ""
+
+# The hook reads the latest reply, as after a compaction, and a transcript whose start the hook's read cuts.
+add_lines "$orchestrator" a4 "$(reply 700000)" "$(reply 200000)"
+run_hook "$orchestrator" a4
+expect_note "When an earlier reply is past both thresholds" ""
+add_lines "$orchestrator" a5 "{\"type\": \"user\", \"message\": {\"content\": \"$(head -c 400000 /dev/zero | tr '\0' x)\", \"usage\": 1}}" \
+  "$(reply 410000)"
+run_hook "$orchestrator" a5
+expect_note "After a line longer than the part of the transcript that the hook reads" "$soon $how"
+
+# Agents that get no note
+rm -rf "$notes"
+run_hook "$orchestrator" a9
+expect_note "For a subagent whose transcript can't be found" ""
+add_reply "$orchestrator" "" 600000
+run_hook "$orchestrator" ""
+expect_note "For the orchestrator itself" ""
+add_reply 22222222-aaaa-4bbb-8ccc-000000000002 b1 600000
+run_hook 22222222-aaaa-4bbb-8ccc-000000000002 b1
+expect_note "For a subagent of a session other than the orchestrator's" ""
+add_reply "$orchestrator" ../a6 600000
+run_hook "$orchestrator" ../a6
+expect_note "For an agent id that isn't a file name" ""
+expect_note_files "For the agents that get no note" ""
+
+# A session that scripts/loop/run-builder started, and its subagent
+builder=33333333-aaaa-4bbb-8ccc-000000000003
+add_reply "$builder" "" 410000
+run_hook "$builder" "" LOOP_HAND_OFF=1
+expect_note "For a builder that scripts/loop/run-builder started" "$soon $how"
+run_hook "$builder" ""
+expect_note "For a session without LOOP_HAND_OFF" ""
+add_reply "$builder" c1 410000
+run_hook "$builder" c1 LOOP_HAND_OFF=1
+expect_note "For a subagent of a builder that scripts/loop/run-builder started" "$soon $how"
+run_hook 44444444-aaaa-4bbb-8ccc-000000000004 "" LOOP_HAND_OFF=1
+expect_note "For a builder whose transcript can't be found" ""
+expect_note_files "For the builders" "$builder.400000 c1.400000"
+
+# Calls that end at the same time
+add_reply "$orchestrator" a7 410000
+mkdir "$base/calls"
+for call in 1 2 3 4 5 6 7 8; do
+  (
+    run_hook "$orchestrator" a7
+    printf '%s' "$output" >"$base/calls/$call"
+  ) &
+done
+wait
+notes_given=0
+for call in "$base"/calls/*; do
+  if [[ -s $call ]]; then
+    notes_given=$((notes_given + 1))
+  fi
+done
+case_count=$((case_count + 1))
+if ((notes_given != 1)); then
+  echo "error: Of 8 calls that end at the same time, one must give the note, but $notes_given gave it." >&2
+  failed_cases=$((failed_cases + 1))
+fi
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/hooks/hand-off.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/hooks/hand-off.test passed. Cases: $case_count."

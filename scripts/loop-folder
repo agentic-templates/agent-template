@@ -1,7 +1,7 @@
 # shellcheck shell=bash
-# The loop's folder, which holds the orchestrator's state file and the log of the hooks' blocks.
-# scripts/hooks/session-start and scripts/hooks/helpers.bash read it from here, and scripts/loop/paths.py finds the
-# same folder for the Python scripts.
+# The loop's folder, which holds the orchestrator's state file and the log of the hooks' blocks, and the lines of the
+# state file. The hooks in scripts/hooks read them from here, and scripts/loop/paths.py finds the same folder for the
+# Python scripts.
 
 # Prints the loop's folder: the folder that LOOP_DIR names, as in the tests, or else .loop in the main checkout, which
 # holds the git folder that its worktrees share, so that every worktree finds the same folder. A repository that keeps
@@ -15,4 +15,10 @@ loop_folder() {
   else
     printf '%s\n' "$2/.loop"
   fi
+}
+
+# Prints the first word after "<name>:" on the first line of the state file that starts with it:
+# state_field <state file> <name>
+state_field() {
+  awk -v name="$2:" 'index($0, name) == 1 { $0 = substr($0, length(name) + 1); print $1; exit }' "$1"
 }

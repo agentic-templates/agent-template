@@ -115,6 +115,8 @@ your own, at the commit that the issue's pull request started from, on no branch
 open no issue or pull request. The script that started you keeps the diff of your changes.
 """
 CHANGES_FILE = "changes.diff"
+# The environment variable that tells scripts/hooks/hand-off that a session is a builder that may hand off its work
+HAND_OFF_VARIABLE = "LOOP_HAND_OFF"
 CODEX_BRIEF = """Your sandbox can't write the git folder or reach the network, so don't run git or gh. Edit the files in
 this worktree, which is on the issue's branch. scripts/check stops with an error where it writes to the git folder or
 to uv's cache. CI runs every check on the pull request.
@@ -252,7 +254,7 @@ def build(
     try:
         add_worktree(branch, folders)
         if tool == "claude":
-            run_claude(write_brief(issue, kind, CLAUDE_BRIEF, folders), account, settings, folders)
+            run_claude(write_brief(issue, kind, CLAUDE_BRIEF, folders), account, settings, folders, can_hand_off=True)
             outcome = Outcome("finished")
         else:
             run_codex(write_brief(issue, kind, CODEX_BRIEF, folders), account, folders)
@@ -285,7 +287,8 @@ def test_build(
     base = pull_request_base(pull_request, folders)
     git(["worktree", "add", "--quiet", "--detach", str(folders.worktree), base], folders.checkout, folders.hooks)
     try:
-        run_claude(write_brief(issue, kind, TEST_BRIEF, folders), account, settings, folders)
+        # A hand-off posts a comment on the issue, and a test build changes nothing on GitHub.
+        run_claude(write_brief(issue, kind, TEST_BRIEF, folders), account, settings, folders, can_hand_off=False)
         outcome = Outcome(f"test finished, changes in {folders.run / CHANGES_FILE}")
     except Stop as stop:
         outcome = Outcome(f"failed: {stop}", is_ok=False)
@@ -530,18 +533,22 @@ def write_brief(issue: dict[str, Any], kind: str, run_brief: str, folders: Folde
     return brief
 
 
-def run_claude(brief: str, account: Account, settings: agent_log.AgentSettings, folders: Folders) -> None:
+def run_claude(
+    brief: str, account: Account, settings: agent_log.AgentSettings, folders: Folders, *, can_hand_off: bool
+) -> None:
     """Runs claude with the type's settings until it ends, and writes its result to report.md in the run folder.
-    claude sends the tokens of its requests to the loop's receiver, which this starts if it isn't running."""
+    claude sends the tokens of its requests to the loop's receiver, which this starts if it isn't running. With
+    can_hand_off, scripts/hooks/hand-off tells the builder to hand off its work once its context grows too long."""
     try:
         port = request_events.receiver_port(paths.loop_dir())
     except request_events.ReceiverError as error:
         raise Stop(str(error)) from error
     # The first variable makes claude wait through a usage limit. The second keeps the hooks from logging the agents
     # that the builder starts, because the run's tokens count theirs.
-    environment = request_events.with_events(
-        claude_environment(account) | {"CLAUDE_CODE_RETRY_WATCHDOG": "1", agent_log.RUN_VARIABLE: "1"}, port
-    )
+    variables = {"CLAUDE_CODE_RETRY_WATCHDOG": "1", agent_log.RUN_VARIABLE: "1"}
+    if can_hand_off:
+        variables[HAND_OFF_VARIABLE] = "1"
+    environment = request_events.with_events(claude_environment(account) | variables, port)
     model_options = [
         *option("--model", settings.model),
         *option("--effort", settings.effort),

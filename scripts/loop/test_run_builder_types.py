@@ -259,6 +259,7 @@ class TestBuildTest(RunBuilderTest):
         [call] = self.calls("claude")
         self.assertEqual((call["cwd"], call["head"]), (str(self.worktree), self.base))
         self.assertEqual(call["env"]["LOOP_RUN"], "1")
+        self.assertNotIn("LOOP_HAND_OFF", call["env"])
         self.assertIn("This build is a test", call["args"][-1])
         self.assertIn("+++ b/built.txt\n@@ -0,0 +1 @@\n+built\n", changes.read_text())
         self.assertNotIn("first.txt", changes.read_text())
