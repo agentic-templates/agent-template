@@ -52,17 +52,16 @@ done
 # Each case copies this git repository, which holds the tracked files as they are on disk, with one cp, because
 # copying the files one by one took most of a case's time.
 starting_copy=$results/starting-copy
-mkdir "$starting_copy"
 # -f skips the submodules and deleted files that git ls-files also lists. The ShellCheck cases test how scripts/check
 # finds and checks the shell files, and scripts/check's own run checks this repository's files. So their copies leave
 # out the tests and the hooks' checks, which took nine of the eleven seconds of ShellCheck on a copy, as issue #91
-# measured. tar copies the files faster than a cp for each file, and -h copies the file that a symlink points to, as
-# cp does.
+# measured.
 git ls-files -z | while IFS= read -r -d '' file; do
   if [[ -f $file && ! (-n $shellcheck_only && ($file == *.test || $file == *.check)) ]]; then
-    printf '%s\0' "$file"
+    mkdir -p "$starting_copy/$(dirname "$file")"
+    cp -p "$file" "$starting_copy/$file"
   fi
-done | tar -c -h --null -T - -f - | tar -x -p -f - -C "$starting_copy"
+done
 git -C "$starting_copy" init --quiet
 
 # Checks that scripts/check recorded the tree of the copy's files in .git/check-passed if it passed, and nothing if it failed
