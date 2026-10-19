@@ -42,7 +42,7 @@ You need:
 
 4. To get the orchestrator's questions as push notifications on your phone, install the Claude app on the phone and sign in with your Claude Code account. After you start the orchestrator, as the next section describes, type `/remote-control` in its session, and turn on "Push when Claude decides" in `/config`. [Remote Control](https://code.claude.com/docs/en/remote-control) describes both.
 5. Write a compaction sender, so that the orchestrator can shrink its own context when it grows long. The template has none, because the sender belongs in your own Claude Code settings, such as `~/.claude/settings.json`. The sender is a hook that runs on both `Stop` and `StopFailure`, because after a turn that ends in an error, such as one that the safety classifier stops, Claude Code runs only the `StopFailure` hooks. When the hook finds `.loop/compact-request.txt` in the clone's folder, and the file's first line is the id of the hook's session, it types `/compact` into that session with a tool that types into a terminal, such as `tmux send-keys` when you run the orchestrator in tmux. Without a sender, the orchestrator asks you to type `/compact` yourself.
-6. If you have more Claude or Codex accounts for the agents to build on, list them in `.loop/accounts.json`, as `scripts/loop/meter --help` describes. Without the file, the agents build on the account that Claude Code is signed in to.
+6. If you have more Claude or Codex accounts for the agents to build on, list them in `.loop/accounts.json`, as `scripts/loop/meter --help` describes. List the account that Claude Code is signed in to there too, with the entry `{"name": "claude", "tool": "claude"}`, because once the file exists, the agents build only on the accounts that it lists. Without the file, they build on the account that Claude Code is signed in to.
 
 ## From a goal to a release
 
@@ -54,7 +54,12 @@ You need:
 
 2. Ask it: **"Start the loop. The goal: the first version of expense-tracker, which adds an expense, lists the expenses and shows the total for each month."** Include your notes or spec again.
 3. The orchestrator splits the goal into issues of one pull request each, and links each issue to the issues it needs first. It adds the `ready` label to each issue that is clear enough to build. It starts an agent for each ready issue whose blocking issues are closed, as far as your accounts' usage limits allow. Each agent opens a pull request, which merges through the merge queue once its checks pass. When a usage limit stops the work, the orchestrator waits for the reset and goes on.
-4. When the orchestrator needs your decision, it writes the question in an issue with the `needs-decision` label, with the option it recommends, and sends you a push notification if you set them up. Answer in a comment on the issue. `gh issue list --label needs-decision` lists the questions that wait for you.
+4. When the orchestrator needs your decision, it writes the question in an issue with the `needs-decision` label, with the option it recommends, and sends you a push notification if you set them up. Answer in a comment on the issue. To list the questions that wait for you, run:
+
+   ```bash
+   gh issue list --label needs-decision
+   ```
+
 5. When the goal's issue closes, the orchestrator publishes a release. It checks that CI passed on main and that no code scanning or Dependabot alert of high or critical severity is open. Then it publishes the next semantic version, with notes from the merged pull requests.
 
 ## Steer the orchestrator
@@ -75,7 +80,11 @@ You can also ask it:
 - **"Review pull request #12."**
 - **"Review the code for security problems."**
 
-If the orchestrator's Claude Code process ends, such as after a restart of the machine, start it again with `scripts/loop/claude-with-events --resume`, and pick its session.
+If the orchestrator's Claude Code process ends, such as after a restart of the machine, start it again with this command, and pick the orchestrator's session from the list that it shows:
+
+```bash
+scripts/loop/claude-with-events --resume
+```
 
 ## Fix security problems
 
@@ -100,7 +109,7 @@ Issues and pull requests are public, so the orchestrator keeps a security proble
 
 ## How it works
 
-`AGENTS.md` and its guides in `docs/` hold the rules, and [docs/loop.md](docs/loop.md) describes the loop that the orchestrator runs. `scripts/check` runs the checks locally and in CI, and the hooks in `scripts/hooks/` block an agent's risky actions, such as reading `.env`. Once the agents have used a set number of output tokens since the last retrospective, the orchestrator starts a new one. The retrospective is an agent that measures the loop's work with `scripts/loop/report`, and opens a pull request that changes the loop's own rules, checks and agent types.
+`AGENTS.md` and its guides in `docs/` hold the rules, and [docs/loop.md](docs/loop.md) describes the loop that the orchestrator runs. `scripts/check` runs the checks locally and in CI, and the hooks in `scripts/hooks/` block an agent's risky actions, such as reading `.env`. Once `scripts/loop/meter` says that a retrospective is due, the orchestrator starts one. The retrospective is an agent that measures the loop's work with `scripts/loop/report`, and opens a pull request that changes the loop's own rules, checks and agent types.
 
 ## License
 
