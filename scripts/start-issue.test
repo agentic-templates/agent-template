@@ -214,6 +214,16 @@ run_start_issue feature "12-fix-totals 12-round-totals" fail
 expect_result 0 12-fix-totals
 expect_equal "the checked-out commit" "$(head_commit)" "$(github_commit 12-fix-totals)"
 
+# scripts/loop/run-builder picks the same branch, as test_builds_on_the_branch_whose_name_sorts_last_of_two_equally_new
+# in scripts/loop/test_run_builder.py checks.
+begin_case "When the issue has two branches whose latest commits have the same time"
+new_case
+push_to_github 12-fix-totals 2026-05-04T09:30:00Z
+push_to_github 12-round-totals 2026-05-04T09:30:00Z
+run_start_issue feature "12-fix-totals 12-round-totals" fail
+expect_result 0 12-round-totals
+expect_equal "the checked-out commit" "$(head_commit)" "$(github_commit 12-round-totals)"
+
 begin_case "When origin no longer has the branch with the newer commit, and the folder fetched it before"
 new_case
 push_to_github 12-fix-totals 2026-05-04T09:30:00Z

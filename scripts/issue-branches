@@ -28,8 +28,7 @@ issue_branches() {
     }
   }
 }'
-  # A linked branch that was deleted has no ref. The filter keeps each branch at the first place that GitHub lists it,
-  # because scripts/start-issue picks the first listed of the branches whose latest commits are equally new.
+  # A linked branch that was deleted has no ref.
   # shellcheck disable=SC2016 # $repository is a jq variable, which jq expands.
   filter='.data.repository.nameWithOwner as $repository | .data.repository.issueOrPullRequest
     | [(.linkedBranches.nodes[]?.ref | select(.repository.nameWithOwner == $repository) | .name),
