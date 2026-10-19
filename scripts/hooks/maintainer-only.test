@@ -395,6 +395,13 @@ expect_block Bash 'gh repo edit --enable-secret-scanning-push-protection=false' 
 expect_block Bash 'gh repo edit jtmpl/project --enable-advanced-security=false' "$security"
 expect_allow Bash 'gh pr merge 5 --squash'
 expect_allow Bash 'gh pr merge 5 --subject "Allow --admin" --squash'
+# gh reads a value after = as Go's strconv.ParseBool does.
+for value in 1 t T true TRUE True; do
+  expect_block Bash "gh pr merge 5 --admin=$value" "$admin_merge"
+done
+for value in 0 f F false FALSE False; do
+  expect_allow Bash "gh pr merge 5 --squash --admin=$value"
+done
 expect_allow Bash 'gh api repos/jtmpl/project/branches/main/protection'
 expect_allow Bash 'gh api "repos/{owner}/{repo}/rulesets?includes_parents=false"'
 expect_allow Bash 'gh api -X get "repos/{owner}/{repo}/rulesets"'
@@ -428,6 +435,12 @@ expect_block Bash 'gh api -X POST orgs/jtmpl/repos -f name=new -F private=false'
 expect_allow Bash 'gh repo create JTMPL/Listed --public'
 expect_allow Bash 'gh repo create jtmpl/from-url --public'
 expect_allow Bash 'gh repo create jtmpl/secret --private'
+for value in 1 t T true TRUE True; do
+  expect_block Bash "gh repo create jtmpl/new --public=$value" "$(public jtmpl/new)"
+done
+for value in 0 f F false FALSE False; do
+  expect_allow Bash "gh repo create jtmpl/new --public=$value"
+done
 expect_allow Bash 'gh repo view --json visibility'
 
 # Making a gist public
@@ -436,6 +449,23 @@ expect_block Bash 'gh gist create --public notes.md' "$gist"
 expect_block Bash 'gh gist create -p -d Notes notes.md' "$gist"
 expect_allow Bash 'gh gist create notes.md'
 expect_allow Bash 'gh gist create -d --public notes.md'
+# gh reads -p in a word of several short flags, before the first flag that takes a value, which the rest of the word
+# or the next word gives.
+for command in 'gh gist create -wp notes.md' 'gh gist create -pd Notes notes.md' "gh gist create -pd'My notes' notes.md"; do
+  expect_block Bash "$command" "$gist"
+done
+for command in 'gh gist create -dp notes.md' 'gh gist create -d-p notes.md' 'gh gist create --desc=-p notes.md'; do
+  expect_allow Bash "$command"
+done
+for value in 1 t T true TRUE True; do
+  expect_block Bash "gh gist create --public=$value notes.md" "$gist"
+  expect_block Bash "gh gist create -p=$value notes.md" "$gist"
+  expect_block Bash "gh gist create -wp=$value notes.md" "$gist"
+done
+for value in 0 f F false FALSE False; do
+  expect_allow Bash "gh gist create --public=$value notes.md"
+  expect_allow Bash "gh gist create -p=$value notes.md"
+done
 
 # Posting to a repository other than this one, or one that the list names
 expect_block Bash 'gh pr comment 5 -R someone/else --body Hello' "$(other_repository someone/else)"
