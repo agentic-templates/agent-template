@@ -23,7 +23,7 @@ chmod +x "$base/bin/gh"
 PATH=$base/bin:$PATH
 
 not_checked="Blocked: scripts/check hasn't passed on these files. Run it, fix what it reports, and open the pull request again."
-not_committed="Blocked: scripts/check passed on the files on disk, but some of their changes aren't committed. Commit them first, and then run gh pr create in a command of its own."
+not_committed="Blocked: tracked files have changes that aren't committed, so this hook can't tell which files the pull request holds. Commit them first, and then run gh pr create in a command of its own."
 
 # Makes a folder the one that the agent works in, and the one that the cases' own commands, such as git add, run in,
 # so that they act on its files: work_in <folder>
@@ -61,6 +61,17 @@ check_pull_requests() {
   for subcommand in create new; do
     expect_repository_flags 0 "" pr "$subcommand" '--title "Add notes" --body "Closes #1"'
   done
+
+  # A change on disk after the pass on HEAD, which a commit before gh pr create in the same command adds to the pull
+  # request, and a file deleted from disk
+  echo "Probe" >>notes.txt
+  expect_block Bash 'git commit -qam "Add probe" && gh pr create --title "Add notes" --body "Closes #1"' "$not_committed"
+  expect_block Bash 'gh pr create --title "Add notes" --body "Closes #1"' "$not_committed"
+  git checkout --quiet -- notes.txt
+  rm notes.txt
+  expect_block Bash 'git commit -qam "Delete notes" && gh pr create --title "Add notes" --body "Closes #1"' "$not_committed"
+  git checkout --quiet -- notes.txt
+  expect_allow Bash 'gh pr create --title "Add notes" --body "Closes #1"'
 
   # A pass on changes that aren't committed: a change that isn't staged, and a new file that is
   echo "More notes" >>notes.txt
@@ -132,6 +143,16 @@ expect_block Bash 'gh pr create --head first --title "Add notes" --body "Closes 
 expect_block Bash 'gh pr create -H jtmpl:first --title "Add notes" --body "Closes #1"' "$not_checked"
 # With no branch of that name here, the hook has nothing to compare.
 expect_allow Bash 'gh pr create --head missing --title "Add notes" --body "Closes #1"'
+# Changes on disk count only when the pull request's commit is HEAD, because a commit before gh pr create adds them to
+# HEAD's branch. The branch probe adds an empty commit to main, so it has the files of main, which passed.
+git switch --quiet -c probe
+git commit --quiet --allow-empty -m "Probe"
+echo "Probe" >>notes.txt
+expect_block Bash 'gh pr create --title "Add notes" --body "Closes #1"' "$not_committed"
+expect_block Bash 'gh pr create --head probe --title "Add notes" --body "Closes #1"' "$not_committed"
+expect_allow Bash 'gh pr create --head main --title "Add notes" --body "Closes #1"'
+git checkout --quiet -- notes.txt
+git switch --quiet main
 # With no branch after the colon, the pull request's commit is HEAD.
 forget_pass
 expect_block Bash 'gh pr create --head jtmpl: --title "Add notes" --body "Closes #1"' "$not_checked"
