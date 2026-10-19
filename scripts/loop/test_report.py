@@ -791,10 +791,10 @@ class HeavyTest(ReportTest):
         )
 
 
-def meter_reading(minute: float, **numbers: float | None) -> dict[str, Any]:
+def meter_reading(minute: float, cores: int = 10, **numbers: float | None) -> dict[str, Any]:
     """A line of the meter's log, with a machine that gives the numbers, and gives no others."""
     names = ("disk_free_gb", "memory_free_gb", "swap_used_gb", "gpu_percent", "gpu_memory_used_gb", "load")
-    machine = {name: numbers.get(name) for name in names} | {"cores": 10, "gpu_shares_memory": True}
+    machine = {name: numbers.get(name) for name in names} | {"cores": cores, "gpu_shares_memory": True}
     return {"at": at(minute), "account": "claude", "meters": {}, "meters_at_stop": [], "machine": machine}
 
 
@@ -828,7 +828,12 @@ class MachineTest(ReportTest):
     def log_readings(self, *readings: dict[str, Any]) -> None:
         (self.loop / "meter.jsonl").write_text("".join(json.dumps(reading) + "\n" for reading in readings))
 
-    def test_gives_the_median_and_the_worst_of_each_number_and_its_median_by_how_many_agents_ran(self) -> None:
+    def machine_lines(self) -> list[str]:
+        status, lines, errors = self.run_report()
+        self.assertEqual(status, 0, errors)
+        return lines[next(index for index, line in enumerate(lines) if line.startswith("Free disk")) :]
+
+    def test_gives_the_median_and_the_worst_of_each_number_and_its_median_for_each_number_of_agents(self) -> None:
         disk = {0: 100, 8: 98, 12: 97, 17: 95, 20: 96, 40: 90}
         swap = {0: 1, 8: 2, 12: 3, 17: 6, 20: 4, 40: None}
         before_the_time = meter_reading(-10, disk_free_gb=500, swap_used_gb=50)
@@ -836,45 +841,83 @@ class MachineTest(ReportTest):
             before_the_time,
             *[meter_reading(minute, disk_free_gb=disk[minute], swap_used_gb=swap[minute]) for minute in disk],
         )
-        status, lines, errors = self.run_report()
-        self.assertEqual(status, 0, errors)
         self.assertEqual(
-            lines[-6:],
+            self.machine_lines(),
             [
-                (
-                    "Free disk, GB: median 96.5, lowest 90.0, net change -10.0 | median with 1 agent 94.0, 2 agents "
-                    "97.0, 3 or more 95.0"
-                ),
+                "Free disk, GB: median 96.5, lowest 90.0, net change -10.0",
                 "Free memory, GB: no readings",
-                "Swap in use, GB: median 3.0, highest 6.0 | median with 1 agent 2.0, 2 agents 3.0, 3 or more 6.0",
+                "Swap in use, GB: median 3.0, highest 6.0, in use in 100% of the readings",
                 "GPU use, %: no readings",
                 "GPU memory in use, GB: no readings",
                 "Load: no readings",
+                (
+                    "Median with 1 agent, 2 readings: free disk 94.0, free memory none, swap in use 2.0, GPU use none, "
+                    "GPU memory in use none, load none"
+                ),
+                (
+                    "Median with 2 agents, 3 readings: free disk 97.0, free memory none, swap in use 3.0, GPU use "
+                    "none, GPU memory in use none, load none"
+                ),
+                "Median with 3 agents: no readings",
+                (
+                    "Median with 4 agents, 1 reading: free disk 95.0, free memory none, swap in use 6.0, GPU use none, "
+                    "GPU memory in use none, load none"
+                ),
             ],
         )
 
-    def test_says_when_no_reading_ran_with_that_many_agents(self) -> None:
+    def test_gives_the_share_of_the_readings_with_swap_in_use_and_with_a_load_above_the_cores(self) -> None:
+        self.log_readings(
+            meter_reading(8, cores=10, swap_used_gb=0, load=12),
+            meter_reading(12, cores=10, swap_used_gb=0.5, load=10),
+            meter_reading(17, cores=8, swap_used_gb=0, load=4),
+            meter_reading(20, cores=8, swap_used_gb=None, load=9),
+        )
+        lines = self.machine_lines()
+        self.assertIn("Swap in use, GB: median 0.0, highest 0.5, in use in 33% of the readings", lines)
+        self.assertIn("Load: median 9.5, highest 12.0, above the cores in 50% of the readings", lines)
+
+    def test_says_none_for_a_number_that_no_reading_with_that_many_agents_gives(self) -> None:
         self.log_readings(meter_reading(8, load=2.5, gpu_percent=40), meter_reading(12, load=4.5, gpu_percent=None))
         self.assertEqual(
-            self.line("Load"), "Load: median 3.5, highest 4.5 | median with 1 agent 2.5, 2 agents 4.5, 3 or more none"
-        )
-        self.assertEqual(
-            self.line("GPU use"),
-            "GPU use, %: median 40.0, highest 40.0 | median with 1 agent 40.0, 2 agents none, 3 or more none",
+            self.machine_lines()[-2:],
+            [
+                (
+                    "Median with 1 agent, 1 reading: free disk none, free memory none, swap in use none, GPU use 40.0, "
+                    "GPU memory in use none, load 2.5"
+                ),
+                (
+                    "Median with 2 agents, 1 reading: free disk none, free memory none, swap in use none, GPU use "
+                    "none, GPU memory in use none, load 4.5"
+                ),
+            ],
         )
 
     def test_counts_an_agent_without_an_end_line_until_the_last_line_of_its_transcript(self) -> None:
         self.log_readings(meter_reading(40.5, memory_free_gb=12), meter_reading(41.5, memory_free_gb=20))
         self.assertEqual(
-            self.line("Free memory"),
-            "Free memory, GB: median 16.0, lowest 12.0 | median with 1 agent 12.0, 2 agents none, 3 or more none",
+            self.machine_lines()[-1],
+            (
+                "Median with 1 agent, 1 reading: free disk none, free memory 12.0, swap in use none, GPU use none, "
+                "GPU memory in use none, load none"
+            ),
         )
 
     def test_leaves_out_the_time_that_an_agent_waited_for_a_message(self) -> None:
         self.log_agents(start("f", 0), worked("f", (0, 5), (20, 25)))
         self.log_readings(*[meter_reading(minute, load=load) for minute, load in ((3, 1.0), (10, 9.0), (22, 3.0))])
         self.assertEqual(
-            self.line("Load"), "Load: median 3.0, highest 9.0 | median with 1 agent 2.0, 2 agents none, 3 or more none"
+            self.machine_lines()[-1],
+            (
+                "Median with 1 agent, 2 readings: free disk none, free memory none, swap in use none, GPU use none, "
+                "GPU memory in use none, load 2.0"
+            ),
+        )
+
+    def test_gives_no_line_for_a_number_of_agents_when_no_agent_worked_at_any_reading(self) -> None:
+        self.log_readings(meter_reading(50, load=1.0))
+        self.assertEqual(
+            self.machine_lines()[-1], "Load: median 1.0, highest 1.0, above the cores in 0% of the readings"
         )
 
     def test_leaves_out_the_readings_from_before_the_meter_read_the_machine(self) -> None:
