@@ -88,10 +88,11 @@ read_issue_command() {
         continue
         ;;
     esac
-    if asks_gh_for_help; then
+    if stops_for_help; then
       asks_for_help=yes
-      continue
+      break
     fi
+    read_help_flag
     if [[ -n $value_is_next_word ]]; then
       i=$((i + 1))
       value=${command_words[i]:-}

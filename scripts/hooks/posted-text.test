@@ -232,6 +232,11 @@ expect_allow Bash "gh issue comment 7 --body '$semicolon_line' --help"
 # gh reads -eh as -e -h, and -ch as -c -h.
 expect_allow Bash "gh issue comment 7 --body '$semicolon_line' -eh"
 expect_allow Bash "gh pr review 5 --body '$semicolon_line' -ch"
+# gh keeps the last value that the command gives --help, but it reads no flag after -h.
+expect_block Bash "gh issue comment 7 --body '$semicolon_line' --help --help=false" \
+  "$(blocked "gh issue comment" "$(semicolon "The line \"$semicolon_line\"")")"
+expect_allow Bash "gh issue comment 7 --body '$semicolon_line' --help=false --help"
+expect_allow Bash "gh issue comment 7 --body '$semicolon_line' -h --help=false"
 expect_allow Bash "echo gh issue comment 7 --body '$semicolon_line'"
 expect_allow Bash 'gh issue view 7 --comments'
 

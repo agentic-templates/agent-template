@@ -205,6 +205,9 @@ expect_allow Bash 'gh issue create --help'
 expect_allow Bash 'gh issue create -h'
 # gh reads -wh as -w -h.
 expect_allow Bash 'gh issue create -wh'
+# gh keeps the last value that the command gives --help, but it reads no flag after -h.
+expect_block Bash 'gh issue create --help --help=false' "Blocked: the new issue $no_type Add it with --label <label>."
+expect_allow Bash 'gh issue create -h --help=false'
 expect_allow Bash 'gh issue list --label bug'
 expect_allow Bash 'gh issue view 7'
 expect_allow Bash 'echo gh issue create'

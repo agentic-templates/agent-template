@@ -250,6 +250,10 @@ expect_allow Bash "gh pr create --help"
 # gh reads -dh as -d -h, so it shows its help for both.
 expect_allow Bash "gh pr create -d -h"
 expect_allow Bash "gh pr create -dh"
+# gh keeps the last value that the command gives --help, but it reads no flag after -h.
+expect_block Bash "gh pr create --help --help=false" \
+  "Blocked: the command gives no title, so this hook can't check it. Give the title with --title."
+expect_allow Bash "gh pr create -h --help=false"
 expect_allow Bash "gh pr view 7 --json title"
 expect_allow Bash "echo gh pr create --fill"
 
