@@ -712,9 +712,13 @@ class AgentsLineTest(MeterTest):
             "tool_input": {"task_id": "a1"},
             "tool_response": {"task_id": "a1", "task_type": "local_agent"},
         }
+        # scripts/loop/run-builder sets LOOP_RUN for a builder that runs this test, and with it the command writes
+        # nothing.
+        environment = {name: value for name, value in os.environ.items() if name != "LOOP_RUN"}
         stop = subprocess.run(
             ["sh", "-c", command],
             cwd=METER.parents[2],
+            env=environment,
             input=json.dumps(hook_input),
             capture_output=True,
             text=True,
