@@ -41,6 +41,7 @@ hooks_folder=$main_checkout/scripts/hooks
 # TEST_MAIN_RULES lists the checks that the rules for main require, separated by spaces, or says fail.
 # For the repository jtmpl/other in GH_REPO, TEST_OTHER_MAIN_RULES lists them instead.
 # TEST_SCRIPTS_TREE is the tree of the scripts folder that it reports on main of jtmpl/project, or says fail.
+# TEST_GITIGNORE is the blob of .gitignore that it reports there, or is empty for a main without a .gitignore.
 # TEST_PULL_REQUEST says what it reports for pull request 7, or the current branch's: fork, same or fail.
 # It fails for any other pull request, as gh does for one that doesn't exist, and records each call in TEST_GH_CALLS.
 stand_in=$(mktemp -d)
@@ -74,8 +75,13 @@ elif [[ $1 == api && $2 == repos/jtmpl/project/git/trees/main ]]; then
   if [[ $TEST_SCRIPTS_TREE == fail ]]; then
     exit 1
   fi
-  echo "{\"sha\": \"b5e1\", \"tree\": [{\"path\": \"README.md\", \"type\": \"blob\", \"sha\": \"c4f2\"},
-    {\"path\": \"scripts\", \"type\": \"tree\", \"sha\": \"$TEST_SCRIPTS_TREE\"}], \"truncated\": false}"
+  gitignore=""
+  if [[ -n $TEST_GITIGNORE ]]; then
+    gitignore="{\"path\": \".gitignore\", \"mode\": \"100644\", \"type\": \"blob\", \"sha\": \"$TEST_GITIGNORE\"},"
+  fi
+  echo "{\"sha\": \"b5e1\", \"tree\": [$gitignore
+    {\"path\": \"README.md\", \"mode\": \"100644\", \"type\": \"blob\", \"sha\": \"c4f2\"},
+    {\"path\": \"scripts\", \"mode\": \"040000\", \"type\": \"tree\", \"sha\": \"$TEST_SCRIPTS_TREE\"}], \"truncated\": false}"
 elif [[ $1 == api ]]; then
   case $2 in
     "repos/jtmpl/project/rulesets?includes_parents=false") rulesets=$TEST_RULESETS ;;
@@ -106,9 +112,10 @@ PATH=$stand_in:$PATH
 # The rules for main require every check that scripts/configure-github requires, unless a case says otherwise.
 export TEST_GH_CALLS=$stand_in/calls TEST_RULESETS TEST_OTHER_RULESETS TEST_PULL_REQUEST TEST_MAIN_RULES="check title" TEST_OTHER_MAIN_RULES="check title"
 export TEST_CHECKOUT=$test_cwd TEST_OTHER_CLONE=$other_clone
-# GitHub's main has the scripts folder of the main checkout, unless a case says otherwise.
+# GitHub's main has the scripts folder and the .gitignore of the main checkout, unless a case says otherwise.
 TEST_SCRIPTS_TREE=$(git -C "$main_checkout" rev-parse HEAD:scripts)
-export TEST_SCRIPTS_TREE
+TEST_GITIGNORE=$(git -C "$main_checkout" rev-parse HEAD:.gitignore)
+export TEST_SCRIPTS_TREE TEST_GITIGNORE
 unset GH_REPO
 
 # Repeat the affected hook cases with downstream requirements without repeating unrelated maintainer commands.
@@ -249,8 +256,8 @@ expect_from() {
 # on main on GitHub.
 orchestrator=11111111-aaaa-4bbb-8ccc-000000000001
 not_alone="Blocked: the orchestrator runs scripts/configure-github again only in the main checkout, as a command of its own, without a variable, env, bash, sh or a redirection: cd $main_checkout && scripts/configure-github."
-unlike_main="Blocked: the orchestrator runs scripts/configure-github again only while the main checkout's scripts folder, with its untracked files, is the same as on main on GitHub, because a reviewer read each change to it before it merged. Bring the main checkout up to date with git fetch origin && git merge --ff-only origin/main, remove any other change or new file in its scripts folder, and run the script again."
-cannot_compare="Blocked: this hook can't compare the main checkout's scripts folder with the one on main on GitHub, because gh or git failed, or the folder holds a repository of its own. Check that gh can reach GitHub, remove any repository inside the folder, and try again."
+unlike_main="Blocked: the orchestrator runs scripts/configure-github again only while the main checkout's scripts folder, with its untracked files, and its .gitignore are the same as on main on GitHub, because a reviewer read each change to them before it merged. Bring the main checkout up to date with git fetch origin && git merge --ff-only origin/main, undo any other change to its .gitignore and its scripts folder, remove any new file in the folder, also a .gitignore that ignores itself, and run the script again."
+cannot_compare="Blocked: this hook can't compare the main checkout's scripts folder and .gitignore with the ones on main on GitHub, because gh or git failed, or the folder holds a repository of its own. Check that gh can reach GitHub, remove any repository inside the folder, and try again."
 TEST_RULESETS=main TEST_OTHER_RULESETS=main
 # Without a state file, or with one that names no session, no session is the orchestrator's.
 expect_from "$orchestrator" "" scripts/configure-github 2 "$second_run"
@@ -340,6 +347,28 @@ git -C "$main_checkout" checkout --quiet -- scripts/admin-access
 git init --quiet "$main_checkout/scripts/vendor"
 expect_from "$orchestrator" "" scripts/configure-github 2 "$cannot_compare"
 rm -rf "$main_checkout/scripts/vendor"
+# A new file that only a rule outside the scripts folder ignores: a rule in the shared git folder, or a rule in a
+# .gitignore that differs from main's, or in one where main has none
+echo "Notes" >"$main_checkout/scripts/hooks/notes.txt"
+echo "scripts/hooks/notes.txt" >"$main_checkout/.git/info/exclude"
+expect_from "$orchestrator" "" scripts/configure-github 2 "$unlike_main"
+rm "$main_checkout/.git/info/exclude"
+echo "scripts/hooks/notes.txt" >"$folders/excludes"
+git -C "$main_checkout" config core.excludesFile "$folders/excludes"
+expect_from "$orchestrator" "" scripts/configure-github 2 "$unlike_main"
+git -C "$main_checkout" config --unset core.excludesFile
+echo "scripts/hooks/notes.txt" >>"$main_checkout/.gitignore"
+expect_from "$orchestrator" "" scripts/configure-github 2 "$unlike_main"
+git -C "$main_checkout" checkout --quiet -- .gitignore
+rm "$main_checkout/scripts/hooks/notes.txt"
+TEST_GITIGNORE="" expect_from "$orchestrator" "" scripts/configure-github 2 "$unlike_main"
+# A new .gitignore in the folder that ignores itself and the files beside it
+mkdir "$main_checkout/scripts/extra"
+echo "*" >"$main_checkout/scripts/extra/.gitignore"
+echo "echo 'More settings'" >"$main_checkout/scripts/extra/settings.bash"
+expect_from "$orchestrator" "" scripts/configure-github 2 "$unlike_main"
+rm -r "$main_checkout/scripts/extra"
+expect_from "$orchestrator" "" scripts/configure-github 0 ""
 # A builder commits a change to the script in its worktree, moves origin/main to the commit, which every worktree can
 # do, because they share the git folder, and checks the script out in the main checkout.
 echo "# A change that hasn't merged" >>"$worktree/scripts/configure-github"

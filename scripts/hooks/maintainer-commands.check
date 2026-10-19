@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Blocks the commands that wait for a maintainer:
 # - running scripts/configure-github again on a repository whose settings were applied, unless the orchestrator's
-#   session runs it in the main checkout, as a command of its own, while the checkout's scripts folder is the same as on
-#   the repository's main on GitHub, because a reviewer read each change to it before it merged. The repository is the
-#   one that the script would change. No hook protects the state file, which names the orchestrator's session, so a
+#   session runs it in the main checkout, as a command of its own, while the checkout's scripts folder and .gitignore
+#   are the same as on the repository's main on GitHub, because a reviewer read each change to them before it merged.
+#   The repository is the one that the script would change. No hook protects the state file, which names the orchestrator's session, so a
 #   builder that scripts/loop/run-builder started, which has a session id of its own, could write its id there and
 #   count as the orchestrator.
 # - checking out, fetching or merging a pull request from a fork, because a checkout brings in the pull
@@ -193,11 +193,13 @@ runs_alone_in_main_checkout() {
     $(other_command_count) == 1 ]]
 }
 
-# Prints the tree of the scripts folder on the main branch of a repository on GitHub: github_scripts_tree <owner/name>
-github_scripts_tree() {
+# Prints the tree of the scripts folder on the main branch of a repository on GitHub, and on the next line the mode and
+# blob of its .gitignore, or an empty line when main has none: scripts_and_gitignore_on_github <owner/name>
+scripts_and_gitignore_on_github() {
   local answer
   answer=$(gh api "repos/$1/git/trees/main" 2>/dev/null) || return 1
-  jq -r -e '.tree[] | select(.path == "scripts" and .type == "tree") | .sha' <<<"$answer"
+  jq -r '(first(.tree[] | select(.path == "scripts" and .type == "tree") | .sha) // error("main has no scripts folder")),
+    (first(.tree[] | select(.path == ".gitignore") | "\(.mode) \(.sha)") // "")' <<<"$answer" 2>/dev/null
 }
 
 # Prints an entry for git update-index -z --index-info for each path that standard input lists, separated by NUL
@@ -237,16 +239,20 @@ disk_entries() {
   done <<<"$blobs"
 }
 
-# Prints the tree of a checkout's scripts folder as it is on disk: the files of HEAD and the ones that git doesn't track,
-# other than the ones that it ignores, as disk_entries finds them. It lists them with an index that it reads from HEAD,
-# rather than with a copy of the checkout's index, which can hold flags, such as assume-unchanged and skip-worktree,
-# that make git skip a file that differs: scripts_tree_on_disk <checkout>
+# Prints the tree of a checkout's scripts folder as it is on disk, as disk_entries finds the files: the files of HEAD,
+# the ones that git doesn't track, other than the ones that a .gitignore ignores, and each .gitignore, also one that
+# ignores itself. It lists them with an index that it reads from HEAD, rather than with a copy of the checkout's index,
+# which can hold flags, such as assume-unchanged and skip-worktree, that make git skip a file that differs. It reads
+# only the rules of .gitignore files, which scripts_and_gitignore_on_disk compares with main's, and not the ones of the
+# shared git folder: scripts_tree_on_disk <checkout>
 scripts_tree_on_disk() {
   local folder status=0
   folder=$(mktemp -d) || return 1
   if ! GIT_INDEX_FILE=$folder/head-index git -C "$1" read-tree HEAD 2>/dev/null ||
-    ! GIT_INDEX_FILE=$folder/head-index git -C "$1" ls-files -z --cached --others --exclude-standard -- scripts \
-      >"$folder/paths" 2>/dev/null ||
+    ! GIT_INDEX_FILE=$folder/head-index git -C "$1" ls-files -z --cached --others --exclude-per-directory=.gitignore \
+      -- scripts >"$folder/paths" 2>/dev/null ||
+    ! GIT_INDEX_FILE=$folder/head-index git -C "$1" ls-files -z --others -- ':(glob)scripts/**/.gitignore' \
+      >>"$folder/paths" 2>/dev/null ||
     ! disk_entries "$1" <"$folder/paths" >"$folder/entries" ||
     ! GIT_INDEX_FILE=$folder/disk-index git -C "$1" update-index -z --index-info <"$folder/entries" 2>/dev/null ||
     ! GIT_INDEX_FILE=$folder/disk-index git -C "$1" write-tree --prefix=scripts/ 2>/dev/null; then
@@ -256,9 +262,19 @@ scripts_tree_on_disk() {
   return "$status"
 }
 
+# Prints the tree of a checkout's scripts folder and the mode and blob of its .gitignore, as they are on disk, in the
+# form of scripts_and_gitignore_on_github. The .gitignore counts, because its rules decide which new files in the
+# scripts folder scripts_tree_on_disk leaves out: scripts_and_gitignore_on_disk <checkout>
+scripts_and_gitignore_on_disk() {
+  local tree entry
+  tree=$(scripts_tree_on_disk "$1") || return 1
+  entry=$(printf '.gitignore\0' | disk_entries "$1" | tr '\0' '\n') || return 1
+  printf '%s\n%s\n' "$tree" "${entry%%$'\t'*}"
+}
+
 # Blocks the orchestrator's run of scripts/configure-github, unless it runs alone in the main checkout while the
-# checkout's scripts folder is the same as on the repository's main on GitHub. Each worktree can move origin/main,
-# because they share the git folder, so the hook asks GitHub:
+# checkout's scripts folder and .gitignore are the same as on the repository's main on GitHub. Each worktree can move
+# origin/main, because they share the git folder, so the hook asks GitHub:
 # check_orchestrators_run <owner/name> <number of the words before the command's name>
 check_orchestrators_run() {
   local main on_github on_disk
@@ -266,11 +282,11 @@ check_orchestrators_run() {
   if [[ -z $main ]] || ! runs_alone_in_main_checkout "$main" "$2"; then
     block "Blocked: the orchestrator runs scripts/configure-github again only in the main checkout, as a command of its own, without a variable, env, bash, sh or a redirection: cd ${main:-<main checkout>} && scripts/configure-github."
   fi
-  if ! on_github=$(github_scripts_tree "$1") || ! on_disk=$(scripts_tree_on_disk "$main"); then
-    block "Blocked: this hook can't compare the main checkout's scripts folder with the one on main on GitHub, because gh or git failed, or the folder holds a repository of its own. Check that gh can reach GitHub, remove any repository inside the folder, and try again."
+  if ! on_github=$(scripts_and_gitignore_on_github "$1") || ! on_disk=$(scripts_and_gitignore_on_disk "$main"); then
+    block "Blocked: this hook can't compare the main checkout's scripts folder and .gitignore with the ones on main on GitHub, because gh or git failed, or the folder holds a repository of its own. Check that gh can reach GitHub, remove any repository inside the folder, and try again."
   fi
   if [[ $on_github != "$on_disk" ]]; then
-    block "Blocked: the orchestrator runs scripts/configure-github again only while the main checkout's scripts folder, with its untracked files, is the same as on main on GitHub, because a reviewer read each change to it before it merged. Bring the main checkout up to date with git fetch origin && git merge --ff-only origin/main, remove any other change or new file in its scripts folder, and run the script again."
+    block "Blocked: the orchestrator runs scripts/configure-github again only while the main checkout's scripts folder, with its untracked files, and its .gitignore are the same as on main on GitHub, because a reviewer read each change to them before it merged. Bring the main checkout up to date with git fetch origin && git merge --ff-only origin/main, undo any other change to its .gitignore and its scripts folder, remove any new file in the folder, also a .gitignore that ignores itself, and run the script again."
   fi
 }
 
