@@ -623,10 +623,12 @@ class AgentsLineTest(MeterTest):
     def agents(self) -> str:
         return self.run_meter()[1][-2]
 
-    def log(self, event: str, agent_id: str, agent_type: str = "builder", issue: int | None = 12) -> None:
+    def log(
+        self, event: str, agent_id: str, agent_type: str = "builder", issue: int | None = 12, pid: int | None = None
+    ) -> None:
         line: dict[str, Any] = {"at": "2026-10-18T02:00:00-04:00", "event": event, "id": agent_id}
         if event == "start":
-            line |= {"type": agent_type, "issue": issue, "test": False}
+            line |= {"type": agent_type, "issue": issue, "test": False, "pid": pid}
         else:
             line |= {"minutes": 1.0}
         with (self.loop / "agents.jsonl").open("a") as handle:
@@ -682,6 +684,32 @@ class AgentsLineTest(MeterTest):
 
     def test_says_when_no_agent_runs_without_a_log(self) -> None:
         self.assertEqual(self.agents(), "agents | none running")
+
+    def test_leaves_out_an_agent_whose_process_ended_and_lists_one_whose_process_runs_or_is_unknown(self) -> None:
+        self.log("start", "toolu_01", issue=64, pid=101)
+        self.log("start", "toolu_02", issue=65, pid=102)
+        self.log("start", "64-20261018-020000", issue=64, pid=103)
+        self.log("start", "65-20261018-020000", issue=65, pid=104)
+        self.log("start", "toolu_03", issue=66)
+        with mock.patch.object(meter, "process_runs", lambda pid: pid in (102, 104)):
+            self.assertEqual(
+                self.agents(),
+                "agents | builder #65 context unknown | builder #65 context unknown | builder #66 context unknown",
+            )
+
+
+class ProcessTest(unittest.TestCase):
+    def test_says_that_a_process_runs(self) -> None:
+        self.assertTrue(meter.process_runs(os.getpid()))
+
+    def test_says_that_a_process_that_ended_does_not_run(self) -> None:
+        ended = subprocess.Popen([sys.executable, "-S", "-c", ""])
+        ended.wait()
+        self.assertFalse(meter.process_runs(ended.pid))
+
+    def test_says_that_a_process_of_another_user_runs(self) -> None:
+        # The system's first process belongs to root, so a signal to it fails for any other user.
+        self.assertTrue(meter.process_runs(1))
 
 
 class ContextTest(MeterTest):
