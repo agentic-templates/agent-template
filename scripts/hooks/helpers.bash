@@ -231,8 +231,9 @@ read_tool_paths() {
 
 # Changes command_folder as a cd command in command_words would, or empties it when the hook can't tell the folder,
 # such as when the target doesn't exist yet, or a variable other than HOME decides it. command_folder is the folder
-# that the next simple command runs in. A check sets it to ${cwd:-$PWD} before the first one, because Cursor doesn't
-# send the folder the agent works in, and then the hook's own folder counts.
+# that the next simple command runs in, and split_simple_commands keeps a cd in a subshell inside it. A check sets it
+# to ${cwd:-$PWD} before the first simple command, because Cursor doesn't send the folder the agent works in, and then
+# the hook's own folder counts.
 follow_cd() {
   if [[ ${command_words[0]} != cd ]]; then
     return 0
@@ -539,10 +540,18 @@ check_heredoc_substitutions() {
       index=$((index + 1))
     elif [[ $char == '`' || ($char == '$' && $next == '(') ]]; then
       read_substitution "$text" "$index"
-      split_simple_commands "$function" "$substitution_body"
+      split_substitution "$function" "$substitution_body"
       index=$substitution_end
     fi
   done
+}
+
+# Splits the command of a substitution, which runs in a shell of its own, so that a cd in it changes the folder of
+# the next simple command, which follow_cd keeps, only inside it: split_substitution <function> <command>
+split_substitution() {
+  local outer_folder=${command_folder-}
+  split_simple_commands "$@"
+  command_folder=$outer_folder
 }
 
 # Splits shell text and checks each simple command, including commands inside substitutions:
@@ -569,13 +578,15 @@ for_each_simple_command() {
 # holds them as pairs: the operator, such as < or 2>, then its target. The array simple_command_words holds the
 # words, which block logs. block can't read the array words, because some checks have a local array of that name.
 # It leaves substitution text in the surrounding word, because body checks inspect the original text.
+# A cd between ( and ) changes the folder that follow_cd keeps only until the ), because the commands between them run
+# in a shell of their own.
 split_simple_commands() {
   local function=$1 text=$2
   local length=${#text} i char next
   local word="" has_word=false quote="" descriptor="" operator="" starts_redirection word_may_expand=""
   local substitution_body substitution_end rest chunk
   local -a redirections=()
-  local -a words=() words_may_expand=() simple_command_words=()
+  local -a words=() words_may_expand=() simple_command_words=() outer_folders=()
 
   for ((i = 0; i <= length; i++)); do
     # Inside quotes, the text up to the next character that matters joins the word in one step, because adding one
@@ -612,7 +623,7 @@ split_simple_commands() {
 
     if [[ $quote != "'" && ($char == '`' || ($char == '$' && $next == '(')) ]]; then
       read_substitution "$text" "$i"
-      split_simple_commands "$function" "$substitution_body"
+      split_substitution "$function" "$substitution_body"
       word+=${text:i:substitution_end-i+1}
       has_word=true
       i=$substitution_end
@@ -703,6 +714,12 @@ split_simple_commands() {
       words_may_expand=()
       redirections=()
       operator=""
+      if [[ $char == '(' ]]; then
+        outer_folders+=("${command_folder-}")
+      elif [[ $char == ')' ]] && ((${#outer_folders[@]} > 0)); then
+        command_folder=${outer_folders[${#outer_folders[@]} - 1]}
+        unset 'outer_folders[${#outer_folders[@]} - 1]'
+      fi
     fi
   done
 }

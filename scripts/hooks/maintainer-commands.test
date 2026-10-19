@@ -169,9 +169,11 @@ TEST_RULESETS=none TEST_OTHER_RULESETS=main
 for command in "${runs_on_the_other[@]}"; do
   expect_block Bash "$command" "$second_run"
 done
-# Only a cd before the script changes the folder that the script runs in.
+# Only a cd before the script, outside a subshell, changes the folder that the script runs in.
 TEST_RULESETS=main TEST_OTHER_RULESETS=none
 expect_block Bash "scripts/configure-github; cd '$other_clone'" "$second_run"
+expect_block Bash "(cd '$other_clone') && scripts/configure-github" "$second_run"
+expect_block Bash "folder=\$(cd '$other_clone' && pwd) && scripts/configure-github" "$second_run"
 # gh can't name the repository of a folder that isn't a clone.
 expect_allow Bash "cd '$folders' && scripts/configure-github"
 

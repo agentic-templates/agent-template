@@ -37,7 +37,7 @@ PATH=$base/bin:$PATH
 ask="Ask the maintainer, and go on with the other work."
 
 # The messages that block an action: sudo_message <command>, machine <command>, settings_file <path as written>,
-# deleting <command> <what it deletes>, public <repository> and other_repository <repository>
+# git_config <option>, deleting <command> <what it deletes>, public <repository> and other_repository <repository>
 sudo_message() {
   echo "Blocked: $1 runs a command as another user, such as the machine's administrator, and only the maintainer may change the machine's settings or security. Do the work without $1, such as in the repository or a temporary folder, or ask the maintainer."
 }
@@ -46,6 +46,9 @@ machine() {
 }
 settings_file() {
   echo "Blocked: $1 holds settings of the machine or of a tool, and only the maintainer may change them. $ask"
+}
+git_config() {
+  echo "Blocked: git config $1 changes the settings of git outside this repository, and only the maintainer may change them. $ask"
 }
 deleting() {
   echo "Blocked: $1 would delete $2, and only the maintainer may delete outside the repository, its worktrees and the temporary folders. Delete only inside them, or ask the maintainer."
@@ -58,7 +61,7 @@ other_repository() {
 }
 environment="Blocked: this command prints the whole environment, which holds tokens. Print only the variables you need, by name, as in printenv PATH."
 no_verify="Blocked: --no-verify skips the pre-push hook, which scans the push for leaks. Push without it. If the scan finds a leak, take it out of the commits."
-push_to_url="Blocked: this pushes to a URL instead of a remote, and only the maintainer may push to another repository. Push to a remote that git remote -v lists, such as origin, or ask the maintainer."
+push_to_url="Blocked: this pushes to a URL instead of a remote, and only the maintainer may do that. Push to a remote that git remote -v lists, such as origin, or ask the maintainer."
 admin_merge="Blocked: --admin merges the pull request without the checks that main requires, and only the maintainer may skip them. Merge without --admin, so that the merge waits for the checks."
 security="Blocked: this changes the repository's rules or security settings, and only the maintainer may do that. $ask"
 
@@ -97,7 +100,8 @@ expect_allow Bash 'sysctl -n hw.ncpu'
 expect_allow Bash 'networksetup -listallhardwareports'
 expect_allow Bash 'pmset -g'
 
-# Writing a settings file in the home folder, with a redirection, tee or the agent's file-writing tool
+# Writing a settings file in the home folder, with a redirection, a command that writes files or the agent's
+# file-writing tool
 expect_block Bash "echo 'export DEBUG=1' >> ~/.zshrc" "$(settings_file '~/.zshrc')"
 expect_block Bash 'echo "[user]" | tee -a ~/.gitconfig' "$(settings_file '~/.gitconfig')"
 # shellcheck disable=SC2016 # The command is the text that the agent sends, so $HOME stays as written.
@@ -110,7 +114,36 @@ expect_block Write "$test_home/Library/LaunchAgents/com.example.plist" \
   "$(settings_file "$test_home/Library/LaunchAgents/com.example.plist")"
 expect_block apply_patch $'*** Begin Patch\n*** Add File: '"$test_home"$'/.codex/config.toml\n+model = "gpt-5"\n*** End Patch\n' \
   "$(settings_file "$test_home/.codex/config.toml")"
+expect_block Bash 'cp settings.json ~/.claude/settings.json' "$(settings_file '~/.claude/settings.json')"
+expect_block Bash 'mv new.zshrc ~/.zshrc' "$(settings_file '~/.zshrc')"
+expect_block Bash 'install -m 644 zshrc ~/.zshrc' "$(settings_file '~/.zshrc')"
+# shellcheck disable=SC2016 # The command is the text that the agent sends, so $PWD stays as written.
+expect_block Bash 'ln -sf "$PWD/zshrc" ~/.zshrc' "$(settings_file '~/.zshrc')"
+expect_block Bash 'cp -t ~/.config/git ignore' "$(settings_file '~/.config/git/ignore')"
+expect_block Bash "sed -i '' 's/a/b/' ~/.zshrc" "$(settings_file '~/.zshrc')"
+expect_block Bash "sed -i 's/a/b/' ~/.bashrc" "$(settings_file '~/.bashrc')"
+expect_block Bash "sed -i.bak -e 's/a/b/' ~/.gitconfig" "$(settings_file '~/.gitconfig')"
+expect_block Bash "sed --in-place=.bak 's/a/b/' ~/.profile" "$(settings_file '~/.profile')"
+expect_block Bash "perl -pi -e 's/a/b/' ~/.zshrc" "$(settings_file '~/.zshrc')"
+expect_block Bash 'git config --global user.email agent@example.com' "$(git_config --global)"
+expect_block Bash 'git config --system core.editor vim' "$(git_config --system)"
+expect_block Bash 'git config set --global user.name Agent' "$(git_config --global)"
+expect_block Bash 'git -C . config --global --unset user.email' "$(git_config --global)"
+expect_block Bash 'git config --global --add safe.directory /tmp/project' "$(git_config --global)"
 expect_allow Bash 'echo done > ~/.cache/notes.txt'
+expect_allow Bash 'cp ~/.zshrc zshrc.backup'
+expect_allow Bash 'cp settings.json /tmp/settings.json'
+expect_allow Bash 'mv notes.txt ~/notes.txt'
+expect_allow Bash 'ln -s ~/.zshrc'
+expect_allow Bash "sed 's/a/b/' ~/.zshrc"
+expect_allow Bash "sed -i '' 's/a/b/' notes.txt"
+expect_allow Bash "perl -pe 's/a/b/' ~/.zshrc"
+expect_allow Bash "perl -Ilib -e 'print 1' ~/.zshrc"
+expect_allow Bash 'git config --global user.email'
+expect_allow Bash 'git config --global --get user.email'
+expect_allow Bash 'git config get --global user.email'
+expect_allow Bash 'git config --global --list'
+expect_allow Bash 'git config user.email agent@example.com'
 expect_allow Bash 'cat ~/.zshrc'
 expect_allow Bash 'echo "*.log" > .gitignore'
 expect_allow Write "$test_home/notes/todo.md"
@@ -124,6 +157,10 @@ expect_block apply_patch $'*** Begin Patch\n*** Add File: ../.bashrc\n+alias ll=
   "$(settings_file ../.bashrc)"
 expect_block Bash 'cd ~ && echo "alias ll=\"ls -l\"" >> .bashrc' "$(settings_file .bashrc)"
 expect_allow Bash 'echo "alias ll=\"ls -l\"" >> .bashrc'
+# cp, mv, install and ln write into the folder that their last word names.
+expect_block Bash 'cp .zshrc ~' "$(settings_file '~/.zshrc')"
+expect_block Bash 'mv ../dotfiles/.vimrc ~/' "$(settings_file '~/.vimrc')"
+expect_allow Bash 'cp notes.txt ~'
 test_home=/home-for-tests/someone test_cwd=$project
 
 # Deleting outside the repository's worktrees and the temporary folders
@@ -150,6 +187,13 @@ expect_allow Bash 'cd "$folder" && rm -rf build'
 expect_allow Bash 'find /tmp -name "*.log" -delete'
 expect_allow Bash 'find ~ -name "*.log"'
 expect_allow Bash 'git rm -r ~/notes'
+# A cd in a subshell changes the folder only inside it.
+expect_block Bash '(cd /usr && rm -rf share)' "$(deleting rm share)"
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so $( ) and the backticks stay as written.
+expect_allow Bash 'folder=$(cd /usr && pwd); rm -rf build'
+# shellcheck disable=SC2016
+expect_allow Bash 'echo "`cd /usr && pwd`" && rm -rf build'
+expect_allow Bash '(cd /usr) && rm -rf build'
 hooks_folder=$own_hooks test_cwd=$own_checkout
 expect_allow Bash 'rm -rf build'
 expect_allow Bash "rm -rf '$own_checkout/.claude/worktrees/issue-1'"
@@ -195,7 +239,10 @@ expect_allow Bash 'gh pr merge 5 --subject "Allow --admin" --squash'
 expect_allow Bash 'gh api repos/jtmpl/project/branches/main/protection'
 expect_allow Bash 'gh api "repos/{owner}/{repo}/rulesets?includes_parents=false"'
 expect_allow Bash 'gh api -X get "repos/{owner}/{repo}/rulesets"'
+expect_block Bash 'gh repo deploy-key add key.pub --title CI' "$security"
+expect_block Bash 'gh repo deploy-key delete 12345' "$security"
 expect_allow Bash 'gh repo edit --enable-secret-scanning-push-protection'
+expect_allow Bash 'gh repo deploy-key list'
 
 # Making a repository public, before and after the list of allowed repositories names it
 publishing=(
@@ -224,6 +271,13 @@ expect_allow Bash 'gh repo create jtmpl/from-url --public'
 expect_allow Bash 'gh repo create jtmpl/secret --private'
 expect_allow Bash 'gh repo view --json visibility'
 
+# Making a gist public
+gist="Blocked: this makes a gist public, and only the maintainer may make something public outside this repository. $ask"
+expect_block Bash 'gh gist create --public notes.md' "$gist"
+expect_block Bash 'gh gist create -p -d Notes notes.md' "$gist"
+expect_allow Bash 'gh gist create notes.md'
+expect_allow Bash 'gh gist create -d --public notes.md'
+
 # Posting to a repository other than this one, or one that the list names
 expect_block Bash 'gh pr comment 5 -R someone/else --body Hello' "$(other_repository someone/else)"
 expect_block Bash 'gh issue comment -Rsomeone/else 5 --body Hello' "$(other_repository someone/else)"
@@ -235,17 +289,45 @@ expect_block Bash 'gh api -X POST repos/someone/else/issues -f title=Bug -f body
   "$(other_repository someone/else)"
 expect_block Bash 'gh repo edit someone/else --description "A project"' "$(other_repository someone/else)"
 expect_block Bash 'gh repo archive someone/else --yes' "$(other_repository someone/else)"
+expect_block Bash 'gh pr comment --body Thanks https://github.com/someone/else/pull/5' "$(other_repository someone/else)"
+expect_block Bash 'gh issue close --comment Done https://github.com/someone/else/issues/5' \
+  "$(other_repository someone/else)"
+expect_block Bash 'GH_REPO=someone/else gh issue comment 5 --body Hello' "$(other_repository someone/else)"
+expect_block Bash 'env GH_REPO=someone/else gh pr comment 5 --body Hello' "$(other_repository someone/else)"
+expect_block Bash 'GH_REPO=someone/else gh api -X POST "repos/{owner}/{repo}/issues/5/comments" -f body=Thanks' \
+  "$(other_repository someone/else)"
 expect_allow Bash 'gh pr comment 5 -R jtmpl/project --body Hello'
 expect_allow Bash 'gh pr comment 5 -R JTMPL/Project --body Hello'
 expect_allow Bash 'gh pr comment 5 --body Hello'
 expect_allow Bash 'gh pr comment 5 -R jtmpl/listed --body Hello'
 expect_allow Bash 'gh issue comment 5 --body "The same bug: https://github.com/someone/else/issues/9"'
+expect_allow Bash 'gh issue comment 5 --body https://github.com/someone/else/issues/9'
+expect_allow Bash 'GH_REPO=jtmpl/project gh pr comment 5 --body Hello'
+expect_allow Bash 'GH_REPO=someone/else gh pr comment 5 -R jtmpl/project --body Hello'
 expect_allow Bash 'gh api -X POST "repos/{owner}/{repo}/issues/5/comments" -f body=Thanks'
 expect_allow Bash 'gh pr list --repo someone/else'
 expect_allow Bash 'gh pr view 42 -R someone/else'
 expect_allow Bash 'gh api repos/someone/else/issues'
 # shellcheck disable=SC2016 # The command is the text that the agent sends, so $repo stays as written.
 expect_allow Bash 'gh pr comment 5 -R "$repo" --body Hello'
+# Without a repository, gh posts to the one that origin names in the folder it runs in.
+other_clone=$base/other
+git init --quiet "$other_clone"
+git -C "$other_clone" remote add origin https://github.com/someone/else.git
+expect_block Bash "cd '$other_clone' && gh issue comment 5 --body Hello" "$(other_repository someone/else)"
+expect_block Bash "cd '$other_clone' && gh api -X POST 'repos/{owner}/{repo}/issues' -f title=Bug" \
+  "$(other_repository someone/else)"
+test_cwd=$other_clone
+expect_block Bash 'gh pr comment 5 --body Hello' "$(other_repository someone/else)"
+test_cwd=$project
+expect_allow Bash "(cd '$other_clone' && gh pr list) && gh pr comment 5 --body Hello"
+expect_allow Bash "cd '$base' && gh issue comment 5 --body Hello"
+# shellcheck disable=SC2016 # The command is the text that the agent sends, so $folder stays as written.
+expect_allow Bash 'cd "$folder" && gh issue comment 5 --body Hello'
+local_clone=$base/local-clone
+git init --quiet "$local_clone"
+git -C "$local_clone" remote add origin "$base/origin.git"
+expect_allow Bash "cd '$local_clone' && gh issue comment 5 --body Hello"
 
 # A worktree reads the list in the main checkout.
 worktree=$base/worktree
