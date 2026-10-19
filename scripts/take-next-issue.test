@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests scripts/take-next-issue with a stand-in for gh. The script runs scripts/pull-request-state, which asks the
-# stand-in too.
+# Tests scripts/take-next-issue on a copy of it and the scripts it runs, in a repository that the test makes, with a
+# stand-in for gh. The script runs scripts/pull-request-state, which asks the stand-in too.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -18,6 +18,8 @@ case_folder=$base/case
 #   prints it, or with nothing when the issue has no such file
 # - the command that reads an issue's labels, with feature and ready, or with only feature when the issue is in the
 #   file lost-ready
+# - the command that lists an issue's branches, with the file branches-<issue>, or with nothing when the issue has no
+#   such file
 # It accepts the commands that assign an issue to the current account and remove that assignment, and writes each one
 # to the file edits, one to a line. It fails the commands that start with TEST_FAILING_CALL, as gh does without the
 # network, and every command it doesn't know.
@@ -51,6 +53,11 @@ case "$*" in
       echo ready
     fi
     ;;
+  "issue develop --list "*)
+    if [[ -f $folder/branches-$4 ]]; then
+      cat "$folder/branches-$4"
+    fi
+    ;;
   "issue edit "*" --add-assignee @me" | "issue edit "*" --remove-assignee @me") ;;
   *)
     echo "The stand-in for gh doesn't answer: gh $*" >&2
@@ -62,9 +69,18 @@ chmod +x "$base/bin/gh"
 
 tab=$'\t'
 
-# Starts a case with no ready issue.
+# The repository with copies of the scripts, so that a case can give it a worktree.
+repo=$base/repo
+git init --quiet --initial-branch=main "$repo"
+mkdir "$repo/scripts"
+cp scripts/take-next-issue scripts/ready-issues scripts/issue-labels scripts/pull-request-state "$repo/scripts/"
+git -C "$repo" add --all
+git -C "$repo" commit --quiet -m "feat: take the next ready issue"
+
+# Starts a case with no ready issue, and no worktree besides the repository's main folder.
 new_case() {
-  rm -rf "$case_folder"
+  rm -rf "$case_folder" "$base/worktree"
+  git -C "$repo" worktree prune
   mkdir -p "$case_folder"
   : >"$case_folder/issues"
   : >"$case_folder/edits"
@@ -102,12 +118,22 @@ set_pull_request_state() {
   esac
 }
 
+# Gives an issue a branch, which a worktree has checked out if the last argument is checked-out:
+# add_branch <issue> <branch> [checked-out]
+add_branch() {
+  printf '%s\n' "$2${tab}https://github.com/owner/repo/tree/$2" >>"$case_folder/branches-$1"
+  git -C "$repo" branch --quiet --force "$2"
+  if [[ ${3:-} == checked-out ]]; then
+    git -C "$repo" worktree add --quiet "$base/worktree" "$2"
+  fi
+}
+
 # Runs scripts/take-next-issue with the arguments, and sets status, output and edits, the gh issue edit commands that
 # gh carried out: run_take_next_issue [<argument>...]
 run_take_next_issue() {
   status=0
   output=$(TEST_CASE_FOLDER=$case_folder TEST_FAILING_CALL=${failing_call:-} PATH=$base/bin:$PATH \
-    scripts/take-next-issue "$@" 2>&1) || status=$?
+    "$repo/scripts/take-next-issue" "$@" 2>&1) || status=$?
   edits=$(<"$case_folder/edits")
 }
 
@@ -209,6 +235,21 @@ expect_result "When scripts/pull-request-state prints left behind for the lower-
 
 new_case
 add_issue 12 0 0 0 feature
+add_branch 12 12-fix-totals checked-out
+add_issue 15 0 0 0 feature
+run_take_next_issue
+expect_result "When a worktree has a branch of the lower-numbered issue checked out" 0 "15 other" "$assign_15"
+
+new_case
+add_issue 12 0 0 0 feature
+add_branch 12 12-fix-totals
+add_branch 12 12-round-totals
+add_issue 15 0 0 0 feature
+run_take_next_issue
+expect_result "When no worktree has a branch of the lower-numbered issue checked out" 0 "12 other" "$assign_12"
+
+new_case
+add_issue 12 0 0 0 feature
 add_issue 15 0 0 0 feature
 add_issue 17 0 0 0 feature
 run_take_next_issue 12 15
@@ -264,6 +305,13 @@ failing_call="api graphql"
 run_take_next_issue
 expect_result "When scripts/pull-request-state fails" 1 \
   "error: can't list the pull requests of issue #12, because gh failed: error connecting to api.github.com" ""
+
+new_case
+add_issue 12 0 0 0 feature
+failing_call="issue develop"
+run_take_next_issue
+expect_result "When gh can't list the branches of the issue" 1 \
+  "error: can't list the branches of issue #12, because gh failed: error connecting to api.github.com" ""
 
 new_case
 add_issue 12 0 0 0 feature

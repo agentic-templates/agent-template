@@ -9,8 +9,8 @@
 # - several: there's more than one.
 # - left behind <number>: there's one, which is neither of the above.
 # - none: there's none.
-# It asks gh about the repository of this checkout, or the one in GH_REPO. scripts/start-build-run,
-# scripts/take-next-issue and scripts/build-run-report run it.
+# It asks gh about the repository of this checkout, or the one in GH_REPO. scripts/start-build-run
+# and scripts/take-next-issue run it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

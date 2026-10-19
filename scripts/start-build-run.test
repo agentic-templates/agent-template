@@ -152,17 +152,15 @@ new_repository() {
 }
 
 # Runs scripts/start-build-run in the repository, and sets status, output, calls, the gh issue edit and gh pr merge
-# commands it ran, and the times before and after the run: run_start_build_run [<NAME=value>...]
+# commands it ran: run_start_build_run [<NAME=value>...]
 # Each NAME=value sets one of the stand-in's TEST_ variables, which are empty otherwise, except TEST_MAIN_RULES,
 # which lists the checks that scripts/configure-github requires.
 run_start_build_run() {
   status=0
   : >"$base/calls"
-  before=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   output=$(env TEST_ASSIGNED_ISSUES="" TEST_READY_ISSUES="" TEST_MAIN_RULES="check title" TEST_PULL_REQUESTS="" \
     TEST_ISSUE_BRANCHES="" TEST_FAILING_CALL="" "$@" TEST_GH_CALLS="$base/calls" PATH="$base/bin:$PATH" \
     "$repo/scripts/start-build-run" 2>&1) || status=$?
-  after=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   calls=$(<"$base/calls")
 }
 
@@ -194,11 +192,6 @@ new_repository
 begin_case "When no ready issue is assigned, no pull request is open and no worktree holds a ready issue's branch"
 run_start_build_run
 expect_result 0 "" ""
-record="$repo/$(git -C "$repo" rev-parse --git-path build-run-start)"
-recorded=$(cat "$record" 2>/dev/null || true)
-if [[ ! $recorded =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ || $recorded < $before || $recorded > $after ]]; then
-  report "scripts/start-build-run must record the time it starts in $record in UTC, between $before and $after, but the file holds \"$recorded\"."
-fi
 
 begin_case "When ready issues are assigned whose pull requests are merging, stopped, left behind, several or none"
 run_start_build_run TEST_ASSIGNED_ISSUES="12 13 14 15 16"

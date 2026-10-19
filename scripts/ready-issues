@@ -1,7 +1,6 @@
 # shellcheck shell=bash
-# Functions that read the open ready issues and say why a builder can't start one, for scripts/take-next-issue and
-# scripts/build-run-report. They ask gh about the repository of this checkout, or the one in GH_REPO. Run them from
-# the repository's root.
+# Functions that read the open ready issues and say why a builder can't start one, for scripts/take-next-issue. They
+# ask gh about the repository of this checkout, or the one in GH_REPO. Run them from the repository's root.
 # shellcheck source=scripts/issue-labels
 source scripts/issue-labels
 
