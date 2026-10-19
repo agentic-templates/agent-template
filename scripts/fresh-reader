@@ -31,8 +31,8 @@ if [[ ! -f $page ]]; then
 fi
 
 # Outside a clone with origin/main, or for a page that git doesn't track, the reader gets the whole page and no lines.
-# Until the resolution of a merge conflict in the page is staged, git lists the page once for each side of the conflict,
-# and --deduplicate lists it once.
+# Until the resolution of a merge conflict in the page is staged, git lists the page once for each stage of the
+# conflict, up to three times, and --deduplicate lists it once.
 new_lines=""
 if branch_start=$(git merge-base HEAD origin/main 2>/dev/null) &&
   path=$(git --literal-pathspecs ls-files --full-name --deduplicate -- "$page" 2>/dev/null) && [[ -n $path ]]; then

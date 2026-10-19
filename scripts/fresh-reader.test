@@ -287,7 +287,8 @@ run_fresh_reader "$reader" docs/spending.md
 expect_input "When the branch renamed the page and committed it" "$renamed_input"
 
 # The branch and another branch each add a line at the end of the page, and the branch merges the other one, which
-# stops with a conflict in the page. git lists such a page once for each side of the conflict until it's staged.
+# stops with a conflict in the page. git lists such a page once for each stage of the conflict, up
+# to three times, until it's staged.
 new_case 0
 before_conflict=$(git -C "$base/project" rev-parse HEAD)
 git -C "$base/project" switch --quiet --create 13-export
