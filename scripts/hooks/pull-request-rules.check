@@ -4,7 +4,7 @@
 # scripts/check-pull-request on its title, body, branch and commits. The message gives the scripts' errors. It also
 # blocks a pull request that isn't a draft and changes a file that scripts/consequential-paths lists, because a reviewer
 # reads that change before it merges, and the after-tool hook turns on auto-merge for every pull request that isn't a
-# draft.
+# draft. When a pull request has both problems, one message names both.
 # - The hook reads the title from --title, and the body as read_body in helpers.bash reads it, as the command writes
 #   them, without running $( ) or filling in variables. It blocks a command that gives no title or no body, such as
 #   one with --fill.
@@ -55,7 +55,7 @@ consequential_files() {
 }
 
 check_gh_pr_create() {
-  local files
+  local message
   if ! opens_pull_request; then
     return 0
   fi
@@ -69,19 +69,34 @@ check_gh_pr_create() {
   if ! find_commits; then
     return 0
   fi
-  if [[ -z $pr_is_draft ]]; then
-    files=$(consequential_files)
-    if [[ -n $files ]]; then
-      block "Blocked: this pull request changes files that a reviewer reads before the change merges: ${files//$'\n'/, }. Run gh pr create again with --draft, so that it waits for the review, and say in your report that it's a draft."
-    fi
+  # One block names both problems, so that the agent fixes them in one try.
+  message=$(
+    draft_message
+    title_job_message "gh pr create"
+  )
+  if [[ -n $message ]]; then
+    block "$message"
   fi
-  block_if_title_job_fails "gh pr create"
+}
+
+# Prints the message that blocks a pull request that isn't a draft and changes files that scripts/consequential-paths
+# lists, and prints nothing for any other pull request.
+draft_message() {
+  local files
+  if [[ -n $pr_is_draft ]]; then
+    return 0
+  fi
+  files=$(consequential_files)
+  if [[ -n $files ]]; then
+    printf '%s\n' "Blocked: this pull request changes files that a reviewer reads before the change merges: ${files//$'\n'/, }. Run gh pr create again with --draft, so that it waits for the review, and say in your report that it's a draft."
+  fi
 }
 
 # The flags of gh pr edit that take a value, as gh pr edit --help lists them.
 pr_edit_flags_with_value=" --add-assignee --add-label --add-project --add-reviewer --attach -B --base -b --body -F --body-file -m --milestone --remove-assignee --remove-label --remove-project --remove-reviewer -t --title -R --repo "
 
 check_gh_pr_edit() {
+  local message
   if ! edits_pull_request_text; then
     return 0
   fi
@@ -92,7 +107,10 @@ check_gh_pr_edit() {
     read_body "the pull request's body"
   fi
   if can_check_as_title_job; then
-    block_if_title_job_fails "gh pr edit"
+    message=$(title_job_message "gh pr edit")
+    if [[ -n $message ]]; then
+      block "$message"
+    fi
   else
     block_if_given_text_fails
   fi
@@ -132,7 +150,7 @@ block_if_given_text_fails() {
     fi
   )
   if [[ -n $problems ]]; then
-    block_with_problems "Blocked: the text that this command would post has these problems:" "$problems" "gh pr edit"
+    block "$(problems_message "Blocked: the text that this command would post has these problems:" "$problems" "gh pr edit")"
   fi
 }
 
@@ -168,12 +186,12 @@ read_edited_pull_request() {
   fi
 }
 
-# Blocks the command when the title job in .github/workflows/pr-title.yml would fail on the pull request, with a message
-# that gives the errors of scripts/check-title and scripts/check-pull-request:
-# block_if_title_job_fails <command, such as gh pr create>
+# Prints the message that blocks the command when the title job in .github/workflows/pr-title.yml would fail on the
+# pull request, which gives the errors of scripts/check-title and scripts/check-pull-request, and prints nothing when
+# the job would pass: title_job_message <command, such as gh pr create>
 # The pull request has the title pr_title, the body body, the branch head_branch, and the commits from base_commit to
 # head_commit.
-block_if_title_job_fails() {
+title_job_message() {
   local problems="" output
   # The subshells drop the trap, which would otherwise turn every exit code of the scripts into 1.
   if ! output=$(trap - ERR && TITLE=$pr_title "$scripts_folder/check-title" 2>&1); then
@@ -187,17 +205,17 @@ block_if_title_job_fails() {
   fi
   # The scripts mark each error for GitHub Actions.
   problems=${problems//::error::/}
-  block_with_problems "Blocked: the checks on pull requests in CI would fail on this one:" "${problems%$'\n'}" "$1"
+  problems_message "Blocked: the checks on pull requests in CI would fail on this one:" "${problems%$'\n'}" "$1"
 }
 
-# Blocks the command with a message that lists the problems that the hook found in it:
-# block_with_problems <first line> <problems, one to a line> <command, such as gh pr create>
-block_with_problems() {
+# Prints the message that lists the problems that the hook found in the command:
+# problems_message <first line> <problems, one to a line> <command, such as gh pr create>
+problems_message() {
   local message="$1"$'\n'"$2"$'\n'"Fix each problem, and run $3 again."
   if [[ -n $body_may_expand || -n $pr_title_may_expand ]]; then
     message+=" This hook reads the title and body as the command writes them, without running \$( ) or filling in variables."
   fi
-  block "$message"
+  printf '%s\n' "$message"
 }
 
 check_simple_command() {
