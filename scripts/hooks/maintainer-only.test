@@ -61,6 +61,9 @@ other_repository() {
   echo "Blocked: this posts to $1, which isn't this repository, and only the maintainer may post to another repository. $test_repositories"
 }
 list_names="bash -c 'compgen -e'"
+env_option() {
+  echo "Blocked: the hooks can't tell which command env runs after its option $1, so they can't check that command. Run the command without that option. The hooks read only env's options -i, -0, -u, -C, -P and -v, and their long forms."
+}
 environment="Blocked: this command prints the whole environment, which holds tokens. Print only the variables you need, by name, as in printenv PATH. To list the variables' names without their values, run $list_names."
 no_verify="Blocked: --no-verify skips the pre-push hook, which scans the push for leaks. Push without it. If the scan finds a leak, take it out of the commits."
 push_to_url="Blocked: this pushes to a URL instead of a remote, and only the maintainer may do that. Push to a remote that git remote -v lists, such as origin, or ask the maintainer."
@@ -197,6 +200,12 @@ expect_allow Bash 'folder=$(cd /usr && pwd); rm -rf build'
 # shellcheck disable=SC2016
 expect_allow Bash 'echo "`cd /usr && pwd`" && rm -rf build'
 expect_allow Bash '(cd /usr) && rm -rf build'
+# env -C runs only the command after it in another folder.
+expect_block Bash 'env -C /usr rm -rf share' "$(deleting rm share)"
+expect_block Bash 'env -C / rm -rf usr/share' "$(deleting rm usr/share)"
+expect_block Bash 'env -iC/usr rm -rf share' "$(deleting rm share)"
+expect_block Bash 'env --chdir=/usr rm -rf share' "$(deleting rm share)"
+expect_allow Bash 'env -C /usr true && rm -rf build'
 hooks_folder=$own_hooks test_cwd=$own_checkout
 expect_allow Bash 'rm -rf build'
 expect_allow Bash "rm -rf '$own_checkout/.claude/worktrees/issue-1'"
@@ -215,13 +224,17 @@ expect_block Bash 'env | cut -d= -f1' "$environment"
 expect_block Bash 'env -u CLAUDECODE' "$environment"
 expect_block Bash 'env -0u CLAUDECODE FOO=1' "$environment"
 expect_block Bash 'env --unset CLAUDECODE' "$environment"
-expect_block Bash 'env --env0-from variables' "$environment"
+expect_block Bash 'env --env0-from variables' "$(env_option --env0-from)"
 expect_allow Bash 'printenv HOME'
 expect_allow Bash "$list_names"
 expect_allow Bash 'env FOO=1 make test'
 expect_allow Bash 'env -u GH_TOKEN make test'
 expect_allow Bash 'env -u CLAUDECODE claude -p hello'
-expect_allow Bash "env -S 'claude -p hello'"
+expect_allow Bash 'env --ignore-environment --null --debug -P /usr/bin --unset=GH_TOKEN -- make test'
+# env runs the command in the value of -S, and GNU's env reads --uns as --unset.
+expect_block Bash "env -S 'claude -p hello'" "$(env_option -S)"
+expect_block Bash 'env -Sgit push --no-verify' "$(env_option -Sgit)"
+expect_block Bash 'env --uns CLAUDECODE git push --no-verify' "$(env_option --uns)"
 # shellcheck disable=SC2016 # The command is the text that the agent sends, so $PATH stays as written.
 expect_allow Bash 'echo "$PATH"'
 
@@ -230,6 +243,8 @@ expect_block Bash 'git push --no-verify origin main' "$no_verify"
 expect_block Bash 'git -C . push --no-verify' "$no_verify"
 expect_block Bash 'env -u CLAUDECODE git push --no-verify' "$no_verify"
 expect_block Bash '/usr/bin/env -C build git push --no-verify' "$no_verify"
+# env reads each word with = before the command as a variable to set.
+expect_block Bash 'env x.y=1 git push --no-verify' "$no_verify"
 expect_block Bash 'git push https://github.com/someone/else.git main' "$push_to_url"
 expect_block Bash 'git push git@github.com:someone/else.git HEAD' "$push_to_url"
 expect_block Bash 'git push -o ci.skip ssh://git@github.com/jtmpl/project.git HEAD' "$push_to_url"
