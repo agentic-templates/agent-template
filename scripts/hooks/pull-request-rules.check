@@ -7,10 +7,9 @@
 # - The hook reads the title from --title, and the body as read_body in helpers.bash reads it, as the command writes
 #   them, without running $( ) or filling in variables. It blocks a command that gives no title or no body, such as
 #   one with --fill.
-# - The pull request's commits are those on its branch, the one that --head names or HEAD, that aren't on the base
-#   branch on GitHub. The base branch is the one that --base names, or the one that origin/HEAD points to, and the
-#   hook fetches it from origin first. It allows the command when it can't find those commits, such as outside a
-#   git repository, before the branch exists here, or after a cd to a folder that it can't tell.
+# - The pull request's commits are those that find_commits in helpers.bash finds. The hook allows the command when it
+#   can't find them, such as outside a git repository, before the branch exists here, or after a cd to a folder that
+#   it can't tell.
 # - A relative path to a body file starts from the folder that gh runs in, and git finds the repository from it. That's
 #   the folder the agent works in, or the one that a cd before gh changes to, as follow_cd in helpers.bash finds it.
 # shellcheck source=scripts/hooks/helpers.bash
@@ -21,25 +20,6 @@ source "${BASH_SOURCE[0]%/*}/helpers.bash"
 scripts_folder=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
 
 no_title="Blocked: the command gives no title, so this hook can't check it. Give the title with --title."
-
-# Sets base_commit and head_commit to the commits that the pull request compares, or fails when it can't find them.
-find_commits() {
-  local base_branch head_ref=HEAD
-  base_branch=$pr_base
-  if [[ -z $base_branch ]]; then
-    base_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD) || return 1
-    base_branch=${base_branch#origin/}
-  fi
-  # The local copy of the base branch can be older than GitHub's. The commits that GitHub's has and the local copy
-  # doesn't would then count as the pull request's own, and so would the files that they change.
-  GIT_TERMINAL_PROMPT=0 git fetch --quiet origin "$base_branch" >/dev/null 2>&1 || true
-  base_commit=$(git rev-parse --verify --quiet "refs/remotes/origin/$base_branch^{commit}") || return 1
-  # --head can name the branch as <user>:<branch>.
-  if [[ -n $pr_head ]]; then
-    head_ref=refs/heads/${pr_head#*:}
-  fi
-  head_commit=$(git rev-parse --verify --quiet "$head_ref^{commit}") || return 1
-}
 
 # Prints each file that the pull request changes and scripts/consequential-paths lists, one to a line.
 consequential_files() {

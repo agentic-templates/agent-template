@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# Tests scripts/hooks/unread-pages.check, on records that scripts/fresh-reader writes with a stand-in for claude.
+# The cases run the check alone, so that the other checks on gh pr create, which need a title, a body and a pass of
+# scripts/check, don't decide them.
+set -euo pipefail
+# shellcheck source=scripts/hooks/testing.bash
+source "${BASH_SOURCE[0]%/*}/testing.bash"
+fresh_reader=${hooks_folder%/hooks}/fresh-reader
+
+# The cases run in repositories in a temporary folder, and git looks for no repository above it.
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+export GIT_CEILING_DIRECTORIES=$base
+# git reads none of the person's settings, such as one that signs each commit, and commits as a stand-in person.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
+# A stand-in for claude, first on the PATH, that gives scripts/fresh-reader the reader's answer.
+mkdir "$base/bin"
+printf '#!/usr/bin/env bash\necho "The reader found nothing to change."\n' >"$base/bin/claude"
+chmod +x "$base/bin/claude"
+PATH=$base/bin:$PATH
+
+# A folder for a PATH with the commands that the check runs, but no claude
+no_claude=$base/no-claude
+mkdir "$no_claude"
+for command in bash jq git grep; do
+  ln -s "$(command -v "$command")" "$no_claude/$command"
+done
+
+create='gh pr create --title "docs: say how the loop runs" --body "Closes #1"'
+
+# Makes a folder the one that the agent works in: work_in <folder>
+work_in() {
+  test_cwd=$1
+  cd "$1"
+}
+
+# Prints the message that blocks a pull request with pages that no reader has read: unread <page>...
+unread() {
+  local page
+  echo "Blocked: this pull request adds or rewrites text in pages that no fresh reader has read as they are now. Give each page to a reader, as \"Review a changed page with a fresh reader\" in docs/pages.md describes:"
+  for page in "$@"; do
+    echo "scripts/fresh-reader \"<reader>\" $page"
+  done
+  echo "If you change a page after the reader read it, run its command again. Then commit the pages, and run gh pr create in a command of its own."
+}
+
+# Prints the message that blocks a pull request while pages have changes that aren't committed:
+# uncommitted <the pages, separated by commas>
+uncommitted() {
+  echo "Blocked: these pages have changes that aren't committed, so this hook can't tell which text the pull request holds: $1. Commit them first, and then run gh pr create in a command of its own."
+}
+
+# Runs the check on a command from the folder that the agent works in, and checks its exit code and message:
+# expect_check <command> <exit code> <message>
+expect_check() {
+  hook_status=0
+  hook_message=$(run_check unread-pages "$(sample_input claude-code Bash "$1")" 2>&1 >/dev/null) || hook_status=$?
+  expect_result "In $test_cwd, unread-pages.check for \"$1\"" "$2" "$3"
+}
+
+# Gives a page to a reader with scripts/fresh-reader, in the folder that the agent works in: read_page <page>
+read_page() {
+  "$fresh_reader" "a developer who runs the loop" "$1" >/dev/null
+}
+
+# Commits every change in the folder that the agent works in: commit_all <message>
+commit_all() {
+  git add --all
+  git commit --quiet -m "$1"
+}
+
+# A repository on GitHub, as a bare repository, whose main has README.md and two pages in docs/, and a clone of it
+origin=$base/origin.git
+clone=$base/clone
+git init --quiet --bare --initial-branch=main "$origin"
+git init --quiet --initial-branch=main "$base/seed"
+mkdir "$base/seed/docs"
+printf '%s\n' "# Loop" "Run the loop to build the ready issues." >"$base/seed/README.md"
+printf '%s\n' "# Run the loop" "The orchestrator starts a builder for each issue." "It merges each pull request." >"$base/seed/docs/loop.md"
+printf '%s\n' "# Pages" "Give each changed page to a fresh reader." >"$base/seed/docs/pages.md"
+git -C "$base/seed" add --all
+git -C "$base/seed" commit --quiet -m "docs: describe the loop"
+git -C "$base/seed" push --quiet "$origin" main
+git clone --quiet "$origin" "$clone"
+work_in "$clone"
+
+# A branch that rewrites a line of docs/loop.md. After the reader reads the page, the check allows the pull request,
+# until the page changes again.
+git switch --quiet -c rewrite main
+sed 's/^It merges each pull request\.$/It merges each pull request through the merge queue./' docs/loop.md >"$base/loop.md"
+mv "$base/loop.md" docs/loop.md
+commit_all "docs: say how the loop merges"
+expect_check "$create" 2 "$(unread docs/loop.md)"
+expect_check 'gh pr new --title "docs: say how the loop runs" --body "Closes #1"' 2 "$(unread docs/loop.md)"
+read_page docs/loop.md
+expect_check "$create" 0 ""
+echo "It waits for the checks." >>docs/loop.md
+commit_all "docs: say that the loop waits for the checks"
+expect_check "$create" 2 "$(unread docs/loop.md)"
+
+# The pages' paths start from the top of the repository, also in a folder inside it.
+work_in "$clone/docs"
+expect_check "$create" 2 "$(unread docs/loop.md)"
+work_in "$clone"
+
+# Without claude, scripts/fresh-reader can't run, and docs/pages.md has the agent give the page to another reader.
+path_with_claude=$PATH
+PATH=$no_claude
+expect_check "$create" 0 ""
+PATH=$path_with_claude
+
+# A branch that adds text to README.md. A reader who reads the page before it's committed reads what the commit holds.
+git switch --quiet -c readme main
+echo "Each builder works in a worktree of its own." >>README.md
+commit_all "docs: say where the builders work"
+expect_check "$create" 2 "$(unread README.md)"
+echo "Each builder opens a pull request." >>README.md
+read_page README.md
+commit_all "docs: say what each builder opens"
+expect_check "$create" 0 ""
+
+# A branch that only deletes lines from pages, and one that only renames a page
+git switch --quiet -c deletions main
+sed '/^It merges each pull request\.$/d' docs/loop.md >"$base/loop.md"
+mv "$base/loop.md" docs/loop.md
+sed '/^Run the loop/d' README.md >"$base/README.md"
+mv "$base/README.md" README.md
+commit_all "docs: leave out what the loop merges"
+expect_check "$create" 0 ""
+git switch --quiet -c renamed main
+git mv docs/pages.md docs/writing.md
+commit_all "docs: rename the pages guide"
+expect_check "$create" 0 ""
+# The renamed page with a new line needs a reader under its new name.
+echo "Then rewrite each sentence that the reader found unclear." >>docs/writing.md
+commit_all "docs: say what to do with the reader's answer"
+expect_check "$create" 2 "$(unread docs/writing.md)"
+read_page docs/writing.md
+expect_check "$create" 0 ""
+
+# Changes that aren't committed count, because a command such as git commit -am ... && gh pr create commits them before
+# gh pr create runs, and the check runs before the command. A committed line that no reader read, with a line on disk
+# that the reader read with it, needs only the commit, and then gh pr create in a command of its own.
+git switch --quiet -c on-disk main
+echo "It starts a builder for each ready issue." >>docs/loop.md
+commit_all "docs: say which issues the loop builds"
+echo "It waits for the checks." >>docs/loop.md
+read_page docs/loop.md
+commit_and_create="git commit -qam 'docs: say what the loop waits for' && $create"
+expect_check "$commit_and_create" 2 "$(uncommitted docs/loop.md)"
+read_page docs/loop.md
+expect_check "$commit_and_create" 2 "$(uncommitted docs/loop.md)"
+commit_all "docs: say that the loop waits for the checks"
+expect_check "$create" 0 ""
+# A line on disk that no reader read, after the reader read the committed page
+echo "It merges each pull request through the merge queue." >>docs/loop.md
+expect_check "$commit_and_create" 2 "$(unread docs/loop.md)"
+expect_check "$create" 2 "$(unread docs/loop.md)"
+read_page docs/loop.md
+expect_check "$create" 2 "$(uncommitted docs/loop.md)"
+git checkout --quiet -- docs/loop.md
+
+# A page that the branch's commits don't change counts once it changes on disk. A change on disk that only deletes lines
+# needs no reader, but it needs the commit.
+echo "Each builder works in a worktree of its own." >>README.md
+expect_check "$commit_and_create" 2 "$(unread README.md)"
+git checkout --quiet -- README.md
+sed '/^Run the loop/d' README.md >"$base/README.md"
+mv "$base/README.md" README.md
+expect_check "$create" 2 "$(uncommitted README.md)"
+# The pages on disk aren't those of the branch that --head names.
+expect_check 'gh pr create --head readme --title "docs: say where the builders work" --body "Closes #1"' 0 ""
+git checkout --quiet -- README.md
+
+# A branch that adds text to README.md, to a page in a folder inside docs/, to a file in docs/ that isn't Markdown, and
+# to a file outside docs/. Each page that no reader has read is in the message.
+git switch --quiet -c pages main
+mkdir docs/guide
+echo "Install jq and gh." >docs/guide/setup.md
+echo "<svg></svg>" >docs/loop.svg
+echo "Notes" >notes.txt
+echo "Each builder works in a worktree of its own." >>README.md
+commit_all "docs: say how to set up the loop"
+expect_check "$create" 2 "$(unread README.md docs/guide/setup.md)"
+read_page README.md
+expect_check "$create" 2 "$(unread docs/guide/setup.md)"
+
+# The branch that --head names, alone or after a person's name and a colon
+git switch --quiet main
+expect_check "$create" 0 ""
+expect_check 'gh pr create --head pages --title "docs: say how to set up the loop" --body "Closes #1"' 2 "$(unread docs/guide/setup.md)"
+expect_check 'gh pr create -H jtmpl:deletions --title "docs: leave out what the loop merges" --body "Closes #1"' 0 ""
+
+# A worktree has a record of its own, so the pages that the reader read in the clone don't count there. A cd before
+# gh pr create changes the folder whose record counts.
+worktree=$base/worktree
+git worktree add --quiet --detach "$worktree" pages
+expect_check "cd $worktree && $create" 2 "$(unread README.md docs/guide/setup.md)"
+work_in "$worktree"
+expect_check "$create" 2 "$(unread README.md docs/guide/setup.md)"
+read_page README.md
+read_page docs/guide/setup.md
+expect_check "$create" 0 ""
+
+# When the check can't find the pull request's commits, it has nothing to check them with: with no branch of the name
+# that --head names, in a repository without origin, and outside a git repository.
+work_in "$clone"
+expect_check 'gh pr create --head missing --title "docs: say how the loop runs" --body "Closes #1"' 0 ""
+git init --quiet --initial-branch=main "$base/no-remote"
+work_in "$base/no-remote"
+echo "Notes" >README.md
+commit_all "docs: start the notes"
+expect_check "$create" 0 ""
+mkdir "$base/outside"
+work_in "$base/outside"
+expect_check "$create" 0 ""
+
+finish_tests
