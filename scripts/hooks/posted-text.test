@@ -4,14 +4,12 @@ set -euo pipefail
 # shellcheck source=scripts/hooks/testing.bash
 source "${BASH_SOURCE[0]%/*}/testing.bash"
 
-# The agent works in a project in a temporary home folder. Cursor sends no folder, so its hook runs in the test's own
-# folder, which is the project too.
+# The agent works in a project in a temporary home folder.
 folders=$(CDPATH='' cd -- "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$folders"' EXIT
 test_home=$folders/home
 test_cwd=$test_home/project
 mkdir -p "$test_cwd" "$folders/bin"
-cd "$test_cwd"
 
 # A stand-in for gh, first on the PATH, that fails, as gh does without a network. The other checks then ask nothing
 # of GitHub, and allow these commands.

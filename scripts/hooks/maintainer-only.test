@@ -24,8 +24,6 @@ git -C "$project" commit --quiet --allow-empty -m Start
 cp -R "${hooks_folder%/*}" "$project/scripts"
 hooks_folder=$project/scripts/hooks
 test_cwd=$project
-# Cursor sends no folder, so its hook runs in the test's own folder.
-cd "$project"
 
 # A stand-in for gh, first on the PATH, that fails, as gh does without a network. The other checks then ask nothing
 # of GitHub, and allow these commands.

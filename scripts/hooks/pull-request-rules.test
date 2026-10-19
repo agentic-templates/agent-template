@@ -45,8 +45,8 @@ draft_needed() {
   printf '%s\n' "Blocked: this pull request changes files that a reviewer reads before the change merges: $1. Run gh pr create again with --draft, so that it waits for the review, and say in your report that it's a draft."
 }
 
-# Makes a folder the one that the agent works in. Cursor doesn't send that folder, so the hook uses its own,
-# which is this script's: work_in <folder>
+# Makes a folder the one that the agent works in, and the one that the cases' own commands, such as git add, run in,
+# so that they act on its files: work_in <folder>
 work_in() {
   test_cwd=$1
   cd "$1"

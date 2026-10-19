@@ -13,8 +13,6 @@ test_home=$folders/home
 test_cwd=$folders/project
 other_clone=$test_home/test-repositories/other
 mkdir -p "$test_cwd" "$other_clone"
-# Cursor sends no folder, so its hook runs in the test's own folder.
-cd "$test_cwd"
 
 # A stand-in for gh, first on the PATH, so that the cases ask nothing of GitHub.
 # It answers gh repo view by GH_REPO when it's set, so that the cases show that the hook passes GH_REPO on as the
