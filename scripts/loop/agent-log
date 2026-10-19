@@ -4,6 +4,8 @@ Claude Code sends a hook on standard input:
 
   scripts/loop/agent-log start   before an Agent call, which scripts/hooks/before-tool passes on
   scripts/loop/agent-log end     when an agent ends, from the SubagentStop command in .claude/settings.json
+  scripts/loop/agent-log stop    after a TaskStop call, from its PostToolUse command in .claude/settings.json, because
+                                 Claude Code sends no SubagentStop for an agent that TaskStop stops
 
 scripts/loop/agent_log.py describes the lines. An agent that no Agent call started, such as one that a skill or Claude
 Code itself starts, gets no line. Neither does an agent that a run of scripts/loop/run-builder starts, because the
@@ -27,18 +29,21 @@ DEFAULT_TYPE = "general-purpose"
 GH_TIMEOUT_SECONDS = 10
 # os.kill takes 0 and negative numbers as groups of processes, so a process id must be positive.
 PROCESS_ID = re.compile(r"[1-9][0-9]*")
+# The id that Claude Code gives an agent, which names its transcript, agent-<id>.jsonl. An id must name no other file.
+AGENT_ID = re.compile(r"[0-9a-z]+")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="scripts/loop/agent-log", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("event", choices=("start", "end"))
+    lines = {"start": start_line, "end": end_line, "stop": stopped_line}
+    parser.add_argument("event", choices=lines)
     event = parser.parse_args(argv).event
     hook_input: dict[str, Any] = json.load(sys.stdin)
     if os.environ.get(agent_log.RUN_VARIABLE):
         return 0
-    line = start_line(hook_input) if event == "start" else end_line(hook_input)
+    line = lines[event](hook_input)
     if line is not None:
         agent_log.append(line)
     return 0
@@ -83,7 +88,25 @@ def end_line(hook_input: dict[str, Any]) -> dict[str, Any] | None:
     # Claude Code's own agents, such as the one that suggests prompts, end with an empty type.
     if not hook_input.get("agent_type"):
         return None
-    transcript = Path(hook_input["agent_transcript_path"]).expanduser()
+    return transcript_end_line(Path(hook_input["agent_transcript_path"]).expanduser())
+
+
+def stopped_line(hook_input: dict[str, Any]) -> dict[str, Any] | None:
+    """The end line of the agent that a TaskStop call stopped. A task that isn't an agent of the session, such as a
+    command that runs in the background, has no transcript in the session's folder, and gets no line."""
+    response = hook_input["tool_response"]
+    task_id = response.get("task_id") if isinstance(response, dict) else None
+    if not isinstance(task_id, str) or not AGENT_ID.fullmatch(task_id):
+        return None
+    # Claude Code keeps the transcripts of a session's agents in a folder named after the session's transcript.
+    session = Path(hook_input["transcript_path"]).expanduser()
+    transcript = session.with_suffix("") / "subagents" / f"agent-{task_id}.jsonl"
+    if not transcript.with_suffix(".meta.json").exists():
+        return None
+    return transcript_end_line(transcript)
+
+
+def transcript_end_line(transcript: Path) -> dict[str, Any] | None:
     # Claude Code keeps the id of the Agent call that started the agent, the agent's own worktree, and at times its
     # model and effort, next to the agent's transcript.
     meta = json.loads(transcript.with_suffix(".meta.json").read_text())
