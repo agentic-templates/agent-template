@@ -296,11 +296,10 @@ git_options_with_value=" -C -c --git-dir --work-tree --namespace --config-env --
 # Reads the options at the start of a git command, before its subcommand, and sets these variables:
 # - git_folder: the options that make git work in the same repository as the command, starting from the agent's folder:
 #   each -C, --git-dir and --work-tree
-# - git_setting_names: the name of each setting that -c <name>=<value> or --config-env=<name>=<variable> gives
 # - git_subcommand: the index of the word after the options, such as push
 read_git_options() {
   local i=1 word option value
-  git_folder=(-C "${cwd:-.}") git_setting_names=()
+  git_folder=(-C "${cwd:-.}")
   while [[ ${command_words[i]:-} == -* ]]; do
     word=${command_words[i]}
     # git runs these as its subcommand help or version, with the words after them as its arguments.
@@ -318,26 +317,10 @@ read_git_options() {
       # git takes each -C relative to the folder before it, and a relative --git-dir or --work-tree relative to the
       # folder after every -C, so a check that asks git about the command's repository passes these on in their order.
       -C | --git-dir | --work-tree) git_folder+=("$option" "$value") ;;
-      -c | --config-env) git_setting_names+=("${value%%=*}") ;;
     esac
     i=$((i + 1))
   done
   git_subcommand=$i
-}
-
-# Succeeds if a -c or --config-env option that read_git_options read gives a setting: gives_git_setting <name>
-# It compares the names in any case, because git reads the section and the key of a name, as in core.hooksPath, in any
-# case.
-gives_git_setting() {
-  local name gives=1
-  shopt -s nocasematch
-  for name in ${git_setting_names[@]+"${git_setting_names[@]}"}; do
-    if [[ $name == "$1" ]]; then
-      gives=0
-    fi
-  done
-  shopt -u nocasematch
-  return $gives
 }
 
 # The flags of git push that take a value, as git push -h lists them.
@@ -372,6 +355,8 @@ read_push_arguments() {
 
 # Moves repository flags between a gh command group and its subcommand just after the subcommand,
 # so that the checks read the same words and flags in either position. Other flags and groups stay as written.
+# A repository flag gives the repository in the next word, as in -R jtmpl/other, or in the same word, as in
+# -Rjtmpl/other, -R=jtmpl/other or --repo=jtmpl/other.
 move_gh_repository_flags() {
   local index=2
   if ((${#command_words[@]} < 3)) || [[ ${command_words[0]##*/} != gh ]]; then
@@ -384,7 +369,7 @@ move_gh_repository_flags() {
   while ((index < ${#command_words[@]})); do
     case ${command_words[index]} in
       -R | --repo) index=$((index + 2)) ;;
-      --repo=*) index=$((index + 1)) ;;
+      -R?* | --repo=*) index=$((index + 1)) ;;
       *) break ;;
     esac
   done
@@ -412,11 +397,12 @@ pr_close_flags_with_value=" -c --comment -R --repo "
 # - repository: --repo and the value of -R or --repo, or empty, as in --repo jtmpl/other for -dRjtmpl/other
 # - target: the words that name the argument to other gh commands: the argument, and the words in repository
 # - flags: the words that start with a dash, as the command writes them, such as -cn or --title=Title
-# - flag_values: for each word in flags, the next word when it's the value of the word's last flag, or empty
+# - last_flags: for each word in flags, its last flag, such as -n of -cn or --title of --title=Title
+# - flag_values: for each word in flags, the value of its last flag, from the same word or the next, or empty
 # read_arguments <index> <flags that take a value>
 read_arguments() {
   local i word flag value value_is_next_word flags_before
-  argument="" repository=() target=() flags=() flag_values=()
+  argument="" repository=() target=() flags=() last_flags=() flag_values=()
   for ((i = $1; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
     if [[ $word != -* ]]; then
@@ -427,14 +413,13 @@ read_arguments() {
       continue
     fi
     split_flag_word "$word" "$2"
-    flags+=("$word")
     if [[ -n $value_is_next_word ]]; then
       i=$((i + 1))
       value=${command_words[i]:-}
-      flag_values+=("$value")
-    else
-      flag_values+=("")
     fi
+    flags+=("$word")
+    last_flags+=("$flag")
+    flag_values+=("$value")
     if [[ $flag == -R || $flag == --repo ]]; then
       repository=(--repo "$value")
     fi
@@ -501,18 +486,12 @@ has_git_flag() {
 # Sets api_method to the method of the gh api request whose flags read_arguments read, such as POST, in capitals when
 # it's GET. Without a method, gh api sends POST if the command adds a field or an input file, and GET otherwise.
 read_api_method() {
-  local i flag sends_body=false
+  local i sends_body=false
   api_method=""
-  for ((i = 0; i < ${#flags[@]}; i++)); do
-    flag=${flags[i]}
-    case $flag in
+  for ((i = 0; i < ${#last_flags[@]}; i++)); do
+    case ${last_flags[i]} in
       -X | --method) api_method=${flag_values[i]} ;;
-      --method=*) api_method=${flag#--method=} ;;
-      -X*)
-        api_method=${flag#-X}
-        api_method=${api_method#=}
-        ;;
-      -f* | -F* | --raw-field | --raw-field=* | --field | --field=* | --input | --input=*) sends_body=true ;;
+      -f | -F | --raw-field | --field | --input) sends_body=true ;;
     esac
   done
   if [[ -z $api_method ]]; then
@@ -600,6 +579,29 @@ is_true_flag_value() {
   case $1 in
     "" | 1 | t | T | true | TRUE | True) return 0 ;;
   esac
+  return 1
+}
+
+# Succeeds if read_arguments found one of these flags, which take no value, and gh reads it as true:
+# has_true_flag <flags that take a value> <flag>...
+# gh reads a short flag among several in one word, as split_flag_word does, so for gh gist create, -wp gives -p, and
+# so does -pd'My notes', where -d takes the description. It reads a value after =, as in --public=false, as
+# is_true_flag_value does.
+has_true_flag() {
+  local flags_with_value=$1 word wanted flag value value_is_next_word flags_before
+  shift
+  for word in ${flags[@]+"${flags[@]}"}; do
+    split_flag_word "$word" "$flags_with_value"
+    for wanted in "$@"; do
+      # A flag before the last in a word takes no value, so gh reads it as true.
+      if [[ $wanted == -? && $flags_before == *"${wanted#-}"* ]]; then
+        return 0
+      fi
+      if [[ $flag == "$wanted" ]] && is_true_flag_value "$value"; then
+        return 0
+      fi
+    done
+  done
   return 1
 }
 

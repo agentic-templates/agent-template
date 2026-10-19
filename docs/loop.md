@@ -56,9 +56,9 @@ on.
 - **Answers.** For each issue with `needs-decision` that the maintainer answered in a comment, carry out the answer,
   as "Labels" in `docs/planning.md` describes.
 - **Other people's issues.** Triage them, as "Triage issues that others open" in `docs/planning.md` describes.
-- **Reports.** When an agent ends, read its report, and act on what it asks of you. For each item that it lists for
-  the maintainer, such as a command that a hook told it to leave to them, ask the maintainer in an issue with
-  `needs-decision`.
+- **Reports.** When an agent ends, read its report, and act on what it asks of you. Of the items that it lists for the
+  maintainer, decide each one that "Decide or ask" in AGENTS.md lets you decide and that no hook leaves to the
+  maintainer. Ask about the rest as "Ask the maintainer" below describes.
 - **Hand-offs.** When a builder or the auditor reports that it handed off its work, because its context grew too
   long, run `scripts/clear-worktrees <issue>`, so that a new agent can check out the issue's branch. The auditor's
   issue is the one that it opened for the retrospective. If the script exits with a code other than 0, it left the
@@ -200,11 +200,11 @@ Keep your shell in the main checkout, and run git in a worktree with `git -C <wo
 session-start hook shows you your state file only when your shell is in the main checkout.
 
 When `scripts/hooks/hand-off` tells you that your context has grown long enough to compact, ask for a compaction if the
-maintainer installed a compaction sender. That's a Stop hook in the maintainer's own Claude Code settings that types
-`/compact` when it finds `.loop/compact-request.txt`. Finish the step you're on, such as landing a pull request or
-starting a builder, and bring your state file up to date. Then write `.loop/compact-request.txt` with your session id on
-its first line and `Resume from .loop/state.md.` on its second, and end your turn. Without a sender, ask the maintainer
-to type `/compact`, and go on with the loop.
+maintainer installed a compaction sender. That's a hook in the maintainer's own Claude Code settings that runs on both
+`Stop` and `StopFailure`, and types `/compact` when it finds `.loop/compact-request.txt`. Finish the step you're on,
+such as landing a pull request or starting a builder, and bring your state file up to date. Then write
+`.loop/compact-request.txt` with your session id on its first line and `Resume from .loop/state.md.` on its second, and
+end your turn. Without a sender, ask the maintainer to type `/compact`, and go on with the loop.
 
 ## Ask the maintainer
 

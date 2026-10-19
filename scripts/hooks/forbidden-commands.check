@@ -195,27 +195,9 @@ check_gh_pr_close() {
   if is_from_dependabot ${target[@]+"${target[@]}"}; then
     block "Blocked: $pull_request is one of Dependabot's, and closing it makes Dependabot stop offering that version. Leave it open, because Dependabot closes it once main has the update."
   fi
-  if deletes_branch; then
+  if has_true_flag "$pr_close_flags_with_value" -d --delete-branch; then
     block "Blocked: gh pr close with --delete-branch or -d deletes the pull request's branch, and the next agent that works on its issue starts from that branch. Close the pull request without that flag."
   fi
-}
-
-# Succeeds if gh pr close, whose flags read_arguments read, deletes the pull request's branch. gh reads -d among several
-# short flags in one word, as split_flag_word does, so -dc'Giving it back' deletes the branch and -cd is the comment d.
-# It reads the value of --delete-branch=<value> or -d=<value> as is_true_flag_value does.
-deletes_branch() {
-  local word flag value value_is_next_word flags_before
-  for word in ${flags[@]+"${flags[@]}"}; do
-    split_flag_word "$word" "$pr_close_flags_with_value"
-    # A flag before the last in a word takes no value, so a -d there deletes the branch.
-    if [[ $flags_before == *d* ]]; then
-      return 0
-    fi
-    if [[ $flag == -d || $flag == --delete-branch ]] && is_true_flag_value "$value"; then
-      return 0
-    fi
-  done
-  return 1
 }
 
 check_gh_issue_develop() {
