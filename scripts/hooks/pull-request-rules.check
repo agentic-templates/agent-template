@@ -10,7 +10,9 @@
 # - The pull request's commits are those on its branch, the one that --head names or HEAD, that aren't on the base
 #   branch on GitHub. The base branch is the one that --base names, or the one that origin/HEAD points to, and the
 #   hook fetches it from origin first. It allows the command when it can't find those commits, such as outside a
-#   git repository or before the branch exists here.
+#   git repository, before the branch exists here, or after a cd to a folder that it can't tell.
+# - A relative path to a body file starts from the folder that gh runs in, and git finds the repository from it. That's
+#   the folder the agent works in, or the one that a cd before gh changes to, as follow_cd in helpers.bash finds it.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 
@@ -69,6 +71,9 @@ check_gh_pr_create() {
   if [[ -z $pr_has_title ]]; then
     block "$no_title"
   fi
+  if [[ -z $command_folder ]] || ! cd -- "$command_folder" 2>/dev/null; then
+    return 0
+  fi
   read_body "the pull request's body"
   if ! find_commits; then
     return 0
@@ -106,13 +111,13 @@ check_simple_command() {
     return 0
   fi
   check_gh_pr_create
+  follow_cd
 }
 
 read_input
 if [[ $tool_name == Bash ]]; then
-  # A relative path to a body file starts from the folder the agent works in, and git finds the repository from it.
-  # Cursor doesn't send that folder, so for Cursor the hook's own folder counts.
-  cd -- "${cwd:-.}" 2>/dev/null || exit 0
+  # The folder that gh runs in, as follow_cd in helpers.bash describes.
+  command_folder=${cwd:-$PWD}
   written_files=()
   for_each_simple_command check_simple_command "$shell_command"
 fi
