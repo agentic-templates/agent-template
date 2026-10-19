@@ -457,6 +457,18 @@ for command in 'gh pr review 5 -a -R someone/else' 'gh pr review 5 -aRsomeone/el
 done
 expect_allow Bash 'gh issue close 5 -cRsomeone/else'
 expect_allow Bash 'gh pr comment 5 -b -Rsomeone/else'
+# For a command whose flags the hooks don't list, -R can be part of the value of a flag before it, such as the -j of
+# gh run rerun, which takes a job. The hook then checks the repository that gh posts to without -R as well.
+for command in 'GH_REPO=someone/else gh run rerun 12 -jRjtmpl/project' \
+  'GH_REPO=someone/else gh run rerun 12 -j -Rjtmpl/project'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+expect_allow Bash 'gh run rerun 12 -dRjtmpl/listed'
+# gh repo edit, delete, archive and unarchive take no -R, so a -R there is part of the value of a flag before it, such
+# as the -d of gh repo edit, which takes a description.
+for command in 'gh repo edit someone/else -dRjtmpl/project' 'gh repo edit someone/else -d -Rjtmpl/project'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
 expect_block Bash 'gh issue -R someone/else comment 5 --body Hello' "$(other_repository someone/else)"
 expect_block Bash 'gh release -R someone/else upload v1 app.tar' "$(other_repository someone/else)"
 expect_block Bash 'gh workflow run ci.yml --repo=github.com/someone/else' "$(other_repository someone/else)"
