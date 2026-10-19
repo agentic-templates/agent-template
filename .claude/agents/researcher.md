@@ -3,6 +3,7 @@ name: researcher
 description: Answers one research issue, such as whether a library can do the job, and writes the answer on the issue.
 model: opus
 effort: high
+isolation: worktree
 background: true
 ---
 
