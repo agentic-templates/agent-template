@@ -479,6 +479,29 @@ opens_pull_request() {
   done
 }
 
+# Sets base_commit and head_commit to the commits that the pull request of opens_pull_request compares, in the
+# repository of the current folder, or fails when it can't find them. The pull request's commits are those on its
+# branch, the one that --head names or HEAD, that aren't on the base branch on GitHub. The base branch is the one that
+# --base names, or the one that origin/HEAD points to, and the function fetches it from origin first.
+find_commits() {
+  local base_branch head_ref=HEAD
+  base_branch=$pr_base
+  if [[ -z $base_branch ]]; then
+    # Outside a git repository, git's error says only that the check has nothing to compare.
+    base_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || return 1
+    base_branch=${base_branch#origin/}
+  fi
+  # The local copy of the base branch can be older than GitHub's. The commits that GitHub's has and the local copy
+  # doesn't would then count as the pull request's own, and so would the files that they change.
+  GIT_TERMINAL_PROMPT=0 git fetch --quiet origin "$base_branch" >/dev/null 2>&1 || true
+  base_commit=$(git rev-parse --verify --quiet "refs/remotes/origin/$base_branch^{commit}") || return 1
+  # --head can name the branch as <user>:<branch>.
+  if [[ -n $pr_head ]]; then
+    head_ref=refs/heads/${pr_head#*:}
+  fi
+  head_commit=$(git rev-parse --verify --quiet "$head_ref^{commit}") || return 1
+}
+
 # Adds the files that the redirections of a simple command write to the array written_files, which a check empties
 # before the first simple command of each command. The hook can't read such a file before the command runs.
 record_written_files() {

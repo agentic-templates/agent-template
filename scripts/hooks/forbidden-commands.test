@@ -351,7 +351,7 @@ done
 for command in '' 'gh' 'gh pr' 'gh pr --repo' 'gh pr --repo create' 'gh pr -R create' 'gh pr --repo=jtmpl/other'; do
   expect_allow Bash "$command"
   for check in forbidden-commands maintainer-commands maintainer-only issues-and-labels posted-text pull-request-rules \
-    unchecked-pull-requests; do
+    unchecked-pull-requests unread-pages; do
     hook_status=0
     hook_message=$(run_check "$check" "$(sample_input claude-code Bash "$command")" 2>&1 >/dev/null) || hook_status=$?
     expect_result "$check for incomplete command $command" 0 ""

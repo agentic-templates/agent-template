@@ -7,8 +7,10 @@ script=$(pwd)/scripts/fresh-reader
 case_count=0
 failed_cases=0
 
-base=$(mktemp -d)
+# git looks for no repository above the temporary folder, which holds the project.
+base=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$base"' EXIT
+export GIT_CEILING_DIRECTORIES=$base
 mkdir -p "$base/bin" "$base/project/docs"
 # The folder that the stand-in writes what it got to
 records=$base/records
@@ -69,20 +71,25 @@ claude_arguments="[-p][--safe-mode][--tools][]"
 prompt="You are a developer who wants to record what they spend. Read this page once, the way that reader would. Quote each sentence you had to read twice, and say what made you stop. Then quote each sentence you didn't need, and say why. Then quote each sentence that says again what another sentence on the page already says, with the sentence it repeats. Leave out sentences that you'd only word differently."
 prompt_with_new_lines="$prompt After the page come the lines that a change added or rewrote. Check those lines most closely for a sentence that repeats another."
 
-# Starts a case in which claude fails its first <failures> runs: new_case <failures>
+# The record of the pages read, in the project's git folder
+pages_read=$base/project/.git/pages-read
+
+# Starts a case in which claude fails its first <failures> runs, and the script runs in the folder project, with no
+# record of the pages read: new_case <failures>
 new_case() {
   failures=$1
   error_on_stderr=""
-  rm -rf "$records"
+  run_folder=$base/project
+  rm -rf "$records" "$pages_read"
   mkdir -p "$records"
   : >"$records/calls"
 }
 
-# Runs scripts/fresh-reader in the folder project with the arguments, and sets status and output:
+# Runs scripts/fresh-reader in the folder run_folder with the arguments, and sets status and output:
 # run_fresh_reader [<argument>...]
 run_fresh_reader() {
   status=0
-  output=$(cd "$base/project" && TEST_RECORDS=$records TEST_FAILURES=$failures \
+  output=$(cd "$run_folder" && TEST_RECORDS=$records TEST_FAILURES=$failures \
     TEST_ERROR_ON_STDERR=$error_on_stderr PATH=$base/bin:$PATH "$script" "$@" 2>&1) || status=$?
 }
 
@@ -148,12 +155,31 @@ expect_empty_temporary_folder() {
   fi
 }
 
+# Checks the record of the pages read, with no hash for no record: expect_record <description> [<hash>...]
+expect_record() {
+  local description=$1 expected="" recorded=""
+  shift
+  if (($# > 0)); then
+    expected=$(printf '%s\n' "$@")
+  fi
+  case_count=$((case_count + 1))
+  if [[ -f $pages_read ]]; then
+    recorded=$(<"$pages_read")
+  fi
+  if [[ $recorded != "$expected" ]]; then
+    fail_case "$description, the record of the pages read must hold \"$expected\", but it holds \"$recorded\"."
+  fi
+}
+
 new_case 0
 run_fresh_reader "$reader" docs/expenses.md
 expect_result "When claude answers" succeeds "The reader's answer from run 1"
 expect_calls "When claude answers" "$claude_arguments"
 expect_input "When claude answers" "$prompt"$'\n\n'"$page_text"
 expect_empty_temporary_folder "When claude answers"
+# The hash that the page has in the commit with its content
+page_hash=$(git -C "$base/project" rev-parse HEAD:docs/expenses.md)
+expect_record "When claude answers" "$page_hash"
 
 new_case 1
 run_fresh_reader "$reader" docs/expenses.md
@@ -161,12 +187,25 @@ expect_result "When claude fails once" succeeds "The reader's answer from run 2"
 expect_calls "When claude fails once" "$claude_arguments"$'\n'"$claude_arguments"
 expect_input "When claude fails once" "$prompt"$'\n\n'"$page_text"
 expect_empty_temporary_folder "When claude fails once"
+expect_record "When claude fails once" "$page_hash"
 
 new_case 2
 run_fresh_reader "$reader" docs/expenses.md
 expect_result "When claude fails twice" fails \
   "error: can't get the reader's answer, because claude failed twice. The second time, it exited with code 1 and printed: API Error: the error of run 2"
 expect_calls "When claude fails twice" "$claude_arguments"$'\n'"$claude_arguments"
+expect_record "When claude fails twice"
+
+# A folder where the record belongs makes the record impossible to write. Between the answer and the script's error,
+# bash prints its own error, which names the script's line.
+new_case 0
+mkdir "$pages_read"
+run_fresh_reader "$reader" docs/expenses.md
+case_count=$((case_count + 1))
+record_error="error: the reader answered, but scripts/fresh-reader can't record in $pages_read that the reader read docs/expenses.md, and a hook blocks opening a pull request that adds or rewrites text in the page without that record. Fix the error above, and run scripts/fresh-reader again."
+if ((status == 0)) || [[ $output != "The reader's answer from run 1"$'\n'*$'\n'"$record_error" ]]; then
+  fail_case "When the record can't be written, scripts/fresh-reader must exit with a code other than 0, and print the reader's answer first and \"$record_error\" last, but it exited with code $status and printed \"$output\"."
+fi
 
 new_case 2
 error_on_stderr=yes
@@ -191,6 +230,7 @@ run_fresh_reader "$reader" docs/missing.md
 expect_result "When the page doesn't exist" fails \
   "error: docs/missing.md isn't a file. Give the page's path, such as README.md."
 expect_calls "When the page doesn't exist" ""
+expect_record "When the page doesn't exist"
 
 new_case 0
 printf '%s\n' "Each expense that you add goes to the file \$HOME/expenses.csv." >>"$base/project/docs/expenses.md"
@@ -198,6 +238,12 @@ run_fresh_reader "$reader" docs/expenses.md
 expect_result "When the page has a new sentence that repeats an older one" succeeds "The reader's answer from run 1"
 expect_input "When the page has a new sentence that repeats an older one" \
   "$prompt_with_new_lines"$'\n\n'"$page_text"$'\n'"Each expense that you add goes to the file \$HOME/expenses.csv."$'\n\n'"The lines that the change added or rewrote:"$'\n\n'"Each expense that you add goes to the file \$HOME/expenses.csv."
+expect_record "When the page has a change that isn't committed" "$(git -C "$base/project" hash-object docs/expenses.md)"
+# A second page adds a line to the record.
+printf '%s\n' "# Import a bank file" >"$base/project/docs/import.md"
+run_fresh_reader "$reader" docs/import.md
+expect_record "When the reader reads a second page" "$(git -C "$base/project" hash-object docs/expenses.md docs/import.md)"
+rm "$base/project/docs/import.md"
 git -C "$base/project" checkout --quiet -- docs/expenses.md
 
 # The branch rewrites the page's heading and commits it. Then main rewrites the last line, which the branch still has
@@ -245,6 +291,12 @@ printf '%s\n' "# Notes" >"$base/notes.md"
 run_fresh_reader "$reader" "$base/notes.md"
 expect_result "When the page is outside the repository" succeeds "The reader's answer from run 1"
 expect_input "When the page is outside the repository" "$prompt"$'\n\n'"# Notes"
+
+new_case 0
+run_folder=$base
+run_fresh_reader "$reader" notes.md
+expect_result "When the folder isn't in a git repository" succeeds "The reader's answer from run 1"
+expect_input "When the folder isn't in a git repository" "$prompt"$'\n\n'"# Notes"
 
 new_case 0
 git -C "$base/project" update-ref -d refs/remotes/origin/main
