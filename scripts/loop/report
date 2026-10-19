@@ -61,7 +61,7 @@ from typing import Any, NamedTuple
 
 import paths
 import request_events
-from agent_log import AgentRun, Period, agent_transcripts, read_runs, started, working_periods
+from agent_log import AgentRun, Period, agent_output_tokens, agent_transcripts, read_runs, started, working_periods
 from github import GitHubError, gh_api
 from transcripts import Call, read_transcript
 
@@ -393,17 +393,6 @@ def type_line(
         return f"{line} | pull requests: 0"
     counts = [f"{sum(result[field] for result in own)} {words}" for field, words in enumerate(RESULT_WORDS)]
     return f"{line} | pull requests: {len(own)}, {', '.join(counts)}"
-
-
-def agent_output_tokens(end: dict[str, Any], event_tokens: dict[str, int]) -> tuple[int, int]:
-    """The output tokens of an agent that ended, and how many of its requests have no event. A run's own count is
-    exact. An agent of a session gets each request's count from its event, or else from its transcript. An end line
-    written before agents.jsonl had requests gives none, so its own count counts, as for an agent with no events."""
-    requests: dict[str, int] | None = end.get("requests")
-    if requests is None:
-        return end["output_tokens"], 0
-    tokens = sum(event_tokens.get(request, transcript_count) for request, transcript_count in requests.items())
-    return tokens, sum(request not in event_tokens for request in requests)
 
 
 def no_event_line(ends: list[dict[str, Any]], event_tokens: dict[str, int]) -> str:

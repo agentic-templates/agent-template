@@ -24,7 +24,8 @@ An end line holds at, "end" as its event, the start line's id, and:
   periods         the periods that make up those minutes, each a list of its start and end time
   tool_calls      the agent's tool calls
   input_tokens    the input tokens that the agent used, cached tokens too
-  output_tokens   the output tokens that the agent used. For an agent of a session, the count leaves out most of
+  output_tokens   the output tokens that the agent used, reasoning tokens included, because Claude and Codex both
+                  count them among the output tokens. For an agent of a session, the count leaves out most of
                   them, because its transcript gives each reply's output tokens as of the reply's start. A run of
                   scripts/loop/run-builder counts the output tokens of the agents that it starts too.
   requests        for an agent of a session, the output tokens of each of its requests to the API, as its transcript
@@ -252,6 +253,17 @@ def read_runs(log: Path) -> list[AgentRun]:
         entry: dict[str, Any] = json.loads(line)
         (starts if entry["event"] == "start" else ends)[entry["id"]] = entry
     return [AgentRun(start, ends.get(agent_id)) for agent_id, start in starts.items()]
+
+
+def agent_output_tokens(end: dict[str, Any], event_tokens: dict[str, int]) -> tuple[int, int]:
+    """The output tokens of an agent that ended, and how many of its requests have no event, from its end line and the
+    output tokens of each request that request_events.output_tokens gives. A run's own count is exact. An agent of a session gets each request's count from its event, or else from its transcript. An end line
+    written before agents.jsonl had requests gives none, so its own count counts, as for an agent with no events."""
+    requests: dict[str, int] | None = end.get("requests")
+    if requests is None:
+        return end["output_tokens"], 0
+    tokens = sum(event_tokens.get(request, transcript_count) for request, transcript_count in requests.items())
+    return tokens, sum(request not in event_tokens for request in requests)
 
 
 def started(run: AgentRun) -> dt.datetime:

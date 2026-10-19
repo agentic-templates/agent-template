@@ -597,8 +597,10 @@ class MachineLineTest(MeterTest):
         self.assertIn(" | GPU 23% busy, memory unknown | ", line)
 
     def test_is_the_last_line(self) -> None:
+        with mock.patch.object(meter, "OUTPUT_TOKENS_PER_RETROSPECTIVE", None):
+            last_line = self.run_meter()[1][-1]
         self.assertRegex(
-            self.run_meter()[1][-1],
+            last_line,
             r"^machine \| disk \d+ GB free \| memory .* \| load \d+\.\d on \d+ cores \| "
             r"orchestrator context unknown \| "
             r"retrospective not due: 0\.0 of 30 hours of agents' work since the last one$",
@@ -747,9 +749,12 @@ def agent(
     agent_type: str = "builder",
     is_test: bool = False,
     periods: list[tuple[str, str]] | None = None,
+    output_tokens: int = 0,
+    requests: dict[str, int] | None = None,
 ) -> list[str]:
     """The lines of .loop/agents.jsonl for an agent that started at a time in New York, with an end line unless
-    minutes is None. The agent worked from its start for the minutes, unless the periods say otherwise."""
+    minutes is None. The agent worked from its start for the minutes, unless the periods say otherwise. The end line
+    gives the output tokens, and those of each request as the transcript gives them, as for an agent of a session."""
     start = {"at": new_york(started).isoformat(), "event": "start", "id": agent_id, "type": agent_type, "test": is_test}
     lines = [json.dumps(start)]
     if minutes is None:
@@ -762,18 +767,33 @@ def agent(
         "id": agent_id,
         "minutes": minutes,
         "periods": [[new_york(begin).isoformat(), new_york(finish).isoformat()] for begin, finish in periods],
+        "output_tokens": output_tokens,
+        "requests": requests,
     }
     lines.append(json.dumps(end))
     return lines
 
 
-class RetrospectiveTest(MeterTest):
-    """The last retrospective merged at 1:00 in New York, unless a test says otherwise."""
+class RetrospectiveNoteTest(MeterTest):
+    """The last retrospective merged at 1:00 in New York, unless a test says otherwise. A retrospective has set the
+    output tokens that make the next one due, unless they are None."""
+
+    output_tokens_per_retrospective: int | None = None
+
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = mock.patch.object(meter, "OUTPUT_TOKENS_PER_RETROSPECTIVE", self.output_tokens_per_retrospective)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def retrospective(self, *agents: list[str]) -> str:
         lines = [line for lines in agents for line in lines]
         (self.loop / "agents.jsonl").write_text("".join(f"{line}\n" for line in lines))
         return self.run_meter()[1][-1].split(" | ")[-1]
+
+
+class RetrospectiveTest(RetrospectiveNoteTest):
+    """No retrospective has set the output tokens, so the hours make one due."""
 
     def test_is_due_once_one_agent_worked_30_hours_since_the_last_one(self) -> None:
         cases = {
@@ -911,6 +931,68 @@ class RetrospectiveTest(MeterTest):
     def test_is_unknown_when_gh_is_not_installed(self) -> None:
         self.without_standin("gh")
         self.assertEqual(self.retrospective(), "retrospective unknown: gh isn't installed. Install the GitHub CLI.")
+
+
+class OutputTokensRetrospectiveTest(RetrospectiveNoteTest):
+    output_tokens_per_retrospective = 10_000
+
+    def log_requests(self, *requests: tuple[str, int]) -> None:
+        """Writes .loop/requests.jsonl, with the output tokens of each request id."""
+        lines = [{"session_id": "s1", "request_id": request, "output_tokens": tokens} for request, tokens in requests]
+        (self.loop / "requests.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
+
+    def test_is_due_once_the_output_tokens_of_the_claude_and_codex_agents_add_up_to_the_number(self) -> None:
+        self.log_requests(("req_a", 3000), ("req_b", 1000), ("req_other", 50_000))
+        cases = {
+            6000: "retrospective due: 10000 output tokens of agents' work since the last one",
+            5999: "retrospective not due: 9999 of 10000 output tokens of agents' work since the last one",
+        }
+        for codex_tokens, note in cases.items():
+            with self.subTest(codex_tokens=codex_tokens):
+                agents = [
+                    agent("toolu_1", "2026-10-18T01:30:00", 60, output_tokens=7, requests={"req_a": 2, "req_b": 5}),
+                    agent("issue-12-run", "2026-10-18T02:00:00", 1, "codex", output_tokens=codex_tokens),
+                ]
+                self.assertEqual(self.retrospective(*agents), note)
+
+    def test_counts_the_transcripts_tokens_of_a_request_without_an_event(self) -> None:
+        self.log_requests(("req_a", 3000))
+        self.assertEqual(
+            self.retrospective(agent("toolu_1", "2026-10-18T01:30:00", 60, requests={"req_a": 2, "req_b": 5})),
+            "retrospective not due: 3005 of 10000 output tokens of agents' work since the last one",
+        )
+
+    def test_is_not_due_after_30_hours_of_work(self) -> None:
+        self.assertEqual(
+            self.retrospective(agent("a", "2026-10-18T01:30:00", 1800, output_tokens=100)),
+            "retrospective not due: 100 of 10000 output tokens of agents' work since the last one",
+        )
+
+    def test_leaves_out_test_builds_auditors_agents_that_started_before_the_last_one_and_agents_still_working(
+        self,
+    ) -> None:
+        agents = [
+            agent("test", "2026-10-18T01:30:00", 60, is_test=True, output_tokens=20_000),
+            agent("auditor", "2026-10-18T01:30:00", 60, "auditor", output_tokens=20_000),
+            agent("before", "2026-10-18T00:30:00", 60, output_tokens=20_000),
+            agent("working", "2026-10-18T01:30:00", None),
+            agent("counted", "2026-10-18T01:00:00", 60, output_tokens=40),
+        ]
+        self.assertEqual(
+            self.retrospective(*agents),
+            "retrospective not due: 40 of 10000 output tokens of agents' work since the last one",
+        )
+
+    def test_counts_the_whole_log_before_the_first_retrospective(self) -> None:
+        self.answer("gh", github_answer(merges=()))
+        agents = [
+            agent("a", "2026-09-01T12:00:00", 60, output_tokens=9000),
+            agent("b", "2026-10-18T02:00:00", 60, output_tokens=1000),
+        ]
+        self.assertEqual(
+            self.retrospective(*agents),
+            "retrospective due: 10000 output tokens of agents' work with no retrospective yet",
+        )
 
 
 class HelpTest(unittest.TestCase):

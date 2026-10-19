@@ -20,11 +20,14 @@ each with its type and the number of its issue or pull request. It gives each ag
 at which scripts/hooks/hand-off told the agent to hand off its work, if it did.
 
 The last line gives the machine's free disk, free memory, swap in use, GPU use and GPU memory in use, its load, the
-orchestrator's context size, and whether a retrospective is due. One is due once the agents have worked {hours} hours
-since the last retrospective, which is the newest merged pull request with the label retrospective, or since the start
-of .loop/agents.jsonl before there is one. The hours come from the periods on each agent's last end line in
-.loop/agents.jsonl, which scripts/loop/agent_log.py describes. An agent without an end line counts until the last line
-of its transcript. The test builds and the auditors don't count.
+orchestrator's context size, and whether a retrospective is due. One is due once the output tokens of the agents that
+started since the last retrospective, reasoning tokens included, reach OUTPUT_TOKENS_PER_RETROSPECTIVE in this
+script. The last retrospective is the newest merged pull request with the label retrospective, or the start of
+.loop/agents.jsonl before there is one. The meter counts the output tokens of the agents that ended, as
+scripts/loop/report counts them. Until a retrospective sets OUTPUT_TOKENS_PER_RETROSPECTIVE, one is due once the
+agents have worked {hours} hours since the last retrospective instead. The hours come from the periods on each agent's
+last end line in .loop/agents.jsonl, which scripts/loop/agent_log.py describes. An agent without an end line counts
+until the last line of its transcript. The test builds and the auditors don't count.
 
 With --wake, the meter keeps reading, and prints and ends when an account's advice changes, when an account gives no
 reading, when scripts/hooks/hand-off tells an agent to hand off its work, and 50 minutes after it started while an
@@ -55,6 +58,7 @@ from typing import Any, NamedTuple
 
 import agent_log
 import paths
+import request_events
 from accounts import Account, AccountsError, claude_environment, load_accounts
 from github import GitHubError, gh_api
 from machine import Machine, read_machine
@@ -95,6 +99,8 @@ TRANSCRIPT_TAIL_BYTES = 400_000
 # How often meter --wake looks for a new note of scripts/hooks/hand-off between two readings
 HAND_OFF_CHECK_SECONDS = 60
 RETROSPECTIVE_LABEL = "retrospective"
+# A retrospective sets this number. While it is None, HOURS_PER_RETROSPECTIVE makes a retrospective due instead.
+OUTPUT_TOKENS_PER_RETROSPECTIVE: int | None = None
 HOURS_PER_RETROSPECTIVE = 30.0
 # A retrospective doesn't look back on the work of an earlier one.
 AUDITOR = "auditor"
@@ -601,16 +607,36 @@ def read_retrospective(checkout: Path, loop_folder: Path) -> str:
     last = max(merges, default=None)
     runs = agent_log.read_runs(loop_folder / "agents.jsonl")
     counted = [run for run in runs if not run.start["test"] and run.start["type"] != AUDITOR]
+    if OUTPUT_TOKENS_PER_RETROSPECTIVE is not None:
+        requests = loop_folder / request_events.REQUESTS_FILE
+        event_tokens = request_events.output_tokens(requests.read_text() if requests.exists() else "")
+        tokens = sum(
+            agent_log.agent_output_tokens(run.end, event_tokens)[0]
+            for run in counted
+            if run.end and (last is None or agent_log.started(run) >= last)
+        )
+        return tokens_note(last, tokens, OUTPUT_TOKENS_PER_RETROSPECTIVE)
     transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
     minutes = sum(
         agent_log.minutes_after(agent_log.working_periods(run, transcripts, loop_folder / "runs"), last)
         for run in counted
     )
-    return retrospective_note(last, minutes / 60)
+    return hours_note(last, minutes / 60)
 
 
-def retrospective_note(last: dt.datetime | None, hours: float) -> str:
-    since = "since the last one" if last else "with no retrospective yet"
+def since_words(last: dt.datetime | None) -> str:
+    return "since the last one" if last else "with no retrospective yet"
+
+
+def tokens_note(last: dt.datetime | None, tokens: int, tokens_per_retrospective: int) -> str:
+    since = since_words(last)
+    if tokens >= tokens_per_retrospective:
+        return f"retrospective due: {tokens} output tokens of agents' work {since}"
+    return f"retrospective not due: {tokens} of {tokens_per_retrospective} output tokens of agents' work {since}"
+
+
+def hours_note(last: dt.datetime | None, hours: float) -> str:
+    since = since_words(last)
     if hours >= HOURS_PER_RETROSPECTIVE:
         return f"retrospective due: {hours:.1f} hours of agents' work {since}"
     # Rounded down, so that 29.98 hours don't show as 30.0 of 30

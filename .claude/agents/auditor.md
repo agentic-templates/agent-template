@@ -34,9 +34,11 @@ background: true
      that a reviewer found, or a conflict with main
    - the issues that the orchestrator planned again after a builder took them, which lost `ready` then
 7. Test the agent types, as "Test the agent types" below describes.
-8. Set `HOURS_PER_RETROSPECTIVE` in `scripts/loop/meter`, the hours of the agents' work that make the next
-   retrospective due. Change it only when this retrospective and the one before it point the same way, so that one
-   unusual retrospective can't move it. Lower it when both found much to fix. Raise it when both found little, or
+8. Set `OUTPUT_TOKENS_PER_RETROSPECTIVE` in `scripts/loop/meter`, the output tokens of the agents that make the next
+   retrospective due. If it is `None`, the hours in `HOURS_PER_RETROSPECTIVE` made this retrospective due, so set it
+   to the output tokens of those hours: the sum of the output tokens in the report's `Type` lines, other than the
+   `auditor` line. Otherwise change it only when this retrospective and the one before it point the same way, so that
+   one unusual retrospective can't move it. Lower it when both found much to fix. Raise it when both found little, or
    when each cost a large share of the agents' hours since the retrospective before it. A retrospective costs the
    hours of the auditor, the agents that it starts and its test builds. Judge each retrospective by what it fixed and
    what it cost, as its pull request records them.
@@ -47,7 +49,8 @@ background: true
    - the verdict on each change of the last retrospective
    - each test: its versions, its issues, the cost of each build, each judge's choice and reason, and what you changed
    - what this retrospective cost in hours, and their share of all the agents' hours since the time in step 3
-   - the hours in `HOURS_PER_RETROSPECTIVE`, and if you changed them, why, with the numbers of both retrospectives
+   - the output tokens in `OUTPUT_TOKENS_PER_RETROSPECTIVE`, and if you set or changed them, why, with the numbers of
+     both retrospectives
 10. End with a short report to the orchestrator: the number of your pull request, what you changed, and each question
     that only the maintainer can answer.
 
