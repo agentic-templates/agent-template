@@ -12,11 +12,15 @@ The lines are:
   Type                      A line for each type of the agents that started, from .loop/agents.jsonl, which
                             scripts/loop/agent_log.py describes: how many started and how many ended, the median of
                             their minutes and of their tool calls, and their share of the input tokens that all those
-                            agents used. Then their output tokens: those of the runs of scripts/loop/run-builder, and
-                            apart from them, those of the agents of a session, which leave out most. Then how many
-                            pull requests they opened, and how many of those needed a fix after review, failed a
-                            check, left the merge queue unmerged, or got a second builder. The test builds of a
-                            retrospective don't count.
+                            agents used. Then their output tokens, and how many pull requests they opened, and how
+                            many of those needed a fix after review, failed a check, left the merge queue unmerged, or
+                            got a second builder. The test builds of a retrospective don't count.
+  Requests of the agents of a session that have no event
+                            How many of these requests have no event in .loop/requests.jsonl, which
+                            scripts/loop/request_events.py describes, out of all of them. The report takes each
+                            request's output tokens from its event, and for a request with no event, from the agent's
+                            transcript, which leaves out most of them. A session started without scripts/loop/claude
+                            sends no events. A run of scripts/loop/run-builder counts its own output tokens exactly.
   Orchestrator's share      The share of the input tokens that the sessions in the main checkout used themselves, out
                             of all that they and their agents used.
   Hook blocks               How many actions the before-tool hook blocked, from .loop/blocks.log, and how many each
@@ -55,6 +59,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import paths
+import request_events
 from agent_log import AgentRun, Period, agent_transcripts, read_runs, started, working_periods
 from github import GitHubError, gh_api
 from transcripts import Call, read_transcript
@@ -180,16 +185,19 @@ def main(argv: list[str] | None = None) -> int:
         if (number := opened(run))
     }
     agents = count_once(transcripts, since)
+    event_tokens = request_events.output_tokens(read_log(request_events.REQUESTS_FILE))
+    ends = [run.end for run in recent if run.end]
     lines = [
         f"Since {since.isoformat()}",
         *ci_lines(ci_runs),
-        *type_lines(recent, results),
+        *type_lines(recent, results, event_tokens),
+        no_event_line(ends, event_tokens),
         orchestrator_line(agents),
         block_line(count_blocks(read_log("blocks.log"), since)),
         *machine_lines(read_machine_readings(read_log("meter.jsonl"), since), periods_of(all_runs, checkout)),
     ]
     if options.issues:
-        lines += issue_lines(recent, results)
+        lines += issue_lines(recent, results, event_tokens)
     print("\n".join(lines))
     return 0
 
@@ -356,24 +364,29 @@ def ci_lines(runs: list[CiRun]) -> list[str]:
     ]
 
 
-def type_lines(runs: list[AgentRun], results: dict[str, PullRequestResult]) -> list[str]:
+def type_lines(runs: list[AgentRun], results: dict[str, PullRequestResult], event_tokens: dict[str, int]) -> list[str]:
     if not runs:
         return ["Types: no agent started"]
     all_input = sum(run.end["input_tokens"] for run in runs if run.end)
     types = sorted({run.start["type"] for run in runs})
-    return [type_line(name, [run for run in runs if run.start["type"] == name], all_input, results) for name in types]
+    return [
+        type_line(name, [run for run in runs if run.start["type"] == name], all_input, results, event_tokens)
+        for name in types
+    ]
 
 
-def type_line(name: str, runs: list[AgentRun], all_input: int, results: dict[str, PullRequestResult]) -> str:
-    """The type's line. Its share is of the input tokens, which are right for every agent, unlike the output tokens."""
+def type_line(
+    name: str, runs: list[AgentRun], all_input: int, results: dict[str, PullRequestResult], event_tokens: dict[str, int]
+) -> str:
     ends = [run.end for run in runs if run.end]
     line = f"Type {name}: {len(runs)} started, {len(ends)} ended"
     if ends:
         minutes = statistics.median(end["minutes"] for end in ends)
         tool_calls = statistics.median(end["tool_calls"] for end in ends)
         share = sum(end["input_tokens"] for end in ends) / all_input if all_input else 0
+        output_tokens = sum(agent_output_tokens(end, event_tokens)[0] for end in ends)
         line += f", median {minutes:.1f} min and {tool_calls:g} tool calls, {share:.0%} of the agents' input tokens"
-        line += f" | {output_tokens_part(ends)}"
+        line += f" | output tokens: {output_tokens}"
     own = [results[run.start["id"]] for run in runs if run.start["id"] in results]
     if not own:
         return f"{line} | pull requests: 0"
@@ -381,19 +394,23 @@ def type_line(name: str, runs: list[AgentRun], all_input: int, results: dict[str
     return f"{line} | pull requests: {len(own)}, {', '.join(counts)}"
 
 
-def output_tokens_part(ends: list[dict[str, Any]]) -> str:
-    """The output tokens of the agents that ended, those of the runs apart from those of the agents of a session."""
-    runs = [end["output_tokens"] for end in ends if end["output_tokens_exact"]]
-    session_agents = [end["output_tokens"] for end in ends if not end["output_tokens_exact"]]
-    parts = []
-    if runs:
-        parts.append(f"{sum(runs)} in runs of run-builder")
-    if session_agents:
-        parts.append(f"at least {sum(session_agents)} in agents of a session, whose transcripts leave out most")
-    return f"output tokens: {', '.join(parts)}"
+def agent_output_tokens(end: dict[str, Any], event_tokens: dict[str, int]) -> tuple[int, int]:
+    """The output tokens of an agent that ended, and how many of its requests have no event. A run's own count is
+    exact. An agent of a session gets each request's count from its event, or else from its transcript."""
+    requests: dict[str, int] | None = end["requests"]
+    if requests is None:
+        return end["output_tokens"], 0
+    tokens = sum(event_tokens.get(request, transcript_count) for request, transcript_count in requests.items())
+    return tokens, sum(request not in event_tokens for request in requests)
 
 
-def issue_lines(runs: list[AgentRun], results: dict[str, PullRequestResult]) -> list[str]:
+def no_event_line(ends: list[dict[str, Any]], event_tokens: dict[str, int]) -> str:
+    requests = sum(len(end["requests"] or {}) for end in ends)
+    without_event = sum(agent_output_tokens(end, event_tokens)[1] for end in ends)
+    return f"Requests of the agents of a session that have no event: {without_event} of {requests}"
+
+
+def issue_lines(runs: list[AgentRun], results: dict[str, PullRequestResult], event_tokens: dict[str, int]) -> list[str]:
     """A line for each agent that built an issue, with its numbers and what happened to its pull request."""
     lines = []
     for run in runs:
@@ -405,11 +422,11 @@ def issue_lines(runs: list[AgentRun], results: dict[str, PullRequestResult]) -> 
             lines.append(f"{line}, not ended")
             continue
         end = run.end
+        output_tokens, without_event = agent_output_tokens(end, event_tokens)
         line += f", {end['minutes']:.1f} min, {end['tool_calls']} tool calls, {end['input_tokens']} input tokens, "
-        if end["output_tokens_exact"]:
-            line += f"{end['output_tokens']} output tokens"
-        else:
-            line += f"at least {end['output_tokens']} output tokens, because its transcript leaves out most"
+        line += f"{output_tokens} output tokens"
+        if without_event:
+            line += f", {without_event} of its requests with no event"
         result = results.get(run.start["id"])
         if result is None:
             lines.append(f"{line} | no pull request")

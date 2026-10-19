@@ -151,7 +151,7 @@ class AgentLinesTest(RunBuilderTest):
                 "tool_calls": 4,
                 "input_tokens": 32913,
                 "output_tokens": 1366,
-                "output_tokens_exact": True,
+                "requests": None,
                 "pull_request": 5,
             },
         )
@@ -212,7 +212,7 @@ class AgentLinesTest(RunBuilderTest):
                 "tool_calls": 3,
                 "input_tokens": 24763,
                 "output_tokens": 122,
-                "output_tokens_exact": True,
+                "requests": None,
                 "pull_request": 7,
             },
         )

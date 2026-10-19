@@ -22,12 +22,18 @@ def prompt_line(minute: float, content: Any = "Build the issue.") -> dict[str, A
 
 
 def call_line(
-    call: str, minute: float, tokens: int = 0, tool_calls: int = 0, output_tokens: int | None = None
+    call: str,
+    minute: float,
+    tokens: int = 0,
+    tool_calls: int = 0,
+    output_tokens: int | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
-    """A transcript's line for a call, with the tokens as its input."""
+    """A transcript's line for a call, with the tokens as its input, and the request's id if it's given."""
     content: list[dict[str, Any]] = [{"type": "text"}] + [{"type": "tool_use", "id": "", "input": {}}] * tool_calls
     usage = {"input_tokens": tokens, "output_tokens": output_tokens}
-    return {"type": "assistant", "timestamp": at(minute), "message": {"id": call, "usage": usage, "content": content}}
+    line = {"type": "assistant", "timestamp": at(minute), "message": {"id": call, "usage": usage, "content": content}}
+    return line | ({"requestId": request_id} if request_id else {})
 
 
 def command_line(call: str, minute: float, tool_use: str, command: str) -> dict[str, Any]:
@@ -98,6 +104,18 @@ class TokensTest(TranscriptTest):
         self.assertEqual(
             {call.id: (call.input_tokens, call.output_tokens) for call in calls}, {"a": (111, 40), "b": (5, 7)}
         )
+
+
+class RequestIdTest(TranscriptTest):
+    def test_gives_each_call_the_id_of_its_request_or_none_without_one(self) -> None:
+        self.write(
+            call_line("a", 1),
+            call_line("a", 2, request_id="req_a"),
+            call_line("b", 3, request_id="req_b"),
+            call_line("c", 4),
+        )
+        calls, _ = transcripts.read_transcript(self.file)
+        self.assertEqual({call.id: call.request_id for call in calls}, {"a": "req_a", "b": "req_b", "c": None})
 
 
 class ToolCallTest(TranscriptTest):

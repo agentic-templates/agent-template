@@ -1,0 +1,39 @@
+#!/usr/bin/env -S uv run --script --quiet
+"""Receives the events that Claude Code sends over OpenTelemetry, and appends the tokens of each request to
+requests.jsonl in a loop folder, as scripts/loop/request_events.py describes:
+
+  scripts/loop/receive-events <loop folder>
+
+It listens on a free port of 127.0.0.1, writes the port to receiver.port in the folder, prints it, and goes on
+listening in the background until it's stopped. scripts/loop/claude and scripts/loop/run-builder start it when it
+isn't running.
+"""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+import request_events
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="scripts/loop/receive-events", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("folder", type=Path)
+    receiver = request_events.open_receiver(parser.parse_args(argv).folder)
+    if os.fork():
+        # The receiver in the child process listens on its own copy of the socket.
+        receiver.server_close()
+        print(receiver.port)
+        return
+    # The receiver runs in a session of its own, so that it keeps running when the terminal that started it closes.
+    # It gives up the standard output, so that the script that started it reads the port to its end.
+    os.setsid()
+    os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    receiver.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

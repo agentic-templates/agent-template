@@ -25,10 +25,11 @@ An end line holds at, "end" as its event, the start line's id, and:
   tool_calls      the agent's tool calls
   input_tokens    the input tokens that the agent used, cached tokens too
   output_tokens   the output tokens that the agent used. For an agent of a session, the count leaves out most of
-                  them, because its transcript gives each reply's output tokens as of the reply's start.
-  output_tokens_exact
-                  false for an agent of a session, and true for a run of scripts/loop/run-builder, which counts the
-                  output tokens of the agents that it starts too
+                  them, because its transcript gives each reply's output tokens as of the reply's start. A run of
+                  scripts/loop/run-builder counts the output tokens of the agents that it starts too.
+  requests        for an agent of a session, the output tokens of each of its requests to the API, as its transcript
+                  gives them, by request id, and null for a run. scripts/loop/report takes each request's exact count
+                  from requests.jsonl, which scripts/loop/request_events.py describes.
   pull_request    the number of the pull request that the agent opened, or null
   worktree_mb     the size of the agent's worktree in megabytes, or null if it had none
   cpu_seconds     a run's CPU time, which only scripts/loop/run-builder gives
@@ -88,7 +89,7 @@ class Numbers(NamedTuple):
     tool_calls: int
     input_tokens: int
     output_tokens: int
-    output_tokens_exact: bool
+    requests: dict[str, int] | None
     pull_request: int | None
 
 
@@ -163,7 +164,7 @@ def transcript_numbers(transcript: Path) -> Numbers:
         tool_calls=sum(call.tool_calls for call in calls),
         input_tokens=sum(call.input_tokens for call in calls),
         output_tokens=sum(call.output_tokens for call in calls),
-        output_tokens_exact=False,
+        requests={call.request_id: call.output_tokens for call in calls if call.request_id},
         pull_request=transcripts.opened_pull_request(transcript),
     )
 

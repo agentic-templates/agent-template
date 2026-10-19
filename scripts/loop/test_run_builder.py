@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ from typing import Any
 from unittest import mock
 
 import agent_log
+import request_events
 from test_paths import GIT_ENVIRONMENT
 
 RUN_BUILDER = Path(__file__).with_name("run-builder")
@@ -160,6 +162,11 @@ class RunBuilderTest(unittest.TestCase):
         )
         environment.start()
         self.addCleanup(environment.stop)
+        # The loop's receiver of Claude Code's events runs in this process, so that the script finds it running.
+        self.receiver = request_events.open_receiver(self.loop)
+        threading.Thread(target=self.receiver.serve_forever, daemon=True).start()
+        self.addCleanup(self.receiver.server_close)
+        self.addCleanup(self.receiver.shutdown)
         starting = Path(starting_repositories().name)
         shutil.copytree(starting / "origin.git", self.origin, symlinks=True)
         shutil.copytree(starting / "repo", self.repo, symlinks=True)
@@ -398,12 +405,28 @@ class ClaudeTest(RunBuilderTest):
         self.assertEqual(environment["LOOP_RUN"], "1")
         self.assertEqual(environment["GH_REPO"], "owner/repo")
         self.assertEqual([name for name in caller if name in environment], ["CLAUDE_CONFIG_DIR"])
+        telemetry = request_events.telemetry_environment(self.receiver.port)
+        self.assertEqual({name: environment.get(name) for name in telemetry}, telemetry)
         self.assertEqual(
             (self.status()["account"], self.status()["outcome"], self.status()["tool"]), ("main", "finished", "claude")
         )
         self.assertEqual((self.run_folder() / "events.jsonl").read_text(), lines(INIT, "not an event", RESULT))
         self.assertFalse(self.worktree.exists())
         self.assertEqual(self.git("worktree", "list", "--porcelain").count("worktree "), 1)
+
+    def test_fails_without_running_claude_when_the_receiver_of_its_events_does_not_start(self) -> None:
+        self.receiver.shutdown()
+        port_file = self.loop / request_events.PORT_FILE
+        port_file.write_text("1\n")
+        port_file.chmod(0o444)
+        status, printed, _ = self.run_builder("--tool", "claude")
+        self.assertEqual(status, 1)
+        log = self.loop / request_events.LOG_FILE
+        self.assertIn(
+            f"| failed: The receiver of Claude Code's events didn't start, and ended with code 1. {log} says why. |",
+            printed,
+        )
+        self.assertEqual(self.calls("claude"), [])
 
     def test_claude_builder_runs_on_the_account_that_account_names_and_only_on_it(self) -> None:
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "/caller"}):
