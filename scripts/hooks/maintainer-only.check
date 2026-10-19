@@ -509,9 +509,33 @@ check_gh_api() {
   fi
 }
 
-# Succeeds if the gh command in command_words can post or change something on GitHub, rather than only read it.
+# Succeeds if the gh command in command_words has the flag --help, so that it only prints its help. -h doesn't count,
+# because gh repo create and gh repo edit read it as --homepage. gh reads a word after -- as an argument, and the word
+# after a flag that takes a value as that value, as in --description --help. The hook doesn't know which flags take a
+# value, so --help counts only after a word that isn't a flag, or after a flag that gives its value after =.
+prints_help() {
+  local i previous
+  for ((i = 2; i < ${#command_words[@]}; i++)); do
+    previous=${command_words[i - 1]}
+    case ${command_words[i]} in
+      --) return 1 ;;
+      --help)
+        if [[ $previous != -* || $previous == *=* ]]; then
+          return 0
+        fi
+        ;;
+    esac
+  done
+  return 1
+}
+
+# Succeeds if the gh command in command_words can post or change something on GitHub, rather than only read it or
+# print its help.
 # For gh api, run read_arguments and read_api_method first.
 gh_posts() {
+  if prints_help; then
+    return 1
+  fi
   case ${command_words[1]:-} in
     api) [[ $api_method != GET ]] ;;
     "" | -* | search | status | browse | auth | config | alias | extension | completion | help | version) return 1 ;;
