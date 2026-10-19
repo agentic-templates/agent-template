@@ -659,6 +659,18 @@ class RetrospectiveTest(MeterTest):
         self.assertEqual(self.retrospective(), "retrospective unknown: gh isn't installed. Install the GitHub CLI.")
 
 
+class HelpTest(unittest.TestCase):
+    def test_gives_the_number_of_merged_pull_requests_that_makes_a_retrospective_due(self) -> None:
+        printed = io.StringIO()
+        with (
+            mock.patch.object(meter, "MERGES_PER_RETROSPECTIVE", 12),
+            contextlib.redirect_stdout(printed),
+            self.assertRaises(SystemExit),
+        ):
+            meter.main(["--help"])
+        self.assertIn("after 12 merged pull requests,", " ".join(printed.getvalue().split()))
+
+
 class ScriptTest(MeterTest):
     def test_runs_as_a_script(self) -> None:
         done = subprocess.run(
