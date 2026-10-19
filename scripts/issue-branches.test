@@ -178,6 +178,40 @@ cat >"$base/same-branch.json" <<'ANSWER'
 ANSWER
 expect_branches "When two pull requests came from the same branch" 19 "$base/same-branch.json" 0 19-export-csv
 
+# GitHub lists the branches out of alphabetical order, and lists the linked branch again for a closed pull request.
+cat >"$base/order.json" <<'ANSWER'
+{
+  "data": {
+    "repository": {
+      "nameWithOwner": "owner/repo",
+      "issueOrPullRequest": {
+        "linkedBranches": {
+          "nodes": [{ "ref": { "name": "20-total-by-week", "repository": { "nameWithOwner": "owner/repo" } } }]
+        },
+        "closedByPullRequestsReferences": {
+          "nodes": [
+            {
+              "headRefName": "20-export-totals",
+              "isCrossRepository": false,
+              "state": "CLOSED",
+              "repository": { "nameWithOwner": "owner/repo" }
+            },
+            {
+              "headRefName": "20-total-by-week",
+              "isCrossRepository": false,
+              "state": "CLOSED",
+              "repository": { "nameWithOwner": "owner/repo" }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+ANSWER
+expect_branches "When GitHub lists the branches out of alphabetical order and repeats one" 20 "$base/order.json" \
+  0 $'20-total-by-week\n20-export-totals'
+
 cat >"$base/none.json" <<'ANSWER'
 {
   "data": {
