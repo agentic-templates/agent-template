@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Makes git run the hooks in scripts/git-hooks, such as the pre-push hook that runs scripts/leak-scan. The setting
+# holds for each worktree of the clone, and each worktree runs the hooks in its own checkout. Running the script again
+# changes nothing.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+hooks_path=scripts/git-hooks
+# git config exits with code 1 when the setting isn't set.
+current=$(git config --get core.hooksPath) || (($? == 1))
+if [[ $current == "$hooks_path" ]]; then
+  echo "git already runs the hooks in $hooks_path."
+  exit 0
+fi
+git config core.hooksPath "$hooks_path"
+if [[ -n $current ]]; then
+  echo "git now runs the hooks in $hooks_path, instead of the hooks in $current."
+else
+  echo "git now runs the hooks in $hooks_path."
+fi

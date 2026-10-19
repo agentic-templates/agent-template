@@ -151,11 +151,38 @@ jobs:
       - name: Run tests with bash 3.2
         run: scripts/test-scripts
 
+  # Fails a pull request or a merge group whose commits would publish a token, a private key, a socket path or a file
+  # that holds secrets, as scripts/leak-scan finds them. CI has no private folders, and its home folder is a runner's,
+  # so --generic leaves out the kinds that depend on the machine. A push to main lands commits that the merge queue
+  # scanned already.
+  leak-scan:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The scan reads the commits between the base and the head, so it needs the history.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # uv runs the scan with the Python version in .python-version.
+      - name: Install shellcheck, actionlint, zizmor and uv
+        run: |
+          scripts/install-check-tools "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Scan the new commits for leaks
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+        run: scripts/leak-scan --generic --range "$BASE..$HEAD"
+
   # The rules for main require a job named "check". If you rename it, change scripts/configure-github too.
   # It fails unless each job in needs passed or was skipped. When you add a job to this workflow, add it to needs.
   # It runs with if: always(), because otherwise a failed job would skip it, and GitHub counts a skip as a pass.
   check:
-    needs: [changes, linux, script-tests, bash-3-2]
+    needs: [changes, linux, script-tests, bash-3-2, leak-scan]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2

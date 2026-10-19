@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# git runs this hook before each push once scripts/install-git-hooks has set core.hooksPath to this folder. It blocks
+# the push when scripts/leak-scan finds a leak in what the push sends, and when the scan fails, because then nothing
+# says that the push is safe.
+set -uo pipefail
+
+status=0
+"$(dirname "$0")/../leak-scan" "$@" || status=$?
+case $status in
+  0) exit 0 ;;
+  1)
+    echo "error: the push is blocked, because it would publish what the lines above show. Rewrite each commit without it, and push again. If a finding isn't private, ask the maintainer. Don't push with --no-verify unless the maintainer says so." >&2
+    ;;
+  *)
+    echo "error: the push is blocked, because scripts/leak-scan couldn't scan the commits that the push sends. Fix the error above, and push again. Don't push with --no-verify unless the maintainer says so." >&2
+    ;;
+esac
+exit 1

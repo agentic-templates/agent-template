@@ -1,0 +1,730 @@
+#!/usr/bin/env -S uv run --script --quiet
+"""Blocks a push that would publish a token, a private key, a path into your home folder, a socket path, or the
+content or the path of a private folder.
+
+  scripts/leak-scan [--generic] <remote> <url>
+  scripts/leak-scan [--generic] --range <commit>..<commit>
+
+With a remote and its URL, it reads the lines that git gives a pre-push hook on standard input, and scans what the
+push sends: the commits that the remote's remote-tracking branches don't reach, and the annotated tags. With --range,
+it scans the commits in the range, as CI does.
+
+For each commit, it scans its message, its author and committer, any tag merged into it, the paths that it adds or
+renames, and each line that it adds to a file, against its first parent. In a binary file, it scans the runs
+of text. For a tag, it scans its name, message, tagger and target.
+
+It prints a line for each finding, with the kind, the commit, the place and the line, with each value that it found
+replaced. It exits with code 1 when it finds anything, 0 when it finds nothing, and 2 when it can't scan.
+
+The kinds:
+- private-line, private-file and private-folder: a line from a text file in a private folder, a copy of a file there,
+  or the folder's path. .loop/leak-scan.paths in the main checkout lists the private folders, one to a line, and a
+  line can start with ~. A line from a private file counts in a block of 3 or more such lines in a row, or alone
+  when it reads as prose. A copy of a private file counts unless it's nearly empty, or the remote has it already.
+- home-path: the home folder's path, also with escaped slashes, as JSON writes it, or with a dash for each / and .,
+  as Claude Code names a project's folder, and /Users/<user>/ or /home/<user>/ for the user who runs the scan.
+- socket-path: the socket paths in KITTY_LISTEN_ON and TMUX, and each path with the shape of a kitty, tmux, cc-socks
+  or agent-coord socket.
+- token and private-key: a token of a kind in TOKEN_PATTERNS, a value of 20 or more characters assigned to a name such
+  as API_KEY, SECRET, TOKEN or PASSWORD, and a private key block.
+- secret-file: an added .env or .env.* file other than .env.example, or an id_rsa*, id_dsa*, id_ecdsa*,
+  id_ed25519*, *.p12 or *.pfx file other than a .pub file.
+
+--generic leaves out the kinds that depend on this machine: the private folders, the home folder and the socket paths
+in the environment. CI uses it, because it has no private folders, and its home folder is a runner's.
+"""
+
+import argparse
+import getpass
+import hashlib
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import NamedTuple, NoReturn
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "loop"))
+import paths
+
+# A line from a private file counts only when it has at least this many characters without the wrappers around it,
+# so that short common lines, such as "return None", don't count.
+MIN_FINGERPRINT_LENGTH = 30
+# A lone line of code, such as "for line in text.splitlines():", is common to many projects. So a line from a private
+# file counts only in a block of at least MIN_PRIVATE_RUN such lines in a row, or when it reads as prose: at least
+# MIN_PROSE_WORDS words of letters, MIN_PROSE_LENGTH characters, and PROSE_SHARE of its characters letters and spaces.
+MIN_PRIVATE_RUN = 3
+MIN_PROSE_WORDS = 8
+MIN_PROSE_LENGTH = 60
+PROSE_SHARE = 0.85
+# A copy of a private file with fewer characters than this, other than white space, such as "1", doesn't count,
+# because many files hold that much.
+MIN_PRIVATE_FILE_CHARACTERS = 8
+# The scan doesn't read the lines of a private file larger than this, so that a large archive doesn't slow each push.
+# A copy of the whole file still counts.
+MAX_FINGERPRINT_BYTES = 4 * 1024 * 1024
+# A run of text in a binary file counts when it has at least this many characters.
+MIN_BINARY_STRING = 8
+# The accounts that no person uses, as is_shared_home_folder in scripts/text-rules lists them, and root.
+SHARED_HOME_NAMES = {"runner", "runneradmin", "node", "linuxbrew", "vscode", "Shared", "Public", "root"}
+# A value doesn't count when one of these characters follows it, so that /Users/sam doesn't match /Users/samuel.
+NAME_CHARACTER = re.compile(r"[A-Za-z0-9._-]")
+SLUG_CHARACTER = re.compile(r"[A-Za-z0-9._]")
+SUBMODULE_MODE = "160000"
+
+# Each kind of token, its shape, and how many characters of a match the excerpt keeps.
+TOKEN_PATTERNS = [
+    ("GitHub token", r"(?<![A-Za-z0-9])(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}", 4),
+    ("GitHub token", r"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{30,}", 11),
+    ("GitLab token", r"(?<![A-Za-z0-9])glpat-[A-Za-z0-9_-]{20,}", 6),
+    ("Anthropic key", r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}", 7),
+    ("OpenAI key", r"(?<![A-Za-z0-9])sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}", 8),
+    ("OpenAI key", r"(?<![A-Za-z0-9])sk-[A-Za-z0-9]{20,}", 3),
+    ("Stripe key", r"(?<![A-Za-z0-9])(?:sk|rk)_live_[A-Za-z0-9]{20,}", 8),
+    ("AWS access key ID", r"(?<![A-Za-z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])", 4),
+    ("Slack token", r"(?<![A-Za-z0-9])xox[abeoprs]-[A-Za-z0-9-]{10,}", 5),
+    ("Google API key", r"(?<![A-Za-z0-9])AIza[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])", 4),
+]
+TOKENS = [(what, re.compile(pattern), keep) for what, pattern, keep in TOKEN_PATTERNS]
+PRIVATE_KEY = re.compile(r"-----BEGIN[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----")
+# A value of 20 or more characters assigned to a name that says it's a secret, as in API_KEY = "..." or
+# "password": "...". Group 1 is the name, and group 2 the value. A name starts only after a character that can't be in
+# it, because otherwise each character of a long line, such as a hex string, would start a search to the line's end.
+ASSIGNMENT = re.compile(
+    r"(?i)(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]*(?:secret|token|passwd|password|api_?key|access_?key|private_?key|"
+    r"credentials?|auth_?key)[A-Za-z0-9_]*)[\"']?\s*(?::=|=>|=|:)\s*[\"']?([A-Za-z0-9+/_.~=-]{20,})"
+)
+# The shapes of terminal and agent socket paths, whatever their session's number. A path starts only after a character
+# that can't be in it, for the reason that ASSIGNMENT gives.
+SOCKET_SHAPES = [
+    (
+        "a kitty socket path",
+        r"(?:unix:)?(?:/private)?(?:/tmp|/var/folders/[^/\s]+/[^/\s]+/T|/run/user/\d+)/kitty[\w.-]*",
+    ),
+    ("a kitty socket path", r"unix:@?[\w.~/-]*kitty[\w.-]*"),
+    ("a tmux socket path", r"(?<![\w.~/-])[\w.~/-]*/tmux-\d+/[\w.-]+"),
+    ("a Claude Code socket path", r"(?<![\w.~/-])[\w.~/-]*/cc-socks/[\w.-]+"),
+    ("an agent-coord socket path", r"(?<![\w.~/-])[\w.~/-]*/agent-coord/[\w.-]+"),
+]
+SOCKETS = [(what, re.compile(pattern)) for what, pattern in SOCKET_SHAPES]
+# The wrappers around a line that the scan leaves out before it compares the line with the lines of private files.
+LEADING_WRAPPER = re.compile(r"^(?:\s+|>+|#+|//+|--+(?!\S)|;+|/\*+|\*+|<!--|[-+•](?=\s)|\d+[.)](?=\s)|[\"'`“”‘’]+)")
+TRAILING_WRAPPER = re.compile(r"(?:\s+|\*+/|-->|[\"'`“”‘’]+|[,;])$")
+# The names of the files that hold secrets, by their name alone.
+SECRET_FILE = re.compile(r"^(?:\.env(?:\..*)?|id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?.*|.*\.p12|.*\.pfx)$")
+
+
+class ScanError(Exception):
+    """An error that stops the scan."""
+
+
+def run_git(arguments: tuple[str, ...], stdin: bytes | None) -> subprocess.CompletedProcess[bytes]:
+    command = ["git", "-c", "core.quotePath=false", *arguments]
+    return subprocess.run(command, input=stdin, capture_output=True, check=False)
+
+
+def git(*arguments: str, stdin: bytes | None = None) -> bytes:
+    """Runs git in the current folder, and returns its output."""
+    result = run_git(arguments, stdin)
+    if result.returncode != 0:
+        raise ScanError(f"git {' '.join(arguments[:2])} failed: {text(result.stderr).strip()}")
+    return result.stdout
+
+
+def git_or_none(*arguments: str) -> bytes | None:
+    """Runs git in the current folder, and returns its output, or None when git fails."""
+    result = run_git(arguments, None)
+    return result.stdout if result.returncode == 0 else None
+
+
+def text(data: bytes) -> str:
+    return data.decode("utf-8", "replace")
+
+
+def is_zero(sha: str) -> bool:
+    return set(sha) == {"0"}
+
+
+def canonical(line: str) -> str:
+    """Returns a line without the wrappers around it, and with its white space collapsed."""
+    previous = None
+    while previous != line:
+        previous = line
+        line = LEADING_WRAPPER.sub("", line)
+        line = TRAILING_WRAPPER.sub("", line)
+    return " ".join(line.split())
+
+
+def reads_as_prose(line: str) -> bool:
+    words = [word for word in line.split() if re.fullmatch(r"[A-Za-z]+(?:['-][A-Za-z]+)*[.,;:!?]?", word)]
+    letters_and_spaces = sum(1 for char in line if char.isalpha() or char == " ")
+    return (
+        len(words) >= MIN_PROSE_WORDS
+        and len(line) >= MIN_PROSE_LENGTH
+        and letters_and_spaces >= PROSE_SHARE * len(line)
+    )
+
+
+def is_trivial(data: bytes) -> bool:
+    return len(data.translate(None, b" \t\n\r\f\v")) < MIN_PRIVATE_FILE_CHARACTERS
+
+
+def binary_strings(data: bytes) -> list[str]:
+    """Returns the runs of ASCII and of UTF-16 text in binary data."""
+    runs = [text(run) for run in re.findall(rb"[\t\x20-\x7e]{%d,}" % MIN_BINARY_STRING, data)]
+    wide: list[str] = []
+    for encoding, pattern in (
+        ("utf-16-le", rb"(?:[\t\x20-\x7e]\x00){%d,}"),
+        ("utf-16-be", rb"(?:\x00[\t\x20-\x7e]){%d,}"),
+    ):
+        for run in re.findall(pattern % MIN_BINARY_STRING, data):
+            decoded = run.decode(encoding)
+            # Text in one byte order also reads as the same text in the other, one byte later.
+            if not any(decoded in other for other in wide):
+                wide.append(decoded)
+    return runs + wide
+
+
+def content_lines(data: bytes) -> tuple[list[str], bool]:
+    """Returns the lines of a file, or the runs of text in it when it's binary, and whether it's binary."""
+    if b"\0" in data:
+        return binary_strings(data), True
+    return text(data).splitlines(), False
+
+
+def escaped_forms(value: str) -> list[str]:
+    """Returns a path as it is, and as JSON, URLs and escaped strings write its slashes."""
+    if "/" not in value:
+        return [value]
+    return [value] + [value.replace("/", slash) for slash in ("\\/", "\\\\/", "\\u002f", "\\u002F", "%2F", "%2f")]
+
+
+def blob_hash(data: bytes, object_format: str) -> str:
+    return hashlib.new(object_format, b"blob %d\0" % len(data) + data).hexdigest()
+
+
+class Literal(NamedTuple):
+    """A text that must not appear, what the excerpt shows in its place, and the characters that may not follow it."""
+
+    kind: str
+    what: str
+    value: str
+    replacement: str
+    not_followed_by: re.Pattern[str] | None
+
+
+class Found(NamedTuple):
+    """A value that a line holds, from start to end, and what the excerpt shows in its place."""
+
+    start: int
+    end: int
+    kind: str
+    what: str
+    replacement: str
+
+
+def token_matches(line: str) -> list[Found]:
+    found: list[Found] = []
+    for what, pattern, keep in TOKENS:
+        for match in pattern.finditer(line):
+            found.append(Found(match.start(), match.end(), "token", "a " + what, match.group()[:keep] + "[redacted]"))
+    for match in PRIVATE_KEY.finditer(line):
+        found.append(Found(match.start(), match.end(), "private-key", "a private key block", match.group()))
+    for match in ASSIGNMENT.finditer(line):
+        value = match.group(2)
+        # A value without both letters and digits is a placeholder or a word, such as your-password-goes-here.
+        if re.search(r"[A-Za-z]", value) and re.search(r"[0-9]", value):
+            what = "a secret assigned to " + match.group(1)
+            found.append(Found(match.start(2), match.end(2), "token", what, "[redacted]"))
+    return found
+
+
+def socket_matches(line: str) -> list[Found]:
+    found: list[Found] = []
+    for what, pattern in SOCKETS:
+        for match in pattern.finditer(line):
+            found.append(Found(match.start(), match.end(), "socket-path", what, "<socket>"))
+    return found
+
+
+def without_overlaps(found: list[Found]) -> list[Found]:
+    """Returns the values in the order of the line. Where two overlap, the longer one wins, so that the path of a
+    private folder in the home folder counts as a private folder."""
+    kept: list[Found] = []
+    for match in sorted(found, key=lambda match: (match.start - match.end, match.start)):
+        if all(match.end <= other.start or match.start >= other.end for other in kept):
+            kept.append(match)
+    return sorted(kept)
+
+
+class Rules:
+    """The values that the scan looks for."""
+
+    def __init__(self, generic: bool, object_format: str) -> None:
+        self.literals: list[Literal] = []
+        # The lines and the blob hashes of the private files, each with the label of its private folder
+        self.fingerprints: dict[str, str] = {}
+        self.private_hashes: dict[str, str] = {}
+        self.object_format = object_format
+        if not generic:
+            self.add_home_paths()
+            self.add_socket_paths()
+            self.add_private_folders()
+
+    def add_literal(
+        self,
+        kind: str,
+        what: str,
+        value: str,
+        replacement: str,
+        not_followed_by: re.Pattern[str] | None = NAME_CHARACTER,
+    ) -> None:
+        for form in escaped_forms(value):
+            if all(literal.value != form for literal in self.literals):
+                self.literals.append(Literal(kind, what, form, replacement, not_followed_by))
+
+    def add_home_paths(self) -> None:
+        home = os.environ.get("HOME", "").rstrip("/")
+        if home and os.path.basename(home) not in SHARED_HOME_NAMES:
+            self.add_literal("home-path", "the home folder", home, "$HOME")
+            # Claude Code names a project's folder after its path, with a dash for each / and ., as in -Users-sam-app.
+            slug = re.sub(r"[/.]", "-", home)
+            self.add_literal(
+                "home-path", "the home folder in a project's folder name", slug, "<home slug>", SLUG_CHARACTER
+            )
+        user = getpass.getuser()
+        if user not in SHARED_HOME_NAMES:
+            for folder in ("/Users/", "/home/"):
+                path = folder + user + "/"
+                self.add_literal("home-path", "a path into the user's home folder", path, folder + "<user>/", None)
+
+    def add_socket_paths(self) -> None:
+        kitty = os.environ.get("KITTY_LISTEN_ON", "").removeprefix("unix:")
+        tmux = os.environ.get("TMUX", "").split(",")[0]
+        for name, socket in (("kitty", kitty), ("tmux", tmux)):
+            forms = [socket]
+            # macOS's /tmp is /private/tmp.
+            if socket.startswith("/private/"):
+                forms.append(socket.removeprefix("/private"))
+            for form in forms:
+                if form:
+                    self.add_literal("socket-path", f"the {name} socket path", form, f"<{name} socket>")
+
+    def add_private_folders(self) -> None:
+        list_file = paths.loop_dir() / "leak-scan.paths"
+        try:
+            lines = list_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise ScanError(f"can't read {list_file}: {error.strerror}") from error
+        home = os.environ.get("HOME", "").rstrip("/")
+        for number, line in enumerate(lines, 1):
+            entry = line.strip()
+            if not entry or entry.startswith("#"):
+                continue
+            label = f"the private folder on line {number}"
+            folder = os.path.abspath(os.path.expanduser(entry)).rstrip("/") or "/"
+            if not os.path.isdir(folder):
+                raise ScanError(f"{label} of {list_file} isn't a folder that exists. Fix the line, or remove it.")
+            variants = [folder, os.path.realpath(folder)]
+            if home and folder.startswith(home + "/"):
+                rest = folder.removeprefix(home)
+                variants += ["~" + rest, "$HOME" + rest, "${HOME}" + rest]
+            for variant in variants:
+                self.add_literal("private-folder", "the path of " + label, variant, f"<{label}>")
+            self.fingerprint(folder, label)
+
+    def fingerprint(self, folder: str, label: str) -> None:
+        """Adds the lines and the blob hashes of the files in a private folder."""
+
+        def stop(error: OSError) -> NoReturn:
+            raise ScanError(f"can't read a file or folder in {label}: {error.strerror}") from error
+
+        for root, folders, files in os.walk(folder, onerror=stop):
+            folders[:] = [name for name in folders if name != ".git"]
+            for name in files:
+                path = os.path.join(root, name)
+                if os.path.islink(path) or not os.path.isfile(path):
+                    continue
+                try:
+                    data = Path(path).read_bytes()
+                except OSError as error:
+                    stop(error)
+                self.fingerprint_file(data, label)
+
+    def fingerprint_file(self, data: bytes, label: str) -> None:
+        if not is_trivial(data):
+            self.private_hashes.setdefault(blob_hash(data, self.object_format), label)
+        if len(data) > MAX_FINGERPRINT_BYTES:
+            return
+        for line in content_lines(data)[0]:
+            line = canonical(line)
+            if len(line) >= MIN_FINGERPRINT_LENGTH:
+                self.fingerprints.setdefault(line, label)
+
+    def literal_matches(self, line: str) -> list[Found]:
+        found: list[Found] = []
+        for literal in self.literals:
+            start = line.find(literal.value)
+            while start >= 0:
+                end = start + len(literal.value)
+                if not literal.not_followed_by or end == len(line) or not literal.not_followed_by.match(line[end]):
+                    found.append(Found(start, end, literal.kind, literal.what, literal.replacement))
+                start = line.find(literal.value, start + 1)
+        return found
+
+    def matches(self, line: str) -> list[Found]:
+        """Returns the values that a line holds, without overlaps."""
+        return without_overlaps(self.literal_matches(line) + token_matches(line) + socket_matches(line))
+
+    def redact(self, line: str) -> str:
+        """Returns a line with each value that it holds replaced, cut to a length that fits in one line."""
+        pieces: list[str] = []
+        position = 0
+        first = None
+        for match in self.matches(line):
+            pieces.append(line[position : match.start])
+            if first is None:
+                first = sum(len(piece) for piece in pieces)
+            pieces.append(match.replacement)
+            position = match.end
+        pieces.append(line[position:])
+        result = "".join(pieces).strip()
+        if len(result) <= 120:
+            return result
+        begin = max(0, (first or 0) - 40)
+        return ("…" if begin else "") + result[begin : begin + 120] + "…"
+
+
+class RunLine(NamedTuple):
+    """A line that matches a line of a private file."""
+
+    commit: str
+    place: str
+    number: int
+    where: str
+    text: str
+    label: str
+
+
+class Scan:
+    def __init__(self, rules: Rules, public_refs: list[str]) -> None:
+        self.rules = rules
+        self.public_refs = public_refs
+        self.public_blobs: set[str] | None = None
+        self.findings: list[str] = []
+        # The lines in a row, so far, that match lines of private files
+        self.run: list[RunLine] = []
+
+    def report(self, kind: str, commit: str, where: str, detail: str) -> None:
+        self.findings.append(f"{kind} in {commit} {where}: {detail}")
+
+    def check_line(self, commit: str, place: str, number: int, line: str, where: str | None = None) -> None:
+        """Checks a line of a file, or of a message when place ends in "message"."""
+        if where is None:
+            where = f"{place} line {number}" if place.endswith("message") else f"{place}:{number}"
+        line_text = canonical(line)
+        label = self.rules.fingerprints.get(line_text) if len(line_text) >= MIN_FINGERPRINT_LENGTH else None
+        follows_run = bool(self.run) and self.run[-1][:2] == (commit, place) and self.run[-1].number == number - 1
+        if not (label and follows_run):
+            self.end_run()
+        if label:
+            self.run.append(RunLine(commit, place, number, where, line_text, label))
+        self.check_values(commit, where, line)
+
+    def end_run(self) -> None:
+        """Reports the lines from private files that the last lines checked hold."""
+        run, self.run = self.run, []
+        if len(run) >= MIN_PRIVATE_RUN:
+            where = self.rules.redact(run[0].where) + f"-{run[-1].number}"
+            self.report(
+                "private-line", run[0].commit, where, f"a block of {len(run)} lines in a row from {run[0].label}"
+            )
+            return
+        for line in run:
+            if reads_as_prose(line.text):
+                detail = f"a sentence of {len(line.text)} characters from {line.label}"
+                self.report("private-line", line.commit, self.rules.redact(line.where), detail)
+
+    def check_values(self, commit: str, where: str, line: str) -> None:
+        reported: set[tuple[str, str]] = set()
+        for match in self.rules.matches(line):
+            if (match.kind, match.what) not in reported:
+                reported.add((match.kind, match.what))
+                self.report(
+                    match.kind, commit, self.rules.redact(where), f"{match.what}, in: {self.rules.redact(line)}"
+                )
+
+    def check_path(self, commit: str, path: str) -> None:
+        self.check_values(commit, "path " + path, path)
+        name = os.path.basename(path)
+        if SECRET_FILE.match(name) and name != ".env.example" and not name.endswith(".pub"):
+            self.report("secret-file", commit, self.rules.redact(path), "a file that holds secrets")
+
+    def check_content(self, commit: str, path: str, data: bytes, old_data: bytes | None = None) -> None:
+        """Checks the lines of a file that its old version lacks, and whether the file is a copy of a private one."""
+        lines, binary = content_lines(data)
+        old_lines = set(content_lines(old_data)[0]) if old_data is not None else set()
+        for number, line in enumerate(lines, 1):
+            if line not in old_lines:
+                where = f"{path}, text {number} in the binary file" if binary else None
+                self.check_line(commit, path, number, line, where)
+        self.end_run()
+        blob = blob_hash(data, self.rules.object_format)
+        label = None if is_trivial(data) else self.rules.private_hashes.get(blob)
+        if label and not self.is_public_blob(blob):
+            self.report("private-file", commit, self.rules.redact(path), "the content of a file in " + label)
+
+    def is_public_blob(self, blob: str) -> bool:
+        if self.public_blobs is None:
+            output = git("rev-list", "--objects", *self.public_refs, "--") if self.public_refs else b""
+            self.public_blobs = {line.split(b" ")[0].decode() for line in output.splitlines()}
+        return blob in self.public_blobs
+
+
+def read_objects(shas: list[str]) -> dict[str, tuple[str, bytes]]:
+    """Returns the type and the content of each object."""
+    shas = list(dict.fromkeys(shas))
+    if not shas:
+        return {}
+    output = git("cat-file", "--batch", stdin=("\n".join(shas) + "\n").encode())
+    objects: dict[str, tuple[str, bytes]] = {}
+    position = 0
+    for sha in shas:
+        header_end = output.index(b"\n", position)
+        header = output[position:header_end].split()
+        if len(header) != 3:
+            raise ScanError("git has no object " + sha)
+        size = int(header[2])
+        objects[sha] = (header[1].decode(), output[header_end + 1 : header_end + 1 + size])
+        position = header_end + 1 + size + 1
+    return objects
+
+
+def parse_object(data: bytes) -> tuple[list[tuple[str, str]], str]:
+    """Splits a commit or a tag into its headers, each with its continuation lines, and its message."""
+    head, _, message = data.partition(b"\n\n")
+    headers: list[tuple[str, str]] = []
+    for line in text(head).split("\n"):
+        if line.startswith(" ") and headers:
+            headers[-1] = (headers[-1][0], headers[-1][1] + "\n" + line[1:])
+        else:
+            name, _, value = line.partition(" ")
+            headers.append((name, value))
+    return headers, text(message)
+
+
+def scan_object_text(scan: Scan, label: str, kind: str, data: bytes) -> None:
+    """Scans the headers and the message of a commit, or of a tag: kind is commit, or the tag's name."""
+    headers, message = parse_object(data)
+    place = "message" if kind == "commit" else f"tag {kind} message"
+    for number, line in enumerate(message.splitlines(), 1):
+        scan.check_line(label, place, number, line)
+    scan.end_run()
+    for name, value in headers:
+        if name == "mergetag":
+            embedded = value.encode()
+            tag_headers = dict(parse_object(embedded)[0])
+            scan_object_text(scan, label, tag_headers.get("tag", "merged"), embedded)
+        elif name == "tag":
+            scan.check_values(label, "tag name", value)
+        elif name not in ("tree", "parent", "object", "type", "encoding") and not name.startswith("gpgsig"):
+            scan.check_values(label, name + " header", value)
+
+
+class Change(NamedTuple):
+    """A file that a commit changes against its first parent."""
+
+    commit: str
+    status: str
+    old: str
+    new: str
+    mode: str
+    path: str
+
+
+def tree_changes(commits: list[str]) -> list[Change]:
+    """Returns the changes of each commit against its first parent. git separates the fields with NUL bytes, so no
+    byte of a path can end a field."""
+    output = git(
+        "diff-tree", "--stdin", "-z", "-r", "-M", "--root", "--diff-merges=first-parent", "--no-abbrev",
+        "--no-ext-diff", "--no-relative", stdin=("\n".join(commits) + "\n").encode(),
+    )  # fmt: skip
+    fields = output.split(b"\0")
+    changes: list[Change] = []
+    commit = ""
+    index = 0
+    while index < len(fields):
+        field = text(fields[index])
+        index += 1
+        if field.startswith(":"):
+            # ":<old mode> <new mode> <old blob> <new blob> <status>", then the path, or the old and the new path
+            parts = field[1:].split()
+            status = parts[4]
+            count = 2 if status[:1] in ("R", "C") else 1
+            path = text(fields[index + count - 1])
+            index += count
+            changes.append(Change(commit, status, parts[2], parts[3], parts[1], path))
+        elif field:
+            commit = field.strip()
+    return changes
+
+
+def changed_blobs(changes: list[Change]) -> list[str]:
+    """Returns the old and the new blobs of the files that the changes add or change, other than submodules."""
+    blobs: list[str] = []
+    for change in changes:
+        if change.mode == SUBMODULE_MODE or change.status[:1] == "D":
+            continue
+        blobs.append(change.new)
+        if change.status[:1] != "A":
+            blobs.append(change.old)
+    return blobs
+
+
+def scan_commits(scan: Scan, commits: list[str]) -> None:
+    for commit, (_, data) in read_objects(commits).items():
+        scan_object_text(scan, commit[:12], "commit", data)
+    changes = tree_changes(commits)
+    contents = read_objects(changed_blobs(changes))
+    for change in changes:
+        label = change.commit[:12]
+        if change.status[:1] in ("A", "R", "C"):
+            scan.check_path(label, change.path)
+        if change.mode == SUBMODULE_MODE or change.status[:1] == "D":
+            continue
+        old_data = contents[change.old][1] if change.status[:1] != "A" else None
+        scan.check_content(label, change.path, contents[change.new][1], old_data)
+
+
+def scan_tree(scan: Scan, label: str, treeish: str, prefix: str) -> None:
+    blobs: list[tuple[str, str]] = []
+    for entry in git("ls-tree", "-r", "-z", "--full-tree", treeish).split(b"\0"):
+        meta, _, name = entry.partition(b"\t")
+        parts = meta.split()
+        if len(parts) == 3 and parts[1] == b"blob":
+            blobs.append((prefix + text(name), parts[2].decode()))
+            scan.check_path(label, prefix + text(name))
+    contents = read_objects([blob for _, blob in blobs])
+    for path, blob in blobs:
+        scan.check_content(label, path, contents[blob][1])
+
+
+def scan_object(scan: Scan, label: str, sha: str, what: str) -> None:
+    """Scans a pushed or tagged object other than a commit or a tag: a file, or a tree."""
+    kind, data = read_objects([sha])[sha]
+    if kind == "blob":
+        scan.check_content(label, f"the {what} file", data)
+    else:
+        scan_tree(scan, label, sha, f"the {what} tree/")
+
+
+def scan_other_objects(scan: Scan, shas: list[str]) -> None:
+    """Scans each object other than a commit that a push sends to a ref: an annotated tag, with its target when that
+    isn't a commit, a tree or a file."""
+    pending = list(shas)
+    seen: set[str] = set()
+    while pending:
+        sha = pending.pop()
+        if sha in seen:
+            continue
+        seen.add(sha)
+        kind, data = read_objects([sha])[sha]
+        if kind != "tag":
+            scan_object(scan, sha[:12], sha, "pushed")
+            continue
+        headers = dict(parse_object(data)[0])
+        name = headers.get("tag", sha[:12])
+        scan_object_text(scan, "tag " + name, name, data)
+        if headers.get("type") == "tag":
+            pending.append(headers["object"])
+        elif headers.get("type") != "commit":
+            scan_object(scan, "tag " + name, headers["object"], "tagged")
+
+
+def pushed_objects(lines: list[str], remote: str) -> tuple[list[str], list[str]]:
+    """Returns the commits and the other objects that a push sends, from the lines that git gives a pre-push hook:
+    "<local ref> <local sha> <remote ref> <remote sha>"."""
+    commits: list[str] = []
+    others: list[str] = []
+    for line in lines:
+        parts = line.split()
+        # A line whose local sha is all zeros deletes a ref.
+        if len(parts) < 4 or is_zero(parts[1]) or parts[1] == parts[3]:
+            continue
+        local_sha, remote_sha = parts[1], parts[3]
+        if text(git("cat-file", "-t", local_sha)).strip() != "commit":
+            others.append(local_sha)
+        # The commit that the ref points to through any tags, or none for a ref to a tree or a file
+        tip = git_or_none("rev-parse", "--verify", "--quiet", local_sha + "^{commit}")
+        if tip is None:
+            continue
+        arguments = [text(tip).strip()]
+        if not is_zero(remote_sha) and git_or_none("cat-file", "-e", remote_sha + "^{commit}") is not None:
+            arguments.append("^" + remote_sha)
+        commits += text(git("rev-list", *arguments, "--not", "--remotes=" + remote, "--")).split()
+    return list(dict.fromkeys(commits)), others
+
+
+def parse_arguments(arguments: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="scripts/leak-scan",
+        description="Scans what a push would publish for leaks. With a remote and its URL, it reads the lines that git "
+        "gives a pre-push hook on standard input.",
+    )
+    parser.add_argument("--generic", action="store_true", help="leave out the kinds that depend on this machine")
+    parser.add_argument("--range", metavar="<commit>..<commit>", help="scan the commits in the range instead")
+    parser.add_argument("remote", nargs="?", help="the remote that the push goes to")
+    parser.add_argument("url", nargs="?", help="the remote's URL")
+    options = parser.parse_args(arguments)
+    if options.range is None and options.url is None:
+        parser.error("give a remote and its URL, or --range")
+    if options.range is not None and options.remote is not None:
+        parser.error("give a remote and its URL, or --range, but not both")
+    return options
+
+
+def plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def run_scan(options: argparse.Namespace) -> tuple[Scan, str]:
+    """Runs the scan, and returns it with a description of what it scanned."""
+    rules = Rules(options.generic, text(git("rev-parse", "--show-object-format")).strip())
+    if options.range is not None:
+        scan = Scan(rules, [])
+        commits = text(git("rev-list", options.range, "--")).split()
+        scan_commits(scan, commits)
+        scan.end_run()
+        return scan, plural(len(commits), "commit")
+    commits, others = pushed_objects(sys.stdin.read().splitlines(), options.remote)
+    scan = Scan(rules, ["--remotes=" + options.remote])
+    scan_commits(scan, commits)
+    scan_other_objects(scan, others)
+    scan.end_run()
+    return scan, plural(len(commits), "commit") + " and " + plural(len(others), "other object")
+
+
+def main(arguments: list[str]) -> int:
+    options = parse_arguments(arguments)
+    try:
+        scan, scanned = run_scan(options)
+    except ScanError as error:
+        print(f"error: scripts/leak-scan can't scan: {error}", file=sys.stderr)
+        return 2
+    for finding in scan.findings:
+        print(finding)
+    if not scan.findings:
+        print(f"scripts/leak-scan found nothing in {scanned}.", file=sys.stderr)
+        return 0
+    print(f"scripts/leak-scan found {plural(len(scan.findings), 'leak')} in {scanned}.", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Exception as error:  # noqa: BLE001, because an error of the scan's own exits with code 2 too, so that no caller takes it for a finding
+        print(f"error: scripts/leak-scan failed: {type(error).__name__}: {error}", file=sys.stderr)
+        sys.exit(2)
