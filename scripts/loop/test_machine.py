@@ -35,10 +35,11 @@ HugePages_Total:       0
 """
 NVIDIA_SMI = "27, 3100\n81, 12000\n"
 
-# A stand-in for a command, which prints the file named after it in STANDIN_DIR, or fails if there's none.
+# A stand-in for a command, which prints the file in STANDIN_DIR named after the command and its arguments, or fails
+# if there's none.
 STANDIN = f"""#!{sys.executable} -S
 import os, sys
-answer = os.path.join(os.environ["STANDIN_DIR"], os.path.basename(sys.argv[0]))
+answer = os.path.join(os.environ["STANDIN_DIR"], " ".join([os.path.basename(sys.argv[0]), *sys.argv[1:]]))
 if not os.path.exists(answer):
     sys.exit(1)
 sys.stdout.write(open(answer).read())
@@ -63,22 +64,29 @@ class MacosMemoryTest(unittest.TestCase):
 
 class MacosGpuTest(unittest.TestCase):
     def test_reads_the_use_and_the_memory_that_the_gpu_takes_of_the_main_memory(self) -> None:
-        self.assertEqual(machine.macos_gpu(IOREG), machine.Gpu(27.0, 6624411648, True))
+        self.assertEqual(machine.macos_gpu(IOREG, is_apple_silicon=True), machine.Gpu(27.0, 6624411648, True))
+
+    def test_gives_only_the_use_of_the_gpu_of_an_intel_mac(self) -> None:
+        self.assertEqual(machine.macos_gpu(IOREG, is_apple_silicon=False), machine.Gpu(27.0, None, None))
+        no_use = '"PerformanceStatistics" = {"Alloc system memory"=1000}'
+        self.assertEqual(machine.macos_gpu(no_use, is_apple_silicon=False), machine.Gpu(None, None, None))
 
     def test_takes_the_busiest_gpu_and_the_memory_of_all(self) -> None:
         second = IOREG.replace('"Device Utilization %"=27', '"Device Utilization %"=60')
-        self.assertEqual(machine.macos_gpu(IOREG + second), machine.Gpu(60.0, 2 * 6624411648, True))
+        self.assertEqual(
+            machine.macos_gpu(IOREG + second, is_apple_silicon=True), machine.Gpu(60.0, 2 * 6624411648, True)
+        )
 
     def test_gives_no_gpu_reading_without_statistics(self) -> None:
-        self.assertEqual(machine.macos_gpu(""), machine.Gpu(None, None, None))
+        self.assertEqual(machine.macos_gpu("", is_apple_silicon=True), machine.Gpu(None, None, None))
         no_numbers = '"PerformanceStatistics" = {"recoveryCount"=3}'
-        self.assertEqual(machine.macos_gpu(no_numbers), machine.Gpu(None, None, None))
+        self.assertEqual(machine.macos_gpu(no_numbers, is_apple_silicon=True), machine.Gpu(None, None, None))
 
     def test_gives_the_numbers_that_the_statistics_hold(self) -> None:
         only_memory = '"PerformanceStatistics" = {"Alloc system memory"=1000}'
-        self.assertEqual(machine.macos_gpu(only_memory), machine.Gpu(None, 1000, True))
+        self.assertEqual(machine.macos_gpu(only_memory, is_apple_silicon=True), machine.Gpu(None, 1000, True))
         only_use = '"PerformanceStatistics" = {"Device Utilization %"=5}'
-        self.assertEqual(machine.macos_gpu(only_use), machine.Gpu(5.0, None, True))
+        self.assertEqual(machine.macos_gpu(only_use, is_apple_silicon=True), machine.Gpu(5.0, None, True))
 
 
 class LinuxMemoryTest(unittest.TestCase):
@@ -104,7 +112,8 @@ class NvidiaGpuTest(unittest.TestCase):
 
 
 class ReadMachineTest(unittest.TestCase):
-    """read_machine with stand-ins for the commands that it runs, first on PATH."""
+    """read_machine with stand-ins for the commands that it runs, alone on PATH, so that the machine's own commands
+    don't answer."""
 
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory()
@@ -117,7 +126,7 @@ class ReadMachineTest(unittest.TestCase):
         for command in ("sysctl", "vm_stat", "ioreg", "nvidia-smi"):
             (self.bin / command).write_text(STANDIN)
             (self.bin / command).chmod(0o755)
-        environment = {"PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", "STANDIN_DIR": str(self.answers)}
+        environment = {"PATH": str(self.bin), "STANDIN_DIR": str(self.answers)}
         for patcher in (
             mock.patch.dict(os.environ, environment),
             mock.patch.object(machine, "MEMINFO", self.root / "meminfo"),
@@ -125,16 +134,20 @@ class ReadMachineTest(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def answer(self, command: str, text: str) -> None:
-        (self.answers / command).write_text(text)
+    def answer(self, command: list[str], text: str) -> None:
+        (self.answers / " ".join(command)).write_text(text)
+
+    def answer_mac(self) -> None:
+        for command, text in ((machine.MACOS_MEMORY, SYSCTL), (machine.VM_STAT, VM_STAT), (machine.IOREG, IOREG)):
+            self.answer(command, text)
 
     def read(self, platform: str) -> machine.Machine:
         with mock.patch.object(sys, "platform", platform):
             return machine.read_machine(self.root)
 
     def test_reads_each_number_on_a_mac_whose_gpu_shares_the_main_memory(self) -> None:
-        for command, text in (("sysctl", SYSCTL), ("vm_stat", VM_STAT), ("ioreg", IOREG)):
-            self.answer(command, text)
+        self.answer_mac()
+        self.answer(machine.APPLE_SILICON, "1\n")
         reading = self.read("darwin")
         self.assertGreater(reading["disk_free_gb"], 0)
         self.assertGreaterEqual(reading["load"], 0)
@@ -152,15 +165,23 @@ class ReadMachineTest(unittest.TestCase):
 
     def test_reads_each_number_on_linux_with_an_nvidia_gpu(self) -> None:
         (self.root / "meminfo").write_text(MEMINFO)
-        self.answer("nvidia-smi", NVIDIA_SMI)
+        self.answer(machine.NVIDIA_SMI, NVIDIA_SMI)
         reading = self.read("linux")
         self.assertEqual(
             (reading["memory_free_gb"], reading["swap_used_gb"], reading["gpu_percent"]), (10.0, 1.05, 81.0)
         )
         self.assertEqual((reading["gpu_memory_used_gb"], reading["gpu_shares_memory"]), (15.83, False))
 
+    def test_reads_no_gpu_memory_on_an_intel_mac(self) -> None:
+        self.answer_mac()
+        reading = self.read("darwin")
+        self.assertEqual(
+            (reading["gpu_percent"], reading["gpu_memory_used_gb"], reading["gpu_shares_memory"]), (27.0, None, None)
+        )
+        self.assertEqual(reading["memory_free_gb"], 34.41)
+
     def test_records_the_numbers_that_a_failing_command_does_not_give_as_missing(self) -> None:
-        self.answer("sysctl", SYSCTL)
+        self.answer(machine.MACOS_MEMORY, SYSCTL)
         reading = self.read("darwin")
         self.assertEqual((reading["memory_free_gb"], reading["swap_used_gb"]), (None, 1.88))
         self.assertEqual(
@@ -177,7 +198,7 @@ class ReadMachineTest(unittest.TestCase):
         self.assertIsNone(reading["gpu_shares_memory"])
 
     def test_records_the_numbers_of_a_command_that_does_not_end_in_time_as_missing(self) -> None:
-        self.answer("nvidia-smi", NVIDIA_SMI)
-        (self.bin / "nvidia-smi").write_text("#!/bin/sh\nexec sleep 30\n")
+        self.answer(machine.NVIDIA_SMI, NVIDIA_SMI)
+        (self.bin / "nvidia-smi").write_text("#!/bin/sh\nexec /bin/sleep 30\n")
         with mock.patch.object(machine, "COMMAND_TIMEOUT_SECONDS", 0.2):
             self.assertIsNone(self.read("linux")["gpu_percent"])

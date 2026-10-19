@@ -810,6 +810,10 @@ class HelpTest(unittest.TestCase):
             meter.main(["--help"])
         self.assertIn("once the agents have worked 12.5 hours since", " ".join(printed.getvalue().split()))
 
+    def test_keeps_each_line_within_120_characters(self) -> None:
+        longer = [line for line in meter.help_text().splitlines() if len(line) > 120]
+        self.assertEqual(longer, [])
+
 
 class ScriptTest(MeterTest):
     def test_runs_as_a_script(self) -> None:

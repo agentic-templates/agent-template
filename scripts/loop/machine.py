@@ -13,6 +13,10 @@ GIGABYTE = 1e9
 MEBIBYTE = 1024 * 1024
 KIBIBYTE = 1024
 MEMINFO = Path("/proc/meminfo")
+MACOS_MEMORY = ["sysctl", "-n", "hw.memsize", "vm.swapusage"]
+VM_STAT = ["vm_stat"]
+# Prints 1 on a Mac with Apple silicon. An Intel Mac doesn't know the name, so sysctl fails there.
+APPLE_SILICON = ["sysctl", "-n", "hw.optional.arm64"]
 IOREG = ["ioreg", "-r", "-d", "1", "-w", "0", "-c", "IOAccelerator"]
 COMMAND_TIMEOUT_SECONDS = 10
 NVIDIA_SMI = ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader,nounits"]
@@ -33,7 +37,7 @@ class Machine(TypedDict):
     # The memory in use by the machine's GPUs
     gpu_memory_used_gb: float | None
     # Whether the GPU's memory is part of the main memory, as on a Mac with Apple silicon, so that memory_free_gb
-    # already leaves it out. None without a GPU reading.
+    # already leaves it out. None when the reading can't tell, as on an Intel Mac, or has no GPU.
     gpu_shares_memory: bool | None
 
 
@@ -54,8 +58,8 @@ NO_GPU = Gpu(None, None, None)
 def read_machine(folder: Path) -> Machine:
     """A reading of the machine now."""
     if sys.platform == "darwin":
-        memory = macos_memory(output_of(["sysctl", "-n", "hw.memsize", "vm.swapusage"]), output_of(["vm_stat"]))
-        gpu = macos_gpu(output_of(IOREG))
+        memory = macos_memory(output_of(MACOS_MEMORY), output_of(VM_STAT))
+        gpu = macos_gpu(output_of(IOREG), is_apple_silicon=output_of(APPLE_SILICON).strip() == "1")
     else:
         memory = linux_memory(MEMINFO.read_text() if MEMINFO.exists() else "")
         gpu = nvidia_gpu(output_of(NVIDIA_SMI))
@@ -109,10 +113,11 @@ def macos_memory(sysctl: str, vm_stat: str) -> Memory:
     return Memory(total - used_pages * int(page_size[1]), swap_used)
 
 
-def macos_gpu(ioreg: str) -> Gpu:
-    """The GPUs in the output of ioreg for the class IOAccelerator. A Mac's GPU takes its memory from the main memory.
-    "Alloc system memory" rose by 8 GB when a program put 8 GB in a Metal buffer, while "In use system memory" rose by
-    50 MB, so the reading takes the first."""
+def macos_gpu(ioreg: str, is_apple_silicon: bool) -> Gpu:
+    """The GPUs in the output of ioreg for the class IOAccelerator. The GPU of a Mac with Apple silicon takes its memory
+    from the main memory. "Alloc system memory" rose by 8 GB when a program put 8 GB in a Metal buffer, while "In use
+    system memory" rose by 50 MB, so the reading takes the first. An Intel Mac can have a GPU with its own memory, which
+    ioreg doesn't give, so its reading has no GPU memory."""
     percents, memory = [], []
     for statistics in re.findall(r'"PerformanceStatistics" = \{(.*)\}', ioreg):
         percent = re.search(r'"Device Utilization %"=(\d+)', statistics)
@@ -121,6 +126,8 @@ def macos_gpu(ioreg: str) -> Gpu:
             percents.append(float(percent[1]))
         if allocated:
             memory.append(int(allocated[1]))
+    if not is_apple_silicon:
+        return Gpu(max(percents), None, None) if percents else NO_GPU
     if not percents and not memory:
         return NO_GPU
     return Gpu(max(percents, default=None), sum(memory) if memory else None, True)
