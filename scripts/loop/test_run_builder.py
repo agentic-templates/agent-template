@@ -353,7 +353,9 @@ class ClaudeTest(RunBuilderTest):
         brief = (self.run_folder() / "brief.md").read_text()
         self.assertEqual(call["args"], [*run_builder.CLAUDE_COMMAND[1:], "--model", "opus", "--effort", "high", brief])
         self.assertTrue(brief.startswith("Issue #12: Fix the importer\n\nIt drops rows.\n"))
-        self.assertIn('of the kind `other`, as a helper in a build run. Read only "Build one issue"', brief)
+        self.assertIn(
+            'of the kind `other`, for the orchestrator of this repository\'s loop. Read only\n"Build one issue"', brief
+        )
         self.assertEqual((call["cwd"], call["head"]), (str(self.worktree), f"ref: refs/heads/{BRANCH}"))
         environment = call["env"]
         self.assertEqual(environment["CLAUDE_CONFIG_DIR"], "/claude-main")
@@ -377,7 +379,9 @@ class ClaudeTest(RunBuilderTest):
     def test_claude_builder_gets_the_kind_that_take_next_issue_printed(self) -> None:
         status, _, _ = self.run_builder("--tool", "claude", kind="left behind 31")
         self.assertEqual(status, 0)
-        self.assertIn("of the kind `left behind 31`, as a helper", (self.run_folder() / "brief.md").read_text())
+        self.assertIn(
+            "of the kind `left behind 31`, for the orchestrator", (self.run_folder() / "brief.md").read_text()
+        )
 
     def test_fails_when_claude_starts_in_another_permission_mode(self) -> None:
         self.answer("claude", "", {"stdout": lines({**INIT, "permissionMode": "default"}, RESULT)})

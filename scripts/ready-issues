@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Functions that read the open ready issues and say why a build run can't start one, for scripts/take-next-issue and
+# Functions that read the open ready issues and say why a builder can't start one, for scripts/take-next-issue and
 # scripts/build-run-report. They ask gh about the repository of this checkout, or the one in GH_REPO. Run them from
 # the repository's root.
 # shellcheck source=scripts/issue-labels
@@ -46,7 +46,7 @@ is_one_of() {
   return 1
 }
 
-# Prints each reason that a build run can't start a ready issue, judged by everything but its pull requests, one to a
+# Prints each reason that a builder can't start a ready issue, judged by everything but its pull requests, one to a
 # line, such as "it has needs-decision", or nothing if there's none: reasons_not_to_start <issue>
 reasons_not_to_start() {
   local issue=$1 label type_count=0 state blocking_issue assignees sub_issues closed_sub_issues
@@ -77,7 +77,7 @@ reasons_not_to_start() {
   done <<<"$(ready_issue_facts blocked-by "$issue")"
 }
 
-# Succeeds if a build run can start an issue for which scripts/pull-request-state prints a state:
+# Succeeds if a builder can start an issue for which scripts/pull-request-state prints a state:
 # can_start_with_pull_request_state <state>
 can_start_with_pull_request_state() {
   [[ $1 == none || $1 == "left behind "* ]]

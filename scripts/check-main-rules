@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fails when GitHub's rules for main no longer require a check that scripts/configure-github requires there, such as
-# after someone removed it while debugging. A build run merges whatever those rules let through.
+# after someone removed it while debugging. The loop merges whatever those rules let through.
 # It asks gh about the repository of this checkout, or the one in GH_REPO. It exits with code 1 when a check is
 # missing, and with code 2 when it can't tell, such as when gh fails. A hook, a weekly workflow and
 # scripts/start-build-run run it.

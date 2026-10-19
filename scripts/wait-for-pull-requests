@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Waits until a pull request that's merging needs an agent: scripts/wait-for-pull-requests
-# Step 6 of "Make a change" in AGENTS.md and step 6 of "Build the ready issues" in docs/building.md run it. It
-# watches the open pull requests into main that have auto-merge on or are in the merge queue, apart from Dependabot's
-# and those from forks. It checks them every 30 seconds, and prints one line as soon as one of these is true:
+# The orchestrator keeps it running while pull requests merge, as docs/loop.md describes. It watches the open pull
+# requests into main that have auto-merge on or are in the merge queue, apart from Dependabot's and those from forks.
+# It checks them every 30 seconds, and prints one line as soon as one of these is true:
 # - Nothing to wait for: none of them is open.
 # - Pull request <number> merged or closed: so an issue that it blocked may be able to start now.
 # - Pull request <number> needs a fix: it conflicts with main, a check failed, or it left the merge queue.

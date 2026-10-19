@@ -78,8 +78,8 @@ REMOTE_URL = re.compile(
     r"^(?:[a-z+]+://(?:[^/@]+@)?[^/:]+(?::\d+)?/|[^/@]+@[^/:]+:)([^/]+)/([^/]+?)(?:\.git)?/?$", re.IGNORECASE
 )
 
-SHARED_BRIEF = """You build this issue, of the kind `{kind}`, as a helper in a build run. Read only "Build one issue" in
-docs/building.md first. Nobody answers questions while you work, so decide what you can.
+SHARED_BRIEF = """You build this issue, of the kind `{kind}`, for the orchestrator of this repository's loop. Read only
+"Build one issue" in docs/building.md first. Nobody answers questions while you work, so decide what you can.
 """
 CLAUDE_BRIEF = """You work in a worktree of your own, on the issue's branch. If you can't finish the issue, give it back
 as that section describes.
