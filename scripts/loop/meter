@@ -64,6 +64,7 @@ import paths
 import request_events
 from accounts import Account, AccountsError, claude_environment, load_accounts
 from github import GitHubError, gh_api
+from hand_offs import FOLDER_NAME, hand_off_thresholds, note_files
 from machine import Machine, read_machine
 from usage import Meter, parse_usage
 
@@ -163,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 1
     log = loop_folder / "meter.jsonl"
-    hand_offs = loop_folder / "hand-offs"
+    hand_offs = loop_folder / FOLDER_NAME
     readings = wait_for_wake(accounts, log, hand_offs) if options.wake else read_accounts(accounts, log)
     checkout = paths.main_checkout()
     agents = agents_line(running_agents(loop_folder, checkout), hand_off_thresholds(note_files(hand_offs)))
@@ -546,22 +547,6 @@ def run_session(events: Path) -> str | None:
     except ValueError, AttributeError:
         return None
     return session if isinstance(session, str) else None
-
-
-def note_files(hand_offs: Path) -> set[str]:
-    """The names of the files in which scripts/hooks/hand-off notes that it told an agent to hand off its work, each
-    <agent id or session id>.<threshold>."""
-    return {file.name for file in hand_offs.glob("*.*")}
-
-
-def hand_off_thresholds(notes: set[str]) -> dict[str, int]:
-    """The highest threshold at which scripts/hooks/hand-off told each agent to hand off its work."""
-    thresholds: dict[str, int] = {}
-    for note in notes:
-        agent, _, threshold = note.rpartition(".")
-        if threshold.isdigit():
-            thresholds[agent] = max(thresholds.get(agent, 0), int(threshold))
-    return thresholds
 
 
 def agents_line(agents: list[Agent], thresholds: dict[str, int]) -> str:
