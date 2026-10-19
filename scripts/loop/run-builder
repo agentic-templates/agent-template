@@ -618,24 +618,28 @@ def claude_problem(result: dict[str, Any], exit_code: int) -> str | None:
 def run_codex(brief: str, account: Account, folders: Folders) -> None:
     """Fills a uv cache of the run's own, and runs codex with it until codex ends. Codex writes its last message to
     report.md in the run folder."""
-    command = [
-        "codex",
-        "exec",
-        "--sandbox",
-        "workspace-write",
-        "--cd",
-        str(folders.worktree),
-        "--json",
-        "--output-last-message",
-        str(folders.run / "report.md"),
-        brief,
-    ]
     environment = codex_environment(account)
-    # uv in the sandbox uses a cache of the run's own. Writing uv's shared cache would let the builder change the files
-    # that every later uv command on the machine uses.
-    with tempfile.TemporaryDirectory() as uv_cache:
+    # uv in the sandbox uses a cache of the run's own, which --add-dir lets the sandbox write. Writing uv's shared cache
+    # would let the builder change the files that every later uv command on the machine uses. The cache lies in the run
+    # folder, which no sandbox can write, so that no other builder can change it, also while uv outside the sandbox
+    # fills it.
+    with tempfile.TemporaryDirectory(prefix="uv-cache-", dir=folders.run) as uv_cache:
         environment["UV_CACHE_DIR"] = uv_cache
-        fill_uv_cache(folders.checkout, environment)
+        fill_uv_cache(folders, environment)
+        command = [
+            "codex",
+            "exec",
+            "--sandbox",
+            "workspace-write",
+            "--add-dir",
+            uv_cache,
+            "--cd",
+            str(folders.worktree),
+            "--json",
+            "--output-last-message",
+            str(folders.run / "report.md"),
+            brief,
+        ]
         with (folders.run / "events.jsonl").open("w") as events, (folders.run / "stderr.log").open("w") as errors:
             done = subprocess.run(
                 command,
@@ -651,14 +655,16 @@ def run_codex(brief: str, account: Account, folders: Folders) -> None:
         raise Stop(problem)
 
 
-def fill_uv_cache(checkout: Path, environment: dict[str, str]) -> None:
+def fill_uv_cache(folders: Folders, environment: dict[str, str]) -> None:
     """Puts the packages of the main checkout's uv.lock, which scripts/check needs, in the uv cache that the environment
     names, because the sandbox can't download them. uv installs them in a folder that the function then deletes, so
     that the main checkout's .venv stays as it is."""
-    with tempfile.TemporaryDirectory() as installed:
+    # The folder lies in the run folder, which no sandbox can write, because uv runs the Python of the folder that it
+    # installs in.
+    with tempfile.TemporaryDirectory(prefix="uv-environment-", dir=folders.run) as installed:
         done = subprocess.run(
             UV_SYNC,
-            cwd=checkout,
+            cwd=folders.checkout,
             env=environment | {"UV_PROJECT_ENVIRONMENT": installed},
             capture_output=True,
             text=True,
