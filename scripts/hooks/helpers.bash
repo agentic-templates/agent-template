@@ -355,6 +355,8 @@ read_push_arguments() {
 
 # Moves repository flags between a gh command group and its subcommand just after the subcommand,
 # so that the checks read the same words and flags in either position. Other flags and groups stay as written.
+# A repository flag gives the repository in the next word, as in -R jtmpl/other, or in the same word, as in
+# -Rjtmpl/other, -R=jtmpl/other or --repo=jtmpl/other.
 move_gh_repository_flags() {
   local index=2
   if ((${#command_words[@]} < 3)) || [[ ${command_words[0]##*/} != gh ]]; then
@@ -367,7 +369,7 @@ move_gh_repository_flags() {
   while ((index < ${#command_words[@]})); do
     case ${command_words[index]} in
       -R | --repo) index=$((index + 2)) ;;
-      --repo=*) index=$((index + 1)) ;;
+      -R?* | --repo=*) index=$((index + 1)) ;;
       *) break ;;
     esac
   done
