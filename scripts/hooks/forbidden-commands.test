@@ -82,7 +82,7 @@ expect_allow Bash 'gh api -X POST repos/{owner}/{repo}/actions/runs/123/rerun'
 
 # Closing one of Dependabot's pull requests
 TEST_AUTHOR=dependabot
-from_dependabot="is one of Dependabot's, and a maintainer decides what happens to it. Leave it open, and list it in your report for the maintainer."
+from_dependabot="is one of Dependabot's, and closing it makes Dependabot stop offering that version. Leave it open, because Dependabot closes it once main has the update."
 expect_block Bash 'gh pr close 7' "Blocked: pull request 7 $from_dependabot"
 expect_block Bash 'gh pr close --comment "Superseded by #8" 7' "Blocked: pull request 7 $from_dependabot"
 expect_block Bash 'gh pr close 7 --delete-branch' "Blocked: pull request 7 $from_dependabot"
@@ -96,6 +96,10 @@ for repository in '-R jtmpl/other' '--repo jtmpl/other' '--repo=jtmpl/other'; do
 done
 expect_allow Bash 'gh pr view 7'
 expect_allow Bash 'gh pr comment 7 --body "@dependabot rebase"'
+# The orchestrator merges Dependabot's pull requests, as "Stuck pull requests" in docs/loop.md describes.
+expect_allow Bash 'gh pr merge 7'
+expect_allow Bash 'gh pr merge 7 --disable-auto'
+expect_allow Bash 'scripts/merge-dependabot-pull-requests'
 for TEST_AUTHOR in person fail; do
   expect_allow Bash 'gh pr close 7'
   expect_allow Bash 'gh pr close'
@@ -103,7 +107,7 @@ done
 
 # Pushing to a dependabot/ branch
 dependabot_branch=dependabot/npm_and_yarn/lodash-4.17.21
-to_dependabot="Blocked: $dependabot_branch is the branch of one of Dependabot's pull requests, and a maintainer decides what happens to those. Leave the branch as it is, and list the pull request in your report for the maintainer."
+to_dependabot="Blocked: $dependabot_branch is the branch of one of Dependabot's pull requests, and Dependabot stops rebasing a pull request once someone else pushes to it. Make the update in a pull request of your own instead, as \"Stuck pull requests\" in docs/loop.md describes."
 git symbolic-ref HEAD refs/heads/383-block-commands
 git -C "$other" symbolic-ref HEAD refs/heads/main
 pushes_to_dependabot=(

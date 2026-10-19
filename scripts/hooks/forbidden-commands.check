@@ -2,8 +2,8 @@
 # Blocks the commands that the rules forbid, with a message that says what to do instead:
 # - every gh command while gh is older than scripts/minimum-gh-version says, because the rules' commands need it
 # - approving a workflow run with gh api, because the run executes the code of a pull request from outside the project
-# - closing one of Dependabot's pull requests, or pushing to a dependabot/ branch, because a maintainer decides what
-#   happens to Dependabot's pull requests
+# - closing one of Dependabot's pull requests, because Dependabot then stops offering that version, and pushing to a
+#   dependabot/ branch, because Dependabot then stops rebasing the pull request
 # - deleting a pull request's branch with gh pr close, because the next agent that works on its issue starts from it
 # - gh issue develop on an issue with needs-triage, because no maintainer has accepted the issue yet
 # - gh auth token, gh auth status with --show-token, gh auth git-credential and git credential fill, because they print
@@ -56,7 +56,7 @@ check_gh_pr_close() {
     pull_request="pull request $argument"
   fi
   if is_from_dependabot ${target[@]+"${target[@]}"}; then
-    block "Blocked: $pull_request is one of Dependabot's, and a maintainer decides what happens to it. Leave it open, and list it in your report for the maintainer."
+    block "Blocked: $pull_request is one of Dependabot's, and closing it makes Dependabot stop offering that version. Leave it open, because Dependabot closes it once main has the update."
   fi
   if has_flag -d --delete-branch --delete-branch=true; then
     block "Blocked: gh pr close with --delete-branch or -d deletes the pull request's branch, and the next agent that works on its issue starts from that branch. Close the pull request without that flag."
@@ -92,7 +92,7 @@ check_git_push() {
     fi
     branch=${branch#refs/heads/}
     if [[ $branch == dependabot/* ]]; then
-      block "Blocked: $branch is the branch of one of Dependabot's pull requests, and a maintainer decides what happens to those. Leave the branch as it is, and list the pull request in your report for the maintainer."
+      block "Blocked: $branch is the branch of one of Dependabot's pull requests, and Dependabot stops rebasing a pull request once someone else pushes to it. Make the update in a pull request of your own instead, as \"Stuck pull requests\" in docs/loop.md describes."
     fi
   done
 }

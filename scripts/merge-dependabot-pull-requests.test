@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# Tests scripts/merge-dependabot-pull-requests with a stand-in for gh.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/testing-required-checks.bash
+source scripts/testing-required-checks.bash
+unrequired_check=$(fixture_check_name lint)
+
+case_count=0
+failed_cases=0
+
+base=$(mktemp -d)
+trap 'rm -rf "$base"' EXIT
+mkdir -p "$base/bin"
+
+# A stand-in for gh, first on the PATH. With fail in place of an answer, it fails, as gh does without the network.
+# - It answers the command in scripts/open-pull-requests that lists the open pull requests with TEST_PULL_REQUESTS, as
+#   that script's --jq filter prints them.
+# - It answers the command in scripts/check-main-rules with the checks in TEST_MAIN_RULES, separated by spaces, and
+#   the project's other required checks.
+# - It writes each gh pr merge command to TEST_GH_CALLS, one to a line, and fails the one that matches
+#   TEST_FAILING_MERGE.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+# Prints an answer, or fails as gh does without the network: answer <answer, or fail>
+answer() {
+  if [[ $1 == fail ]]; then
+    echo "error connecting to api.github.com" >&2
+    exit 1
+  fi
+  if [[ -n $1 ]]; then
+    printf '%s\n' "$1"
+  fi
+  exit 0
+}
+
+if [[ $1 == api && $2 == graphql ]]; then
+  answer "$TEST_PULL_REQUESTS"
+fi
+if [[ $1 == api && $2 == "repos/{owner}/{repo}/rules/branches/main" ]]; then
+  if [[ $TEST_MAIN_RULES != fail ]]; then
+    printf '%s\n' "$TEST_PROJECT_CHECKS"
+  fi
+  answer "$(tr ' ' '\n' <<<"$TEST_MAIN_RULES")"
+fi
+if [[ $1 == pr && $2 == merge ]]; then
+  echo "$*" >>"$TEST_GH_CALLS"
+  if [[ $* == "$TEST_FAILING_MERGE" ]]; then
+    echo "HTTP 502: Bad Gateway" >&2
+    exit 1
+  fi
+  exit 0
+fi
+echo "The stand-in for gh doesn't answer: gh $*" >&2
+exit 1
+STAND_IN
+chmod +x "$base/bin/gh"
+
+tab=$'\t'
+# The lines that the --jq filter in scripts/open-pull-requests prints for an open pull request:
+# pull_request <number> <from a fork> <author> <in the merge queue> <merge state> [<when auto-merge was turned on>]
+pull_request() {
+  printf '%s\n' "pull-request$tab$1$tab$2$tab$3$tab$4$tab$5$tab${6:-}"
+  project_check_runs "$1"
+}
+# check_run <pull request> <ID> <name> [<conclusion>]
+check_run() {
+  printf '%s\n' "check$tab$1$tab$2$tab$3$tab${4:-}"
+}
+# removal <pull request> <time> [<reason>]
+removal() {
+  printf '%s\n' "removal$tab$1$tab$2$tab${3:-}"
+}
+# times <pull request> <when it was opened> [<when its latest commit was committed>]
+times() {
+  printf '%s\n' "times$tab$1$tab$2$tab${3:-}"
+}
+# The checks of a pull request, both passed: passed_checks <pull request>
+passed_checks() {
+  check_run "$1" 101 check SUCCESS
+  check_run "$1" 102 title SUCCESS
+}
+# A pull request of Dependabot's whose checks passed: passing_dependabot_pull_request <number>
+passing_dependabot_pull_request() {
+  pull_request "$1" false app/dependabot false CLEAN
+  passed_checks "$1"
+}
+
+auto_merge=2026-05-04T09:00:00Z
+removed_at=2026-05-04T09:10:00Z
+later=2026-05-04T09:20:00Z
+
+# Runs scripts/merge-dependabot-pull-requests, and sets status, output and merges, the gh pr merge commands that it
+# ran: run_merge <open pull requests, or fail> [<NAME=value>...]
+# Each NAME=value sets one of the stand-in's other TEST_ variables, which are empty otherwise, except
+# TEST_MAIN_RULES, which lists the checks that scripts/configure-github requires.
+run_merge() {
+  local pull_requests=$1
+  shift
+  status=0
+  : >"$base/calls"
+  output=$(env TEST_FAILING_MERGE="" TEST_MAIN_RULES="check title" "$@" \
+    TEST_PULL_REQUESTS="$pull_requests" TEST_GH_CALLS="$base/calls" PATH="$base/bin:$PATH" \
+    scripts/merge-dependabot-pull-requests 2>&1) || status=$?
+  merges=$(<"$base/calls")
+}
+
+# Checks the script's exit code, output and gh pr merge commands:
+# expect_result <description> <exit code> <output> <gh pr merge commands, one to a line>
+expect_result() {
+  local description=$1 expected_status=$2 expected_output=$3 expected_merges=$4
+  case_count=$((case_count + 1))
+  if [[ $status != "$expected_status" || $output != "$expected_output" || $merges != "$expected_merges" ]]; then
+    echo "error: $description, scripts/merge-dependabot-pull-requests must exit with code $expected_status, print \"$expected_output\" and run \"$expected_merges\", but it exited with code $status, printed \"$output\" and ran \"$merges\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+run_merge ""
+expect_result "When no pull request is open" 0 "" ""
+
+pull_requests=$(
+  passing_dependabot_pull_request 40
+  pull_request 41 false app/dependabot false BLOCKED
+  check_run 41 101 check
+  pull_request 42 false app/dependabot false BLOCKED
+  pull_request 43 false app/dependabot false CLEAN
+  check_run 43 106 check SUCCESS
+  check_run 43 105 title SUCCESS
+  check_run 43 104 check FAILURE
+  pull_request 44 false app/dependabot false UNSTABLE
+  passed_checks 44
+  check_run 44 103 "$unrequired_check" FAILURE
+)
+run_merge "$pull_requests"
+expect_result "When pull requests of Dependabot's have passed, running, missing and rerun checks, or a check that main doesn't require failed" \
+  0 "" "pr merge 40"$'\n'"pr merge 41"$'\n'"pr merge 42"$'\n'"pr merge 43"$'\n'"pr merge 44"
+
+pull_requests=$(
+  pull_request 45 false app/dependabot false BLOCKED $auto_merge
+  pull_request 46 false app/dependabot true CLEAN
+  passed_checks 46
+  pull_request 47 false app/dependabot false DIRTY
+  times 47 2026-05-01T09:00:00Z
+  pull_request 48 false app/dependabot false BLOCKED
+  check_run 48 101 check FAILURE
+  pull_request 49 false app/dependabot false CLEAN
+  passed_checks 49
+  removal 49 $removed_at merge_conflict
+  times 49 2026-05-01T09:00:00Z $auto_merge
+  pull_request 50 true app/dependabot false CLEAN
+  passed_checks 50
+  pull_request 51 false app/dependabot false UNKNOWN
+  pull_request 52 false dependabot false CLEAN
+  passed_checks 52
+  pull_request 53 false octocat false CLEAN
+  passed_checks 53
+)
+run_merge "$pull_requests" CURRENT_TIME=2026-05-04T09:30:00Z
+expect_result "When pull requests have auto-merge, are in the queue, are DIRTY, failed a check, were removed from the queue with no commit since, come from a fork, are UNKNOWN or aren't Dependabot's" \
+  0 "" ""
+
+pull_requests=$(
+  passing_dependabot_pull_request 54
+  removal 54 2026-05-04T08:00:00Z merge_conflict
+  removal 54 $removed_at merge_conflict
+  times 54 2026-05-01T09:00:00Z $later
+)
+run_merge "$pull_requests"
+expect_result "When the merge queue removed a pull request of Dependabot's, and Dependabot pushed a commit after the latest removal" \
+  0 "" "pr merge 54"
+
+pull_requests=$(
+  passing_dependabot_pull_request 40
+  passing_dependabot_pull_request 41
+)
+expected="error: main no longer requires the title job, so a pull request can merge without passing it. A maintainer with admin access restores it by running scripts/configure-github.
+error: scripts/merge-dependabot-pull-requests turned on auto-merge for no pull request of Dependabot's, because of the error above. Go on with the other work, and ask the maintainer about it."
+run_merge "$pull_requests" TEST_MAIN_RULES=check
+expect_result "When main no longer requires a check that scripts/configure-github requires" 0 "$expected" ""
+
+run_merge "$(pull_request 48 false app/dependabot false BLOCKED; check_run 48 101 check FAILURE)" TEST_MAIN_RULES=check
+expect_result "When main no longer requires a check, and no pull request can merge" 0 "" ""
+
+run_merge "$(passing_dependabot_pull_request 40)" TEST_MAIN_RULES=fail
+expect_result "When gh can't read the rules for main" 0 "" "pr merge 40"
+
+run_merge "$pull_requests" TEST_FAILING_MERGE="pr merge 40"
+expect_result "When gh can't turn on auto-merge" 1 \
+  "error: can't turn on auto-merge for pull request 40 of Dependabot's, because gh failed: HTTP 502: Bad Gateway" \
+  "pr merge 40"
+
+run_merge fail
+expect_result "When gh can't list the open pull requests" 1 \
+  "error: can't list the open pull requests, because gh failed: error connecting to api.github.com" ""
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/merge-dependabot-pull-requests.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/merge-dependabot-pull-requests.test passed. Cases: $case_count."
