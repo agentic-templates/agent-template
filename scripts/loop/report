@@ -28,8 +28,7 @@ The lines are:
                             rule blocked.
   Agents' time              The minutes of the agents in the Type lines, from the first line of each one's transcript to
                             the last, and how many of them have no transcript, such as the runs of
-                            scripts/loop/run-builder and the agents whose transcripts Claude Code deleted after 30
-                            days. Then the minutes and the share of each part of that time, which
+                            scripts/loop/run-builder. Then the minutes and the share of each part of that time, which
                             scripts/loop/agent_time.py describes: the model's time, the tool calls that ran
                             scripts/check, ran a single test file, waited for CI, slept, ran another command or used
                             another tool, and the waits for the agents' background tasks and for the orchestrator.

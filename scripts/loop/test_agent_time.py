@@ -92,6 +92,17 @@ class SplitTest(unittest.TestCase):
             {agent_time.MODEL: 1, agent_time.ORCHESTRATOR_WAIT: 9},
         )
 
+    def test_counts_the_time_before_the_user_interrupts_the_agent_as_the_models(self) -> None:
+        interruptions = (
+            [{"type": "text", "text": "[Request interrupted by user]"}],
+            "[Request interrupted by user for tool use]",
+        )
+        for interruption in interruptions:
+            with self.subTest(interruption=interruption):
+                self.assertEqual(
+                    self.minutes(prompt_line(0), call_line("a", 1), prompt_line(4, interruption)), {agent_time.MODEL: 4}
+                )
+
     def test_is_empty_for_a_transcript_of_one_line_or_none(self) -> None:
         self.assertEqual(self.minutes(prompt_line(0)), {})
         self.assertEqual(self.minutes(), {})
@@ -108,6 +119,9 @@ class CommandKindTest(unittest.TestCase):
             "for t in a b; do scripts/hooks/$t.test; done": agent_time.TEST_FILE,
             "uv run --locked python -m unittest test_report": agent_time.TEST_FILE,
             "python3 scripts/loop/test_report.py": agent_time.TEST_FILE,
+            "uv run ruff check scripts/loop/test_report.py": agent_time.COMMAND,
+            "uv run --locked mypy scripts/loop/test_agent_time.py": agent_time.COMMAND,
+            "time uv run --locked scripts/check": agent_time.CHECK,
             "uv run --locked python -m unittest discover -s scripts/loop -t scripts/loop": agent_time.COMMAND,
             "cat scripts/loop/test_report.py": agent_time.COMMAND,
             "gh pr checks 57 --watch --fail-fast": agent_time.CI,
@@ -116,6 +130,10 @@ class CommandKindTest(unittest.TestCase):
             "until gh pr view 57 --json state | grep -q MERGED; do sleep 30; done": agent_time.CI,
             "sleep 60; gh run view 123": agent_time.CI,
             "gh pr view 57": agent_time.COMMAND,
+            'until [ "$(gh pr view 57 --json state -q ".state")" = MERGED ]; do sleep 30; done': agent_time.CI,
+            'out="$(scripts/check 2>&1)"': agent_time.CHECK,
+            'git commit -m "fix: x\n\nscripts/check passes again"': agent_time.COMMAND,
+            "gh issue create --body 'Done when: `scripts/check` passes'": agent_time.COMMAND,
             "sleep 5": agent_time.SLEEP,
             "until [ -s check.log ]; do sleep 10; done; cat check.log": agent_time.SLEEP,
             "": agent_time.COMMAND,

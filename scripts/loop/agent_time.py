@@ -2,9 +2,10 @@
 tool calls by kind, and its waits. A tool call's time runs from the line with its tool_use to the line with its
 result, and while several calls run at once, the one that started first counts. A wait runs to a line that brings the
 agent a task notification, which ends a wait for a background task, or a message, which ends a wait for the
-orchestrator. The model's time is the rest."""
+orchestrator. The model's time is the rest, also when the user interrupts the agent."""
 
 import datetime as dt
+import itertools
 import re
 from pathlib import Path
 from typing import Any
@@ -25,8 +26,14 @@ PARTS = (MODEL, CHECK, TEST_FILE, CI, SLEEP, COMMAND, TOOL, BACKGROUND_WAIT, ORC
 
 # The origin that Claude Code gives the line that tells an agent that one of its background tasks ended or printed
 TASK_NOTIFICATION = "task-notification"
+# The text of the line that Claude Code writes when the user interrupts an agent, which isn't a message for it
+INTERRUPTION = "[Request interrupted by user"
 # A here-document, whose body is text for a command rather than commands. Group 3 holds the rest of its first line.
 HERE_DOCUMENT = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1([^\n]*)\n(.*?\n)?[ \t]*\2[ \t]*(?=\n|$)", re.DOTALL)
+# A command substitution with no parentheses inside, whose command runs also inside double quotes
+COMMAND_SUBSTITUTION = re.compile(r"\$\(([^()]*)\)")
+# Quoted text, which is an argument rather than commands
+QUOTED = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
 # What separates the simple commands of a command line, such as && and the start of a subshell
 SEPARATOR = re.compile(r"&&|\|\||\$\(|[;|&\n(){}`]")
 # The words that can come before a simple command's program, such as a loop's keyword, or bash before a script
@@ -37,8 +44,8 @@ ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 # The names of this project's test files, such as scripts/start-issue.test and scripts/loop/test_report.py, and of a
 # test module that python -m unittest takes, such as test_report
 TEST_FILE_NAME = re.compile(r"[^/\s]+\.test|test_\w+(\.py)?")
-# The programs that run the test file that follows them, as in uv run python scripts/loop/test_report.py
-TEST_RUNNERS = frozenset(("python", "python3", "uv", "pytest"))
+# The programs that run the test file that follows them, as in python3 scripts/loop/test_report.py
+TEST_RUNNERS = frozenset(("python", "python3", "pytest"))
 CHECK_SCRIPT = re.compile(r"(.*/)?scripts/check")
 WAIT_FOR_PULL_REQUESTS = re.compile(r"(.*/)?scripts/wait-for-pull-requests")
 CI_WATCHES = (["gh", "pr", "checks"], ["gh", "run", "watch"])
@@ -54,7 +61,7 @@ def split(entries: list[dict[str, Any]]) -> dict[str, float]:
     seconds = dict.fromkeys(PARTS, 0.0)
     # The kind of each tool call that runs, by its tool_use's id, in the order that the calls started
     running: dict[str, str] = {}
-    for entry, following in zip(entries, entries[1:]):
+    for entry, following in itertools.pairwise(entries):
         running.update((use["id"], tool_kind(use)) for use in transcripts.blocks(entry, "tool_use"))
         for result in transcripts.blocks(entry, "tool_result"):
             running.pop(result.get("tool_use_id", ""), None)
@@ -66,10 +73,16 @@ def part_until(following: dict[str, Any], running: dict[str, str]) -> str:
     """The part that the time until the following entry counts in, while the tool calls run."""
     if running:
         return next(iter(running.values()))
-    if not transcripts.is_prompt(following):
+    if not transcripts.is_prompt(following) or is_interruption(following):
         return MODEL
     origin = following.get("origin") or {}
     return BACKGROUND_WAIT if origin.get("kind") == TASK_NOTIFICATION else ORCHESTRATOR_WAIT
+
+
+def is_interruption(entry: dict[str, Any]) -> bool:
+    content = entry["message"].get("content")
+    texts = [content] if isinstance(content, str) else [block.get("text", "") for block in content]
+    return any(str(text).startswith(INTERRUPTION) for text in texts)
 
 
 def moment(entry: dict[str, Any]) -> dt.datetime:
@@ -98,15 +111,39 @@ def command_kind(command: str) -> str:
 
 def simple_commands(command: str) -> list[list[str]]:
     """The words of each simple command in a command line, from its program on."""
-    without_bodies = HERE_DOCUMENT.sub(r"\3", command)
     found = []
-    for part in SEPARATOR.split(without_bodies):
-        words = part.split()
-        while words and (words[0] in PREFIXES or ASSIGNMENT.fullmatch(words[0])):
-            words.pop(0)
-        if words:
-            found.append(words)
+    for text in command_texts(command):
+        for part in SEPARATOR.split(QUOTED.sub("''", text)):
+            words = program_on(part.split())
+            if words:
+                found.append(words)
     return found
+
+
+def command_texts(command: str) -> list[str]:
+    """The command line without the bodies of its here-documents, and the command of each command substitution in
+    it, each apart, so that leaving out the quoted text keeps the commands that run inside double quotes."""
+    substitutions: list[str] = []
+
+    def take(substitution: re.Match[str]) -> str:
+        substitutions.append(substitution[1])
+        return "''"
+
+    text = HERE_DOCUMENT.sub(r"\3", command)
+    # Taking out a substitution can leave the one around it without parentheses inside.
+    while COMMAND_SUBSTITUTION.search(text):
+        text = COMMAND_SUBSTITUTION.sub(take, text)
+    return [text, *substitutions]
+
+
+def program_on(words: list[str]) -> list[str]:
+    """The words of a simple command from its program on, after the words before it, such as uv run and its
+    options before python."""
+    while words and (words[0] in PREFIXES or ASSIGNMENT.fullmatch(words[0])):
+        words = words[1:]
+    if words[:2] == ["uv", "run"]:
+        return program_on(list(itertools.dropwhile(lambda word: word.startswith("-"), words[2:])))
+    return words
 
 
 def watches_ci(words: list[str]) -> bool:
