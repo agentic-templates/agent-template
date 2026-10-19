@@ -231,7 +231,7 @@ git -C "$test_cwd" -c user.name=Tester -c user.email=tester@example.com commit -
 git -C "$test_cwd" tag v1.0.0
 git -C "$test_cwd" tag notes-draft
 git -C "$test_cwd" branch validate-input
-publishes_release="Blocked: only the orchestrator publishes a release or puts a version tag on GitHub, because it releases a commit that it checked on main, as \"Publish a release\" in docs/releasing.md describes. Go on with the other work, and list the command in your report."
+publishes_release="Blocked: only the orchestrator publishes a release or a version tag, because it releases a commit that it checked on main, as \"Publish a release\" in docs/releasing.md describes. Go on with the other work, and list the command in your report."
 releases=(
   'gh release create v1.0.0'
   'gh release create v1.0.0 --target 0123abc --generate-notes'
@@ -246,6 +246,8 @@ releases=(
   'git push --force origin +v1.0.0'
   'git push origin v1.0.0:v1.0.0'
   'git push origin HEAD:refs/tags/v1.0.0'
+  'git push --force origin HEAD:v1.0.0'
+  'git push origin +validate-input:v1.0.0'
   'git push origin --delete v1.0.0'
   'git push origin :refs/tags/v1.0.0'
   'git tag v2.0.0 && git push origin v2.0.0'

@@ -12,6 +12,8 @@
 #   orchestrator releases a commit that it checked on main, as "Publish a release" in docs/releasing.md describes. A
 #   version tag matches v*, because only such tags can use the release environment, whose jobs start without approval.
 #   The check reads only the command, so it misses a push that git's settings make push tags, such as push.followTags.
+#   A refspec that a variable gives, as in git push origin $tag, goes ahead, because the hook can't tell it before the
+#   command runs.
 # It asks gh and git about the pull request, the issue or the branch, and allows the command when they fail, such as
 # without a network.
 # shellcheck source=scripts/hooks/helpers.bash
@@ -27,7 +29,7 @@ token_flags_with_value=" -h --hostname -u --user "
 status_flags_with_value=" -h --hostname --jq --json --template "
 
 prints_token="Blocked: this command prints the token that gh uses, and AGENTS.md says never to read or print secrets. gh commands use the token without it."
-publishes_release="Blocked: only the orchestrator publishes a release or puts a version tag on GitHub, because it releases a commit that it checked on main, as \"Publish a release\" in docs/releasing.md describes. Go on with the other work, and list the command in your report."
+publishes_release="Blocked: only the orchestrator publishes a release or a version tag, because it releases a commit that it checked on main, as \"Publish a release\" in docs/releasing.md describes. Go on with the other work, and list the command in your report."
 
 # The endpoints of gh api that create, change or delete a release: a repository's releases, or one release by its id.
 release_endpoint='(^|/)repos/[^/]+/[^/]+/releases(/[0-9]+)?/?(\?|$)'
@@ -143,7 +145,7 @@ check_gh_api() {
   fi
 }
 
-# Blocks a command that publishes a release or puts a version tag on GitHub, unless the orchestrator's session runs it.
+# Blocks a command that publishes a release or a version tag, unless the orchestrator's session runs it.
 block_release() {
   if ! is_orchestrator; then
     block "$publishes_release"
@@ -238,7 +240,7 @@ check_push_to_dependabot() {
   done
 }
 
-# Blocks a push that puts a version tag on GitHub, unless the orchestrator's session runs it: one with a flag that pushes
+# Blocks a push of a version tag to any remote, unless the orchestrator's session runs it: one with a flag that pushes
 # tags, or with a refspec that can push to a version tag. git push <remote> tag <name> pushes refs/tags/<name>.
 # Run read_push_arguments first.
 check_push_of_version_tag() {
@@ -277,10 +279,11 @@ pushes_tags() {
 }
 
 # Succeeds if a refspec of git push, [+]<source>[:<destination>], can push to a version tag. Without a colon, the
-# destination is the source. git pushes to a destination that doesn't start with refs/ as a branch when the source is a
-# branch, and as a tag when the source is a tag, so such a destination counts as a tag unless git names the source as a
-# branch. A tag that an earlier part of the command creates counts too, because git doesn't have it yet when the hook
-# runs: pushes_to_version_tag <refspec>
+# destination is the source. For a destination that doesn't start with refs/, git first looks for a ref of that name on
+# the remote, and pushes to it, even a tag from a branch. The hook can't ask the remote, so a local tag of that name
+# counts for the remote's. Otherwise git pushes to a branch when the source is a branch, and to a tag when the source is
+# a tag, so the destination counts as a tag unless git names the source as a branch. A tag that an earlier part of the
+# command creates counts too, because git doesn't have it yet when the hook runs: pushes_to_version_tag <refspec>
 pushes_to_version_tag() {
   local refspec=${1#+} source destination full_source
   source=${refspec%%:*}
@@ -291,6 +294,9 @@ pushes_to_version_tag() {
   fi
   if ! names_version_tag "refs/tags/$destination"; then
     return 1
+  fi
+  if git "${git_folder[@]}" rev-parse --verify --quiet "refs/tags/$destination" >/dev/null 2>&1; then
+    return 0
   fi
   # git rev-parse would read a source that starts with - as an option, and git push can't push it as a branch either.
   if [[ $source == -* ]] ||
