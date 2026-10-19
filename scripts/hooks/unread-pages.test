@@ -186,7 +186,8 @@ expect_check "$create" 2 "$(unread README.md docs/guide/setup.md)"
 read_page README.md
 expect_check "$create" 2 "$(unread docs/guide/setup.md)"
 
-# The branch that --head names, alone or after a person's name and a colon
+# The branch that --head names, alone or after a person's name and a colon, and HEAD when no branch follows the colon
+expect_check 'gh pr create -H jtmpl: --title "docs: say how to set up the loop" --body "Closes #1"' 2 "$(unread docs/guide/setup.md)"
 git switch --quiet main
 expect_check "$create" 0 ""
 expect_check 'gh pr create --head pages --title "docs: say how to set up the loop" --body "Closes #1"' 2 "$(unread docs/guide/setup.md)"
