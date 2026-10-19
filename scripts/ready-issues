@@ -11,13 +11,32 @@ source scripts/issue-labels
 # - label <issue> <name>, for each of the issue's labels
 # - blocked-by <issue> <state of the blocking issue> <blocking issue>, for each issue that blocks it
 read_ready_issues() {
-  local jq_filter
+  local query jq_filter
+  # The query reads the repository's issues instead of searching them, as gh issue list --label ready does, because
+  # GitHub's search finds an issue only some seconds after it gets the label.
+  query=$(cat <<'GRAPHQL'
+query($owner: String!, $repo: String!, $endCursor: String) {
+  repository(owner: $owner, name: $repo) {
+    issues(labels: ["ready"], states: OPEN, first: 100, after: $endCursor) {
+      nodes {
+        number
+        assignees { totalCount }
+        labels(first: 100) { nodes { name } }
+        blockedBy(first: 100) { nodes { number state } }
+        subIssuesSummary { total completed }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+GRAPHQL
+  )
   # shellcheck disable=SC2016 # $number is a jq variable, which jq expands.
-  jq_filter='.[] | .number as $number
-    | (["issue", $number, (.assignees | length), .subIssuesSummary.total, .subIssuesSummary.completed] | @tsv),
-      (.labels[] | ["label", $number, .name] | @tsv),
+  jq_filter='.data.repository.issues.nodes[] | .number as $number
+    | (["issue", $number, .assignees.totalCount, .subIssuesSummary.total, .subIssuesSummary.completed] | @tsv),
+      (.labels.nodes[] | ["label", $number, .name] | @tsv),
       (.blockedBy.nodes[] | ["blocked-by", $number, .state, .number] | @tsv)'
-  if ! ready_issues=$(gh issue list --label ready --limit 200 --json number,labels,assignees,blockedBy,subIssuesSummary --jq "$jq_filter" 2>&1); then
+  if ! ready_issues=$(gh api graphql --paginate -F owner='{owner}' -F repo='{repo}' -f query="$query" --jq "$jq_filter" 2>&1); then
     echo "error: can't list the ready issues, because gh failed: $ready_issues" >&2
     return 1
   fi
