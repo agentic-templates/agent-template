@@ -2,8 +2,8 @@
 # Gives a page to a reader who has seen nothing else, and prints the reader's answer: scripts/fresh-reader <reader> <page>
 # <reader> is the page's reader and what they want to do, such as "a developer who wants to use this project", and
 # <page> is the page's path. The reader quotes each sentence they had to read twice, each sentence they didn't need,
-# and each sentence that repeats another, with the reason. When main has the page, the reader also gets the lines that
-# the branch and its uncommitted edits added or rewrote since the branch left origin/main.
+# and each sentence that repeats another, with the reason. When the page was on origin/main where the branch started,
+# under this name or another, the reader also gets the lines that the branch and its uncommitted edits added or rewrote.
 # It runs claude -p in an empty temporary folder, with --safe-mode, which keeps the login but turns off CLAUDE.md,
 # skills, plugins, hooks and MCP servers, and with no tools. If claude fails, the script runs it once more. If that run
 # fails too, it prints claude's error and exits with code 1. "Review a changed page with a fresh reader" in
@@ -25,15 +25,23 @@ if [[ ! -f $page ]]; then
   stop "$page isn't a file. Give the page's path, such as README.md."
 fi
 
-if ! branch_start=$(git merge-base HEAD origin/main 2>&1); then
-  stop "can't tell which lines of $page are new, because git can't find where HEAD leaves origin/main. Run scripts/fresh-reader in a clone of the project, after git fetch origin main. git printed: $branch_start"
+# Outside a clone with origin/main, or for a page that git doesn't track, the reader gets the whole page and no lines.
+new_lines=""
+if branch_start=$(git merge-base HEAD origin/main 2>/dev/null) &&
+  path=$(git --literal-pathspecs ls-files --full-name -- "$page" 2>/dev/null) && [[ -n $path ]]; then
+  # git diff gets no pathspec, because with only the page's new name it can't see a rename, and the renamed page
+  # would look new. --diff-filter=MR leaves out a page that the branch's start doesn't have, because all of it is new.
+  if ! diff=$(git -c core.quotePath=false diff --no-ext-diff --no-color --no-relative --find-renames --unified=0 --diff-filter=MR \
+    "$branch_start" 2>&1); then
+    stop "can't compare $page with the branch's start, because git diff failed: $diff"
+  fi
+  new_lines=$(awk -v page_header="+++ b/$path" '
+    /^diff --git / { in_header = 1; is_page = 0; next }
+    in_header && $0 == page_header { is_page = 1 }
+    in_header && /^@@/ { in_header = 0 }
+    !in_header && is_page && /^\+/ { print substr($0, 2) }
+  ' <<<"$diff")
 fi
-# A page that main doesn't have is new as a whole, so --diff-filter=M leaves it out, as git diff does for a page that
-# git doesn't track. The text before the first @@ names the files, and the lines after it that start with + are new.
-if ! diff=$(git diff --no-ext-diff --no-color --unified=0 --diff-filter=M "$branch_start" -- "$page" 2>&1); then
-  stop "can't compare $page with main, because git diff failed: $diff"
-fi
-new_lines=$(awk '/^@@/ { in_hunk = 1; next } in_hunk && /^\+/ { print substr($0, 2) }' <<<"$diff")
 
 prompt="You are $reader. Read this page once, the way that reader would. Quote each sentence you had to read twice, and say what made you stop. Then quote each sentence you didn't need, and say why. Then quote each sentence that says again what another sentence on the page already says, with the sentence it repeats. Leave out sentences that you'd only word differently."
 if [[ -z $new_lines ]]; then

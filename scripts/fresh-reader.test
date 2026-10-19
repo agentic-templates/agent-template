@@ -226,19 +226,31 @@ commit_all "docs: add the import page"
 run_fresh_reader "$reader" docs/import.md
 expect_input "When main doesn't have the page and the branch added it" "$prompt"$'\n\n'"# Import a bank file"
 
+# The branch renames the page with git mv, and adds a line that it doesn't commit.
+new_case 0
+git -C "$base/project" mv docs/expenses.md docs/spending.md
+printf '%s\n' "Run \`expenses list\` to see them." >>"$base/project/docs/spending.md"
+renamed_text=$(<"$base/project/docs/spending.md")
+renamed_input="$prompt_with_new_lines"$'\n\n'"$renamed_text"$'\n\n'"The lines that the change added or rewrote:"$'\n\n'"# Record your expenses"$'\n'"Run \`expenses list\` to see them."
+run_fresh_reader "$reader" docs/spending.md
+expect_input "When the branch renamed the page and didn't commit it" "$renamed_input"
+
+new_case 0
+commit_all "docs: rename the expenses page to spending"
+run_fresh_reader "$reader" docs/spending.md
+expect_input "When the branch renamed the page and committed it" "$renamed_input"
+
 new_case 0
 printf '%s\n' "# Notes" >"$base/notes.md"
 run_fresh_reader "$reader" "$base/notes.md"
-expect_result "When the page is outside the repository" fails \
-  "error: can't compare $base/notes.md with main, because git diff failed: fatal: $base/notes.md: '$base/notes.md' is outside repository at '$(cd "$base/project" && pwd -P)'"
-expect_calls "When the page is outside the repository" ""
+expect_result "When the page is outside the repository" succeeds "The reader's answer from run 1"
+expect_input "When the page is outside the repository" "$prompt"$'\n\n'"# Notes"
 
 new_case 0
 git -C "$base/project" update-ref -d refs/remotes/origin/main
-run_fresh_reader "$reader" docs/expenses.md
-expect_result "When the repository has no origin/main" fails \
-  "error: can't tell which lines of docs/expenses.md are new, because git can't find where HEAD leaves origin/main. Run scripts/fresh-reader in a clone of the project, after git fetch origin main. git printed: fatal: Not a valid object name origin/main"
-expect_calls "When the repository has no origin/main" ""
+run_fresh_reader "$reader" docs/spending.md
+expect_result "When the repository has no origin/main" succeeds "The reader's answer from run 1"
+expect_input "When the repository has no origin/main" "$prompt"$'\n\n'"$renamed_text"
 
 if ((failed_cases > 0)); then
   echo "error: $failed_cases of the $case_count cases in scripts/fresh-reader.test failed. The errors above say which." >&2
