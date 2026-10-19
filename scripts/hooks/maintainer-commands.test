@@ -149,6 +149,17 @@ for TEST_RULESETS in main none fail; do
   expect_allow Bash 'shellcheck scripts/configure-github'
 done
 
+# A check of the script's syntax runs nothing, unless a later flag turns -n off again.
+TEST_RULESETS=main
+for command in 'bash -n scripts/configure-github' 'sh -xn scripts/configure-github' 'bash -o noexec scripts/configure-github'; do
+  expect_allow Bash "$command"
+done
+# A flag that starts with +, and the value of a flag, don't name the script.
+for command in 'bash -n +n scripts/configure-github' 'bash -n +o noexec scripts/configure-github' \
+  'bash +n scripts/configure-github' 'bash --rcfile .bashrc -O extglob -xo pipefail scripts/configure-github'; do
+  expect_block Bash "$command" "$second_run"
+done
+
 # A run of scripts/configure-github on another repository, whose settings count instead of those of the repository
 # that the hook runs in
 runs_on_the_other=(

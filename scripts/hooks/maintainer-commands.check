@@ -72,22 +72,59 @@ block_if_main_lacks_checks() {
   fi
 }
 
+# Reads the words of a bash or sh command after the shell's name, and sets these variables:
+# - shell_operand: the first word after the flags, which names the script, or with -c holds the command
+# - shell_only_reads: true if -n or -o noexec is on after the flags, so that the shell checks the syntax and runs
+#   nothing. -i doesn't turn it off for a script, although the manual of bash says that interactive shells ignore -n.
+read_shell_arguments() {
+  local i position word sign noexec_sign=""
+  shell_operand=""
+  for ((i = 1; i < ${#command_words[@]}; i++)); do
+    word=${command_words[i]}
+    case $word in
+      --rcfile | --init-file) i=$((i + 1)) ;;
+      --*) ;;
+      [-+]*)
+        sign=${word:0:1}
+        # In a word such as -xo, each o and O takes the next word as its value.
+        for ((position = 1; position < ${#word}; position++)); do
+          case ${word:position:1} in
+            n) noexec_sign=$sign ;;
+            o)
+              i=$((i + 1))
+              if [[ ${command_words[i]:-} == noexec ]]; then
+                noexec_sign=$sign
+              fi
+              ;;
+            O) i=$((i + 1)) ;;
+          esac
+        done
+        ;;
+      *)
+        shell_operand=$word
+        break
+        ;;
+    esac
+  done
+  shell_only_reads=false
+  if [[ $noexec_sign == - ]]; then
+    shell_only_reads=true
+  fi
+}
+
 # Blocks a run of scripts/configure-github on a repository whose settings were applied before:
 # check_configure_github [<sudo, env or NAME=value word before the command's name>]...
 check_configure_github() {
-  local word repository sets_gh_repo=false gh_repo=""
-  local -a words=("${command_words[@]}")
-  # bash or sh, with any flags, can run the script too.
-  if [[ ${words[0]##*/} == bash || ${words[0]##*/} == sh ]]; then
-    words=("${words[@]:1}")
-    while ((${#words[@]} > 0)) && [[ ${words[0]} == -* ]]; do
-      words=("${words[@]:1}")
-    done
+  local word repository sets_gh_repo=false gh_repo="" program=${command_words[0]}
+  # bash or sh can run the script too.
+  if [[ ${program##*/} == bash || ${program##*/} == sh ]]; then
+    read_shell_arguments
+    if $shell_only_reads; then
+      return 0
+    fi
+    program=$shell_operand
   fi
-  if ((${#words[@]} == 0)); then
-    return 0
-  fi
-  if [[ ${words[0]} != scripts/configure-github && ${words[0]} != */scripts/configure-github ]]; then
+  if [[ $program != scripts/configure-github && $program != */scripts/configure-github ]]; then
     return 0
   fi
   for word in "$@"; do
