@@ -260,6 +260,8 @@ expect_allow Bash 'git -c color.ui=never push origin HEAD'
 # git reads -h, --help, -v and --version as the subcommand help or version, which then reads the words after it.
 expect_allow Bash 'git --help push --no-verify'
 expect_allow Bash 'git -c color.ui=never -h push --no-verify'
+expect_allow Bash 'git -v push --no-verify'
+expect_allow Bash 'git --version push --no-verify'
 # git reads the name of a setting in any case.
 expect_block Bash 'git -c core.hooksPath=/tmp/hooks push' "$hooks_path"
 expect_block Bash 'git -c Core.HooksPath=/tmp/hooks push origin HEAD' "$hooks_path"
