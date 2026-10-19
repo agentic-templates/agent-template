@@ -159,6 +159,10 @@ for command in 'bash -n +n scripts/configure-github' 'bash -n +o noexec scripts/
   'bash +n scripts/configure-github' 'bash --rcfile .bashrc -O extglob -xo pipefail scripts/configure-github'; do
   expect_block Bash "$command" "$second_run"
 done
+# An interactive shell runs the file that --rcfile or --init-file names.
+for command in 'bash --rcfile scripts/configure-github -i' 'bash --init-file scripts/configure-github -i'; do
+  expect_block Bash "$command" "$second_run"
+done
 
 # A run of scripts/configure-github on another repository, whose settings count instead of those of the repository
 # that the hook runs in

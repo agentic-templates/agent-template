@@ -74,15 +74,20 @@ block_if_main_lacks_checks() {
 
 # Reads the words of a bash or sh command after the shell's name, and sets these variables:
 # - shell_operand: the first word after the flags, which names the script, or with -c holds the command
-# - shell_only_reads: true if -n or -o noexec is on after the flags, so that the shell checks the syntax and runs
-#   nothing. -i doesn't turn it off for a script, although the manual of bash says that interactive shells ignore -n.
+# - shell_rcfile: the file that --rcfile or --init-file names, or empty
+# - shell_only_reads: true if -n or -o noexec is on after the flags, so that the shell checks the script's syntax
+#   and doesn't run it. -i doesn't turn it off for a script, although the manual of bash says that interactive shells
+#   ignore -n.
 read_shell_arguments() {
   local i position word sign noexec_sign=""
-  shell_operand=""
+  shell_operand="" shell_rcfile=""
   for ((i = 1; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
     case $word in
-      --rcfile | --init-file) i=$((i + 1)) ;;
+      --rcfile | --init-file)
+        i=$((i + 1))
+        shell_rcfile=${command_words[i]:-}
+        ;;
       --*) ;;
       [-+]*)
         sign=${word:0:1}
@@ -112,6 +117,11 @@ read_shell_arguments() {
   fi
 }
 
+# Succeeds if a word names scripts/configure-github: is_configure_github <word>
+is_configure_github() {
+  [[ $1 == scripts/configure-github || $1 == */scripts/configure-github ]]
+}
+
 # Blocks a run of scripts/configure-github on a repository whose settings were applied before:
 # check_configure_github [<sudo, env or NAME=value word before the command's name>]...
 check_configure_github() {
@@ -119,12 +129,17 @@ check_configure_github() {
   # bash or sh can run the script too.
   if [[ ${program##*/} == bash || ${program##*/} == sh ]]; then
     read_shell_arguments
-    if $shell_only_reads; then
+    # An interactive shell runs the file that --rcfile or --init-file names, and the hook can't tell whether the
+    # shell is interactive, such as when it reads a terminal. So that file counts as a run, whatever the other flags are.
+    if is_configure_github "$shell_rcfile"; then
+      program=$shell_rcfile
+    elif $shell_only_reads; then
       return 0
+    else
+      program=$shell_operand
     fi
-    program=$shell_operand
   fi
-  if [[ $program != scripts/configure-github && $program != */scripts/configure-github ]]; then
+  if ! is_configure_github "$program"; then
     return 0
   fi
   for word in "$@"; do
