@@ -4,11 +4,11 @@ The steps that list or check security advisories need admin access, which `gh re
 
 ## Publish a release
 
-When a maintainer asks you to publish a release:
+Publish a release when a maintainer asks you to, and when a goal is done, which is when its issue closes as completed. For a goal of more than one pull request, that's its parent issue. Then:
 
-1. Run `scripts/waiting-fixes`. It lists each security advisory that isn't published, closed or withdrawn, and prints a line for each branch of the advisory's private fork. For each line that says `holds a fix` or `can't tell`, ask the maintainer whether this release should include the fix that may wait there. If so, merge it first, as steps 2 and 3 in "Fix a security vulnerability" describe. Then go on to step 2 below, so that the SHA you release includes the fix.
-2. Run `scripts/release-checks`. Its first line is the full SHA of main's latest commit, and its last line is `go`, `wait` or `stop`. While it prints `wait`, run `scripts/release-checks <sha>` with that SHA every minute, so that you keep the same SHA even if more pull requests merge. If it prints `stop`, stop and tell the maintainer what the lines before it say.
-3. Choose the version with `scripts/next-version <sha>`. If the script prints an error instead of a version, tell the maintainer the error. If the maintainer named a version that differs from the one the script printed, ask which one to publish.
+1. Run `scripts/waiting-fixes`. It lists each security advisory that isn't published, closed or withdrawn, and prints a line for each branch of the advisory's private fork. For each line that says `holds a fix` or `can't tell`, ask the maintainer whether this release should include the fix that may wait there. Keep the question out of issues, because they are public, and it would show that a vulnerability isn't fixed yet. Ask it in your session, with a push notification that doesn't describe the vulnerability, and go on once the maintainer answers. If so, merge it first, as steps 2 and 3 in "Fix a security vulnerability" describe. Then go on to step 2 below, so that the SHA you release includes the fix.
+2. Run `scripts/release-checks`. Its first line is the full SHA of main's latest commit, and its last line is `go`, `wait` or `stop`. While it prints `wait`, run `scripts/release-checks <sha>` with that SHA every minute, so that you keep the same SHA even if more pull requests merge. If it prints `stop`, open an issue for each cause that the lines before it name, such as a failed run on main, and publish the release once they are fixed.
+3. Choose the version with `scripts/next-version <sha>`. If the script prints an error instead of a version, ask the maintainer in an issue with `needs-decision`, and publish the release once they answer. If the maintainer named a version that differs from the one the script printed, ask which one to publish.
 4. Publish the release with notes built from the merged pull requests:
    ```sh
    gh release create <version> --target <sha> --generate-notes

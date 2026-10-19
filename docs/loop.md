@@ -127,6 +127,9 @@ After each issue, go back to step 1. Start an auditor too when "Start a retrospe
   this pass found.
 - **Merges.** While pull requests are merging, keep `scripts/wait-for-pull-requests` running as a background task,
   and start it again each time it ends.
+- **Releases.** Once a goal is done, publish a release as "Publish a release" in `docs/releasing.md` describes. A goal
+  is done when its issue closes as completed, which for a goal of more than one pull request is its parent issue.
+  Publish it after the goal's last pull request has merged, and don't wait for the maintainer to ask.
 
 ### Record
 
