@@ -15,12 +15,12 @@ Each account's line ends with its advice:
 The session meter's stop point is 100% minus the larger of 2 percentage points and the usage of 8 minutes at the rate
 between the last two readings. Each weekly meter, the one for all models and each model's own, stops at 99%.
 
-The last line gives the machine's free disk and load, the orchestrator's context size, and whether a retrospective is
-due. One is due once the agents have worked {hours} hours since the last retrospective, which is the newest merged
-pull request with the label retrospective, or since the start of .loop/agents.jsonl before there is one. The hours
-come from the periods on each agent's last end line in .loop/agents.jsonl, which scripts/loop/agent_log.py describes.
-An agent without an end line counts until the last line of its transcript. The test builds and the auditors don't
-count.
+The last line gives the machine's free disk, free memory, swap in use, GPU use and GPU memory in use, its load, the
+orchestrator's context size, and whether a retrospective is due. One is due once the agents have worked {hours} hours
+since the last retrospective, which is the newest merged pull request with the label retrospective, or since the start
+of .loop/agents.jsonl before there is one. The hours come from the periods on each agent's last end line in
+.loop/agents.jsonl, which scripts/loop/agent_log.py describes. An agent without an end line counts until the last line
+of its transcript. The test builds and the auditors don't count.
 
 With --wake, the meter keeps reading, and prints and ends when an account's advice changes, when an account gives no
 reading, and 50 minutes after it started while an account's advice is stop. Run it in the background, so that its
@@ -32,8 +32,9 @@ end wakes the orchestrator.
                 {"name": "codex", "tool": "codex", "env": {"CODEX_HOME": "~/.codex"}}]}
 
 Without the file, the meter reads the Claude account that this machine is signed in to. It adds each reading to
-.loop/meter.jsonl, and exits with code 1 when an account gives no reading. It reads the orchestrator's context size
-from the transcript of the session that the session: line of .loop/state.md names.
+.loop/meter.jsonl, with the machine's numbers at that time under "machine", as scripts/loop/machine.py describes them.
+A number that the machine doesn't give is null. The meter exits with code 1 when an account gives no reading. It reads
+the orchestrator's context size from the transcript of the session that the session: line of .loop/state.md names.
 """
 
 import argparse
@@ -41,7 +42,6 @@ import datetime as dt
 import json
 import math
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -53,6 +53,7 @@ import agent_log
 import paths
 from accounts import Account, AccountsError, claude_environment, load_accounts
 from github import GitHubError, gh_api
+from machine import Machine, read_machine
 from usage import Meter, parse_usage
 
 WATCH_PERCENT = 80.0
@@ -117,6 +118,8 @@ class Readings(NamedTuple):
     # The shortest wait that an account's advice asks for
     wait_seconds: int
     has_every_account: bool
+    # The machine at the last reading
+    machine: Machine
 
 
 class NoReading(Exception):
@@ -140,9 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     readings = wait_for_wake(accounts, log) if options.wake else read_accounts(accounts, log)
     checkout = paths.main_checkout()
     machine = machine_line(
-        free_gigabytes=shutil.disk_usage(loop_folder).free / 1e9,
-        load=os.getloadavg()[0],
-        cores=os.cpu_count() or 1,
+        readings.machine,
         context=orchestrator_context(loop_folder / "state.md", checkout),
         retrospective=read_retrospective(checkout, loop_folder),
     )
@@ -188,6 +189,7 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
     advice: dict[str, str] = {}
     waits: list[int] = []
     has_every_account = True
+    machine: Machine | None = None
     for account in accounts:
         reading_time = now()
         try:
@@ -196,10 +198,12 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
             lines.append(f"{account['name']} | no reading: {problem}")
             has_every_account = False
             continue
+        machine = read_machine(log.parent)
         reading: dict[str, Any] = {
             "at": reading_time.isoformat(timespec="seconds"),
             "account": account["name"],
             "meters": meters,
+            "machine": machine,
         }
         previous = last_reading(log, account["name"])
         rate = rate_per_minute(previous, reading)
@@ -210,7 +214,13 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
         advice[account["name"]] = result.state
         waits.append(result.wait_seconds)
         lines.append(account_line(account["name"], meters, rate, result, notes, reading_time))
-    return Readings(lines, advice, min(waits, default=UNKNOWN_RESET_WAIT_SECONDS), has_every_account)
+    return Readings(
+        lines,
+        advice,
+        min(waits, default=UNKNOWN_RESET_WAIT_SECONDS),
+        has_every_account,
+        machine or read_machine(log.parent),
+    )
 
 
 def read_meters(account: Account, reading_time: dt.datetime) -> tuple[dict[str, Meter], list[str]]:
@@ -420,17 +430,32 @@ def describe(meter: Meter, reading_time: dt.datetime) -> str:
     return f"{meter['used']:g}% resets {shown}"
 
 
-def machine_line(free_gigabytes: float, load: float, cores: int, context: int | None, retrospective: str) -> str:
+def machine_line(machine: Machine, context: int | None, retrospective: str) -> str:
+    memory, swap = machine["memory_free_gb"], machine["swap_used_gb"]
     context_part = "orchestrator context unknown" if context is None else f"orchestrator context {context // 1000}k"
     return " | ".join(
         [
             "machine",
-            f"disk {free_gigabytes:.0f} GB free",
-            f"load {load:.1f} on {cores} cores",
+            f"disk {machine['disk_free_gb']:.0f} GB free",
+            "memory unknown" if memory is None else f"memory {memory:.0f} GB free",
+            "swap unknown" if swap is None else f"swap {swap:.1f} GB used",
+            gpu_part(machine),
+            f"load {machine['load']:.1f} on {machine['cores']} cores",
             context_part,
             retrospective,
         ]
     )
+
+
+def gpu_part(machine: Machine) -> str:
+    percent, memory = machine["gpu_percent"], machine["gpu_memory_used_gb"]
+    if percent is None and memory is None:
+        return "GPU unknown"
+    use = "GPU use unknown" if percent is None else f"GPU {percent:.0f}% busy"
+    if memory is None:
+        return f"{use}, memory unknown"
+    whose = "of the main memory" if machine["gpu_shares_memory"] else "of its own memory"
+    return f"{use}, {memory:.1f} GB {whose}"
 
 
 def orchestrator_context(state_file: Path, checkout: Path) -> int | None:

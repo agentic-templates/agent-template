@@ -21,6 +21,16 @@ The lines are:
                             of all that they and their agents used.
   Hook blocks               How many actions the before-tool hook blocked, from .loop/blocks.log, and how many each
                             rule blocked.
+  Machine                   A line for each number of the machine that scripts/loop/meter records in
+                            .loop/meter.jsonl: free disk, free memory, swap in use, GPU use, GPU memory in use and
+                            load. Each gives the median and the worst: the lowest of free disk and free memory, and
+                            the highest of the others. Then the median of the readings while one, two, and three or
+                            more agents worked. An agent in .loop/agents.jsonl worked in the periods that
+                            scripts/loop/agent_log.py gives it: from each prompt or message that it received to its
+                            last call before the next one, so the time it waited for a message doesn't count. An
+                            agent without an end line worked until the last line of its transcript. The test builds
+                            of a retrospective count here, because they use the machine too. Free disk also gives its
+                            change from the first reading to the last. A number that no reading gives says so.
 
 With --issues, the report also gives a line for each agent that built an issue, of the kinds other and left behind,
 with its numbers and those of its pull request.
@@ -45,7 +55,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import paths
-from agent_log import AgentRun, read_runs, started
+from agent_log import AgentRun, Period, agent_transcripts, read_runs, started, working_periods
 from github import GitHubError, gh_api
 from transcripts import Call, read_transcript
 
@@ -119,6 +129,26 @@ class PullRequestResult(NamedTuple):
     got_second_builder: bool
 
 
+class MachineNumber(NamedTuple):
+    key: str
+    name: str
+    # Whether the lowest value is the one to watch, as for free memory, rather than the highest
+    is_lowest_worst: bool
+
+
+# The numbers of a machine reading that the report gives, as scripts/loop/machine.py names them
+MACHINE_NUMBERS = (
+    MachineNumber("disk_free_gb", "Free disk, GB", True),
+    MachineNumber("memory_free_gb", "Free memory, GB", True),
+    MachineNumber("swap_used_gb", "Swap in use, GB", False),
+    MachineNumber("gpu_percent", "GPU use, %", False),
+    MachineNumber("gpu_memory_used_gb", "GPU memory in use, GB", False),
+    MachineNumber("load", "Load", False),
+)
+# The groups of the readings by how many agents ran: each group's label, and the fewest and the most agents in it
+AGENT_GROUPS: tuple[tuple[str, int, int | None], ...] = (("1 agent", 1, 1), ("2 agents", 2, 2), ("3 or more", 3, None))
+
+
 class ReportError(Exception):
     """A problem that stops the report, with what to do about it."""
 
@@ -134,7 +164,8 @@ def main(argv: list[str] | None = None) -> int:
     options = parser.parse_args(argv)
     since: dt.datetime = options.since
     checkout = paths.main_checkout()
-    runs = [run for run in read_runs(paths.loop_dir() / "agents.jsonl") if not run.start["test"]]
+    all_runs = read_runs(paths.loop_dir() / "agents.jsonl")
+    runs = [run for run in all_runs if not run.start["test"]]
     recent = [run for run in runs if started(run) >= since]
     try:
         ci_runs = read_ci_runs(since, checkout)
@@ -155,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         *type_lines(recent, results),
         orchestrator_line(agents),
         block_line(count_blocks(read_log("blocks.log"), since)),
+        *machine_lines(read_machine_readings(read_log("meter.jsonl"), since), periods_of(all_runs, checkout)),
     ]
     if options.issues:
         lines += issue_lines(recent, results)
@@ -399,6 +431,62 @@ def orchestrator_line(agents: list[Agent]) -> str:
 def block_line(blocks: Counter[str]) -> str:
     parts = [f"{rule} {count}" for rule, count in sorted(blocks.items(), key=lambda item: (-item[1], item[0]))]
     return " | ".join([f"Hook blocks: {blocks.total()}", *parts])
+
+
+class MachineReading(NamedTuple):
+    at: dt.datetime
+    machine: dict[str, Any]
+
+
+def read_machine_readings(log: str, since: dt.datetime) -> list[MachineReading]:
+    """The machine readings in the meter's log after the time, in the order of their times. A reading from before the
+    meter read the machine has none."""
+    readings = []
+    for line in log.splitlines():
+        entry = json.loads(line)
+        at = dt.datetime.fromisoformat(entry["at"])
+        if at >= since and "machine" in entry:
+            readings.append(MachineReading(at, entry["machine"]))
+    return sorted(readings, key=lambda reading: reading.at)
+
+
+def periods_of(runs: list[AgentRun], checkout: Path) -> list[Period]:
+    """The periods in which the agents worked, as scripts/loop/agent_log.py tells them."""
+    transcripts_by_id = agent_transcripts(paths.claude_project_folder(checkout))
+    runs_folder = paths.loop_dir() / "runs"
+    return [period for run in runs for period in working_periods(run, transcripts_by_id, runs_folder)]
+
+
+def agents_running(at: dt.datetime, periods: list[Period]) -> int:
+    """How many agents worked at the time. The periods of one agent don't overlap, so each period counts one agent."""
+    return sum(1 for start, end in periods if start <= at < end)
+
+
+def machine_lines(readings: list[MachineReading], periods: list[Period]) -> list[str]:
+    if not readings:
+        return ["Machine: no readings"]
+    running = [agents_running(reading.at, periods) for reading in readings]
+    return [machine_line(number, readings, running) for number in MACHINE_NUMBERS]
+
+
+def machine_line(number: MachineNumber, readings: list[MachineReading], running: list[int]) -> str:
+    values = [reading.machine[number.key] for reading in readings]
+    known = [value for value in values if value is not None]
+    if not known:
+        return f"{number.name}: no readings"
+    worst = f"lowest {min(known):.1f}" if number.is_lowest_worst else f"highest {max(known):.1f}"
+    parts = [f"median {statistics.median(known):.1f}", worst]
+    if number.key == "disk_free_gb":
+        parts.append(f"net change {known[-1] - known[0]:+.1f}")
+    groups = []
+    for label, fewest, most in AGENT_GROUPS:
+        group = [
+            value
+            for value, count in zip(values, running, strict=True)
+            if value is not None and fewest <= count and (most is None or count <= most)
+        ]
+        groups.append(f"{label} {statistics.median(group):.1f}" if group else f"{label} none")
+    return f"{number.name}: {', '.join(parts)} | median with " + ", ".join(groups)
 
 
 if __name__ == "__main__":

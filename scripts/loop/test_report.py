@@ -14,7 +14,7 @@ from typing import Any
 from unittest import mock
 
 import paths
-from test_transcripts import START, at, call_line
+from test_transcripts import START, at, call_line, prompt_line
 
 REPORT = Path(__file__).with_name("report")
 # The report's file name has no .py, so the tests load it by its path.
@@ -160,6 +160,7 @@ class EmptyPeriodTest(ReportTest):
                     "Types: no agent started",
                     "Orchestrator's share of the input tokens: none used",
                     "Hook blocks: 0",
+                    "Machine: no readings",
                 ],
                 "",
             ),
@@ -544,6 +545,99 @@ class BlockTest(ReportTest):
             self.line("Hook blocks"),
             "Hook blocks: 4 | forbidden-commands.check 2 | posted-text.check 1 | secret-files.check 1",
         )
+
+
+def meter_reading(minute: float, **numbers: float | None) -> dict[str, Any]:
+    """A line of the meter's log, with a machine that gives the numbers, and gives no others."""
+    names = ("disk_free_gb", "memory_free_gb", "swap_used_gb", "gpu_percent", "gpu_memory_used_gb", "load")
+    machine = {name: numbers.get(name) for name in names} | {"cores": 10, "gpu_shares_memory": True}
+    return {"at": at(minute), "account": "claude", "meters": {}, "meters_at_stop": [], "machine": machine}
+
+
+def worked(agent_id: str, *periods: tuple[float, float]) -> dict[str, Any]:
+    """An end line of agents.jsonl for an agent that worked in the periods, each from one minute to another."""
+    return {
+        **end(agent_id, periods[-1][1]),
+        "periods": [[at(first), at(last)] for first, last in periods],
+    }
+
+
+class MachineTest(ReportTest):
+    def setUp(self) -> None:
+        super().setUp()
+        # From minute 0 to 40 these agents work, one, two, or four at once. The test build c has no end line, and its
+        # transcript's last call is at minute 41.
+        self.log_agents(
+            start("d", -5),
+            start("a", 0),
+            start("b", 10),
+            {**start("c", 15), "test": True},
+            start("e", 16),
+            worked("d", (-5, 5)),
+            worked("e", (16, 18)),
+            worked("b", (10, 20)),
+            worked("a", (0, 30)),
+        )
+        transcript = self.transcript("agent-c", [prompt_line(15), call_line("x", 16), call_line("y", 41)], "session")
+        transcript.with_suffix(".meta.json").write_text(json.dumps({"toolUseId": "c"}))
+
+    def log_readings(self, *readings: dict[str, Any]) -> None:
+        (self.loop / "meter.jsonl").write_text("".join(json.dumps(reading) + "\n" for reading in readings))
+
+    def test_gives_the_median_and_the_worst_of_each_number_and_its_median_by_how_many_agents_ran(self) -> None:
+        disk = {0: 100, 8: 98, 12: 97, 17: 95, 20: 96, 40: 90}
+        swap = {0: 1, 8: 2, 12: 3, 17: 6, 20: 4, 40: None}
+        before_the_time = meter_reading(-10, disk_free_gb=500, swap_used_gb=50)
+        self.log_readings(
+            before_the_time,
+            *[meter_reading(minute, disk_free_gb=disk[minute], swap_used_gb=swap[minute]) for minute in disk],
+        )
+        status, lines, errors = self.run_report()
+        self.assertEqual(status, 0, errors)
+        self.assertEqual(
+            lines[-6:],
+            [
+                (
+                    "Free disk, GB: median 96.5, lowest 90.0, net change -10.0 | median with 1 agent 94.0, 2 agents "
+                    "97.0, 3 or more 95.0"
+                ),
+                "Free memory, GB: no readings",
+                "Swap in use, GB: median 3.0, highest 6.0 | median with 1 agent 2.0, 2 agents 3.0, 3 or more 6.0",
+                "GPU use, %: no readings",
+                "GPU memory in use, GB: no readings",
+                "Load: no readings",
+            ],
+        )
+
+    def test_says_when_no_reading_ran_with_that_many_agents(self) -> None:
+        self.log_readings(meter_reading(8, load=2.5, gpu_percent=40), meter_reading(12, load=4.5, gpu_percent=None))
+        self.assertEqual(
+            self.line("Load"), "Load: median 3.5, highest 4.5 | median with 1 agent 2.5, 2 agents 4.5, 3 or more none"
+        )
+        self.assertEqual(
+            self.line("GPU use"),
+            "GPU use, %: median 40.0, highest 40.0 | median with 1 agent 40.0, 2 agents none, 3 or more none",
+        )
+
+    def test_counts_an_agent_without_an_end_line_until_the_last_line_of_its_transcript(self) -> None:
+        self.log_readings(meter_reading(40.5, memory_free_gb=12), meter_reading(41.5, memory_free_gb=20))
+        self.assertEqual(
+            self.line("Free memory"),
+            "Free memory, GB: median 16.0, lowest 12.0 | median with 1 agent 12.0, 2 agents none, 3 or more none",
+        )
+
+    def test_leaves_out_the_time_that_an_agent_waited_for_a_message(self) -> None:
+        self.log_agents(start("f", 0), worked("f", (0, 5), (20, 25)))
+        self.log_readings(*[meter_reading(minute, load=load) for minute, load in ((3, 1.0), (10, 9.0), (22, 3.0))])
+        self.assertEqual(
+            self.line("Load"), "Load: median 3.0, highest 9.0 | median with 1 agent 2.0, 2 agents none, 3 or more none"
+        )
+
+    def test_leaves_out_the_readings_from_before_the_meter_read_the_machine(self) -> None:
+        reading = meter_reading(8, disk_free_gb=50)
+        del reading["machine"]
+        self.log_readings(reading)
+        self.assertEqual(self.line("Machine"), "Machine: no readings")
 
 
 class SinceTest(ReportTest):

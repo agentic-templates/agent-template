@@ -16,6 +16,7 @@ from unittest import mock
 from zoneinfo import ZoneInfo
 
 import paths
+from machine import Machine
 from test_transcripts import call_line, prompt_line, write_transcript
 
 METER = Path(__file__).with_name("meter")
@@ -321,8 +322,10 @@ class AccountLineTest(MeterTest):
 
     def test_adds_each_reading_to_the_log(self) -> None:
         self.run_meter()
+        entry = json.loads((self.loop / "meter.jsonl").read_text())
+        self.assertEqual(set(entry.pop("machine")), set(Machine.__annotations__))
         self.assertEqual(
-            json.loads((self.loop / "meter.jsonl").read_text()),
+            entry,
             {
                 "at": "2026-10-18T03:08:00-04:00",
                 "account": "claude",
@@ -523,20 +526,45 @@ class WakeTest(MeterTest):
         self.assertEqual((self.run_meter("--wake")[0], self.clock.sleeps), (1, []))
 
 
+# A reading of a Mac with Apple silicon
+MAC: Machine = {
+    "disk_free_gb": 94.4,
+    "load": 3.25,
+    "cores": 10,
+    "memory_free_gb": 30.03,
+    "swap_used_gb": 1.88,
+    "gpu_percent": 23.0,
+    "gpu_memory_used_gb": 6.62,
+    "gpu_shares_memory": True,
+}
+
+
 class MachineLineTest(MeterTest):
-    def test_gives_the_disk_the_load_the_context_and_the_retrospective(self) -> None:
+    def test_gives_the_disk_the_memory_the_swap_the_gpu_the_load_the_context_and_the_retrospective(self) -> None:
         self.assertEqual(
-            meter.machine_line(
-                94.4, 3.25, 10, 210_500, "retrospective due: 31.5 hours of agents' work since the last one"
-            ),
-            "machine | disk 94 GB free | load 3.2 on 10 cores | orchestrator context 210k | "
+            meter.machine_line(MAC, 210_500, "retrospective due: 31.5 hours of agents' work since the last one"),
+            "machine | disk 94 GB free | memory 30 GB free | swap 1.9 GB used | GPU 23% busy, 6.6 GB of the main memory"
+            " | load 3.2 on 10 cores | orchestrator context 210k | "
             "retrospective due: 31.5 hours of agents' work since the last one",
         )
+
+    def test_gives_the_memory_of_a_gpu_with_its_own_memory(self) -> None:
+        line = meter.machine_line({**MAC, "gpu_shares_memory": False}, None, "")
+        self.assertIn(" | GPU 23% busy, 6.6 GB of its own memory | ", line)
+
+    def test_says_which_numbers_the_machine_does_not_give(self) -> None:
+        missing = {**MAC, "memory_free_gb": None, "swap_used_gb": None, "gpu_percent": None, "gpu_memory_used_gb": None}
+        self.assertIn(" | memory unknown | swap unknown | GPU unknown | ", meter.machine_line(missing, None, ""))
+        line = meter.machine_line({**MAC, "gpu_percent": None}, None, "")
+        self.assertIn(" | GPU use unknown, 6.6 GB of the main memory | ", line)
+        line = meter.machine_line({**MAC, "gpu_memory_used_gb": None}, None, "")
+        self.assertIn(" | GPU 23% busy, memory unknown | ", line)
 
     def test_is_the_last_line(self) -> None:
         self.assertRegex(
             self.run_meter()[1][-1],
-            r"^machine \| disk \d+ GB free \| load \d+\.\d on \d+ cores \| orchestrator context unknown \| "
+            r"^machine \| disk \d+ GB free \| memory .* \| load \d+\.\d on \d+ cores \| "
+            r"orchestrator context unknown \| "
             r"retrospective not due: 0\.0 of 30 hours of agents' work since the last one$",
         )
 
@@ -549,7 +577,7 @@ class ContextTest(MeterTest):
         return transcript
 
     def context(self) -> str:
-        return self.run_meter()[1][-1].split(" | ")[3]
+        return self.run_meter()[1][-1].split(" | ")[-2]
 
     def test_reads_the_input_of_the_last_call_in_the_transcript_of_the_orchestrator(self) -> None:
         (self.loop / "state.md").write_text("# Loop state\nsession: abc123\npid: 42\n")
@@ -631,7 +659,7 @@ class RetrospectiveTest(MeterTest):
     def retrospective(self, *agents: list[str]) -> str:
         lines = [line for lines in agents for line in lines]
         (self.loop / "agents.jsonl").write_text("".join(f"{line}\n" for line in lines))
-        return self.run_meter()[1][-1].split(" | ")[4]
+        return self.run_meter()[1][-1].split(" | ")[-1]
 
     def test_is_due_once_one_agent_worked_30_hours_since_the_last_one(self) -> None:
         cases = {
