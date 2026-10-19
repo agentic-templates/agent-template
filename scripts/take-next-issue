@@ -11,7 +11,7 @@
 # - left behind <pull request>: scripts/pull-request-state prints left behind for it.
 # - other: none of the above.
 # It stops with an error when gh fails. It asks gh about the repository of this checkout, or the one in GH_REPO.
-# The orchestrator runs it, as docs/loop.md describes.
+# The orchestrator runs it, as "Launch" in docs/loop.md describes.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=scripts/ready-issues

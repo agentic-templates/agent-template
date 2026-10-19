@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Finds the pull requests that the orchestrator must fix or plan again, as docs/loop.md describes. It goes through
-# each open pull request into main that has auto-merge on, is in the merge queue or was removed from it. It leaves out
-# pull requests from forks, and pull requests in the merge state UNKNOWN, which GitHub hasn't worked out yet.
+# Finds the pull requests that the orchestrator must fix or plan again, as "Land" in docs/loop.md describes. It goes
+# through each open pull request into main that has auto-merge on, is in the merge queue or was removed from it. It
+# leaves out pull requests from forks, and pull requests in the merge state UNKNOWN, which GitHub hasn't worked out
+# yet.
 # - It turns off auto-merge on each pull request of Dependabot's that has auto-merge on, isn't in the merge queue, and
 #   is DIRTY or has a failed check.
 # - It prints a line for each pull request that the orchestrator acts on, with what's wrong:

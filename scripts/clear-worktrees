@@ -7,7 +7,7 @@
 # the folder it runs in. scripts/start-build-run runs it.
 # Given an issue, as in scripts/clear-worktrees 12, it frees only that issue's branches, whether or not the issue has
 # the ready label, and it frees a locked worktree too. It fails when it leaves any folder that holds them. The
-# orchestrator runs it this way for the issue of a builder that stopped.
+# orchestrator runs it this way for the issue of a builder that stopped, as "Take in" in docs/loop.md describes.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=scripts/secret-file-names
