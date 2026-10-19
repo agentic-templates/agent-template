@@ -23,7 +23,7 @@ from pathlib import Path
 # The checks on a pull request should take about a minute, as "Commands" in AGENTS.md says, and in one process the
 # tests took 48 of the linux job's 77 seconds in CI. The tests spend about half their time waiting for the processes
 # that they start, so the parts outnumber the 4 cores of CI's runner.
-PARTS = 8
+PARTS = 4
 
 
 def main() -> int:
