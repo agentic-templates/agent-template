@@ -63,7 +63,7 @@ Leave out a test that an earlier retrospective's description records, unless its
 with the largest expected saving first, and start each build only while `scripts/loop/meter` gives the advice `go`
 for the account that the build runs on.
 
-A version can differ from its type in any part, such as its model, effort, instructions, tools or limit on turns.
+A version can differ from its type in its model, effort, instructions, tools, disallowed tools or limit on turns.
 Write each version as an agent file in `.claude/agents/` in your worktree, such as `builder-cheaper.md`. In a test,
 each version or other type that you test builds the same issues, and the type that built them until now builds each
 of them once, as the baseline for all of them. Pick at least three issues that fit the type, spread across the kinds
