@@ -10,8 +10,8 @@ The lines are:
   CI jobs                   Each job's median time in those runs, leaving out the runs that skipped it. The jobs that
                             run the tests give the tests' time.
   Builders                  How many agents of the types builder-small, builder and builder-deep ran, and the median
-                            of their minutes and of their tool calls. An agent's minutes run from its first call to its
-                            last.
+                            of their minutes and of their tool calls. An agent's minutes run from each prompt or
+                            message that it received to its last call before the next one.
   Orchestrator's share      The share of the tokens that the sessions in the main checkout used themselves, out of all
                             that they and their agents used. Cached tokens count too.
   Hook blocks               How many actions the before-tool hook blocked, from .loop/blocks.log, and how many each
@@ -41,7 +41,7 @@ BUILDER = "builder"
 OTHER_AGENT = "other agent"
 USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 # One query asks for the jobs of 100 runs, the most that GitHub takes, because a query for each run took 0.7 seconds,
-# so a week of 200 runs would take more than 2 minutes.
+# as pull request #20 measured, so a week of 200 runs would take more than 2 minutes.
 RUNS_PER_QUERY = 100
 JOBS_QUERY = """
 query($ids: [ID!]!) {
@@ -71,11 +71,18 @@ class Transcript(NamedTuple):
     role: str
     modified: float
     calls: list[Call]
+    # The times of the prompts and messages that the session or agent received
+    prompts: list[dt.datetime]
 
 
 class Agent(NamedTuple):
     role: str
     calls: list[Call]
+    prompts: list[dt.datetime]
+
+
+class ReportError(Exception):
+    """A problem that stops the report, with what to do about it."""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -89,10 +96,11 @@ def main(argv: list[str] | None = None) -> int:
     checkout = paths.main_checkout()
     try:
         ci_runs = read_ci_runs(since, checkout)
-    except GitHubError as error:
+        transcripts = read_transcripts(paths.claude_project_folder(checkout), checkout, since)
+    except (GitHubError, ReportError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    agents = count_once(read_transcripts(paths.claude_project_folder(checkout), since), since)
+    agents = count_once(transcripts, since)
     block_log = paths.loop_dir() / "blocks.log"
     blocks = count_blocks(block_log.read_text() if block_log.exists() else "", since)
     lines = [
@@ -142,8 +150,10 @@ def read_ci_runs(since: dt.datetime, checkout: Path) -> list[CiRun]:
             options += ["-f", f"ids[]={run['node_id']}"]
         nodes = json.loads(gh_api("graphql", options, checkout))["data"]["nodes"]
         for run, node in zip(batch, nodes, strict=True):
-            jobs = node["checkSuite"]["checkRuns"]["nodes"]
-            ci_runs.append(ci_run(run, jobs))
+            # GitHub gives no node for a run that someone deleted after the listing.
+            if node is None:
+                continue
+            ci_runs.append(ci_run(run, node["checkSuite"]["checkRuns"]["nodes"]))
     return ci_runs
 
 
@@ -160,8 +170,13 @@ def minutes_between(start: str, end: str) -> float:
     return (dt.datetime.fromisoformat(end) - dt.datetime.fromisoformat(start)).total_seconds() / 60
 
 
-def read_transcripts(project_folder: Path, since: dt.datetime) -> list[Transcript]:
+def read_transcripts(project_folder: Path, checkout: Path, since: dt.datetime) -> list[Transcript]:
     """The transcripts that changed after the time: each session's, and those of its agents."""
+    if not project_folder.is_dir():
+        raise ReportError(
+            f"Can't find {project_folder}, where Claude Code keeps the transcripts of the sessions in {checkout}. "
+            "If Claude Code keeps its files elsewhere, set CLAUDE_CONFIG_DIR to that folder."
+        )
     found: list[tuple[Path, str]] = []
     for session in project_folder.glob("*.jsonl"):
         found.append((session, ORCHESTRATOR))
@@ -171,7 +186,7 @@ def read_transcripts(project_folder: Path, since: dt.datetime) -> list[Transcrip
     for file, role in found:
         modified = file.stat().st_mtime
         if modified >= since.timestamp():
-            transcripts.append(Transcript(role, modified, read_calls(file)))
+            transcripts.append(Transcript(role, modified, *read_transcript(file)))
     return transcripts
 
 
@@ -182,16 +197,22 @@ def agent_role(meta_file: Path) -> str:
     return BUILDER if agent_type in BUILDER_TYPES else OTHER_AGENT
 
 
-def read_calls(transcript: Path) -> list[Call]:
-    """The calls in a transcript. A response that spans several lines repeats its message's id and usage on each line,
-    so its tokens count once. Each line holds other blocks of the response, so its tool calls add up."""
+def read_transcript(file: Path) -> tuple[list[Call], list[dt.datetime]]:
+    """The calls in a transcript, and the times of the prompts and messages in it. A response that spans several lines
+    repeats its message's id and usage on each line, so its tokens count once. Each line holds other blocks of the
+    response, so its tool calls add up."""
     times: dict[str, list[dt.datetime]] = {}
     usage: dict[str, dict[str, int]] = {}
     tool_calls: Counter[str] = Counter()
-    with transcript.open(errors="replace") as handle:
+    prompts = []
+    with file.open(errors="replace") as handle:
         for line in handle:
-            entry = assistant_entry(line)
+            entry = transcript_entry(line)
             if entry is None:
+                continue
+            if is_prompt(entry):
+                prompts.append(dt.datetime.fromisoformat(entry["timestamp"]))
+            if not is_call(entry):
                 continue
             message = entry["message"]
             call = message["id"]
@@ -202,23 +223,35 @@ def read_calls(transcript: Path) -> list[Call]:
             content = message.get("content")
             if isinstance(content, list):
                 tool_calls[call] += sum(1 for block in content if block.get("type") == "tool_use")
-    return [
+    calls = [
         Call(call, min(moments), max(moments), sum(usage[call].values()), tool_calls[call])
         for call, moments in times.items()
     ]
+    return calls, prompts
 
 
-def assistant_entry(line: str) -> dict[str, Any] | None:
-    """The entry on a transcript's line if it holds a call, or None."""
+def transcript_entry(line: str) -> dict[str, Any] | None:
+    """The entry on a transcript's line if it holds a message and its time, or None."""
     try:
         entry = json.loads(line)
     except ValueError:
         # Claude Code may be writing the last line of a running session's transcript.
         return None
-    message = entry.get("message")
-    if entry.get("type") != "assistant" or not isinstance(message, dict) or not message.get("id"):
+    if not isinstance(entry.get("message"), dict) or not entry.get("timestamp"):
         return None
     return dict(entry)
+
+
+def is_call(entry: dict[str, Any]) -> bool:
+    return entry.get("type") == "assistant" and bool(entry["message"].get("id"))
+
+
+def is_prompt(entry: dict[str, Any]) -> bool:
+    """Whether the entry is a prompt or a message that the session or agent received, rather than a tool's result."""
+    if entry.get("type") != "user":
+        return False
+    content = entry["message"].get("content")
+    return not isinstance(content, list) or any(block.get("type") != "tool_result" for block in content)
 
 
 def count_once(transcripts: list[Transcript], since: dt.datetime) -> list[Agent]:
@@ -231,7 +264,7 @@ def count_once(transcripts: list[Transcript], since: dt.datetime) -> list[Agent]
         calls = [call for call in transcript.calls if call.id not in seen and call.start >= since]
         seen.update(call.id for call in transcript.calls)
         if calls:
-            agents.append(Agent(transcript.role, calls))
+            agents.append(Agent(transcript.role, calls, transcript.prompts))
     return agents
 
 
@@ -264,12 +297,20 @@ def builder_line(agents: list[Agent]) -> str:
     builders = [agent for agent in agents if agent.role == BUILDER]
     if not builders:
         return "Builders: 0"
-    minutes = statistics.median(
-        (max(call.end for call in builder.calls) - min(call.start for call in builder.calls)).total_seconds() / 60
-        for builder in builders
-    )
+    minutes = statistics.median(working_minutes(builder) for builder in builders)
     tool_calls = statistics.median(sum(call.tool_calls for call in builder.calls) for builder in builders)
     return f"Builders: {len(builders)}, median {minutes:.1f} min and {tool_calls:g} tool calls"
+
+
+def working_minutes(agent: Agent) -> float:
+    """The minutes from each prompt or message that the agent received to its last call before the next one. A
+    builder that gets a message after it finished adds to the same transcript, so the time it waited doesn't count."""
+    first_start = min(call.start for call in agent.calls)
+    ends: dict[dt.datetime, dt.datetime] = {}
+    for call in agent.calls:
+        start = max((prompt for prompt in agent.prompts if prompt <= call.start), default=first_start)
+        ends[start] = max(ends.get(start, call.end), call.end)
+    return sum((end - start).total_seconds() for start, end in ends.items()) / 60
 
 
 def orchestrator_line(agents: list[Agent]) -> str:

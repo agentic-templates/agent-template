@@ -23,7 +23,8 @@ importlib.machinery.SourceFileLoader("report", str(REPORT)).exec_module(report)
 SINCE = dt.datetime(2026, 10, 11, 14, 0, tzinfo=dt.UTC)
 
 # A stand-in for gh. It writes each call's arguments to calls.jsonl in STANDIN_DIR. For a list of runs it prints the
-# lines under "runs" in gh.json. For a GraphQL query it gives the jobs under "jobs" for each id that the query names.
+# lines under "runs" in gh.json. For a GraphQL query it gives the jobs under "jobs" for each id that the query names,
+# and no node for an id that "jobs" doesn't hold.
 # An answer under "fail" makes each call print it to stderr and exit with code 1. -S keeps coverage, which starts in
 # each Python process of the tests, out of the stand-in.
 STANDIN = f"""#!{sys.executable} -S
@@ -37,7 +38,8 @@ if "fail" in answers:
     sys.exit(1)
 if sys.argv[2] == "graphql":
     ids = [argument.removeprefix("ids[]=") for argument in sys.argv if argument.startswith("ids[]=")]
-    nodes = [{{"checkSuite": {{"checkRuns": {{"nodes": answers["jobs"][id]}}}}}} for id in ids]
+    jobs = answers["jobs"]
+    nodes = [{{"checkSuite": {{"checkRuns": {{"nodes": jobs[id]}}}}}} if id in jobs else None for id in ids]
     print(json.dumps({{"data": {{"nodes": nodes}}}}))
 else:
     print("".join(json.dumps(run) + "\\n" for run in answers["runs"]), end="")
@@ -51,6 +53,11 @@ def at(minutes: float) -> str:
 
 def job(name: str, minutes: float, conclusion: str = "SUCCESS") -> dict[str, str]:
     return {"name": name, "startedAt": at(0), "completedAt": at(minutes), "conclusion": conclusion}
+
+
+def prompt_line(minute: float, content: Any = "Build the issue.") -> dict[str, Any]:
+    """A transcript's line for a prompt or a message that a session or an agent received."""
+    return {"type": "user", "timestamp": at(minute), "message": {"role": "user", "content": content}}
 
 
 def call_line(call: str, minute: float, tokens: int = 0, tool_calls: int = 0) -> dict[str, Any]:
@@ -84,6 +91,7 @@ class ReportTest(unittest.TestCase):
         patched.start()
         self.addCleanup(patched.stop)
         self.project = paths.claude_project_folder(paths.main_checkout())
+        self.project.mkdir(parents=True)
         self.runs: list[dict[str, str]] = []
         self.jobs: dict[str, list[dict[str, str]]] = {}
         self.answer()
@@ -172,6 +180,13 @@ class CiTest(ReportTest):
         queries = [call for call in self.calls() if call[1] == "graphql"]
         self.assertEqual([sum(argument.startswith("ids[]=") for argument in query) for query in queries], [100, 1])
 
+    def test_skips_a_run_that_was_deleted_after_the_listing(self) -> None:
+        self.add_run(2, job("tests", 1))
+        self.add_run(3, job("tests", 1))
+        del self.jobs["run-1"]
+        self.answer()
+        self.assertEqual(self.line("CI runs"), "CI runs that passed: 1, median 2.0 min")
+
     def test_fails_with_what_gh_printed_when_gh_fails(self) -> None:
         (self.standins / "gh.json").write_text(json.dumps({"fail": "HTTP 401: Bad credentials\n"}))
         error = (
@@ -191,6 +206,20 @@ class BuilderTest(ReportTest):
         self.transcript("reviewer", [call_line("r", 1, tool_calls=99)], session="session", agent_type="reviewer")
         self.transcript("unnamed", [call_line("u", 1, tool_calls=99)], session="session")
         self.assertEqual(self.line("Builders"), "Builders: 3, median 20.0 min and 6 tool calls")
+
+    def test_counts_the_minutes_from_each_message_to_the_last_call_before_the_next(self) -> None:
+        self.transcript("session", [])
+        lines = [
+            prompt_line(0),
+            call_line("a", 1),
+            {"type": "user", "timestamp": at(2), "message": {"content": [{"type": "tool_result"}]}},
+            call_line("b", 10),
+            prompt_line(70, [{"type": "text", "text": "Fix the review's findings."}]),
+            call_line("c", 71),
+            call_line("d", 75),
+        ]
+        self.transcript("builder", lines, session="session", agent_type="builder")
+        self.assertEqual(self.line("Builders"), "Builders: 1, median 15.0 min and 0 tool calls")
 
     def test_adds_up_the_tool_calls_on_each_line_of_a_response(self) -> None:
         self.transcript("session", [])
@@ -246,6 +275,19 @@ class OrchestratorTest(ReportTest):
         self.transcript("session", lines)
         self.transcript("builder", [call_line("b", 1, tokens=100)], session="session", agent_type="builder")
         self.assertEqual(self.line("Orchestrator"), "Orchestrator's share of the tokens: 50%")
+
+
+class TranscriptFolderTest(ReportTest):
+    def test_stops_when_the_folder_of_the_transcripts_is_missing(self) -> None:
+        self.project.rmdir()
+        status, lines, errors = self.run_report()
+        self.assertEqual((status, lines), (1, []))
+        self.assertEqual(
+            errors,
+            f"error: Can't find {self.project}, where Claude Code keeps the transcripts of the sessions in "
+            f"{paths.main_checkout()}. If Claude Code keeps its files elsewhere, set CLAUDE_CONFIG_DIR to that "
+            "folder.\n",
+        )
 
 
 class BlockTest(ReportTest):
