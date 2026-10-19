@@ -134,6 +134,17 @@ expect_allow() {
   expect_result "In ${tools%% *}, the hook for $1 \"$2\"" 0 ""
 }
 
+# Runs the hook on a command of a session, or of a subagent of it, and checks its result:
+# expect_from <session> <agent id or ""> <command> <exit code> <message>
+# A subagent's input has the id of its session, and its own in agent_id.
+expect_from() {
+  local input
+  input=$(sample_input claude-code Bash "$3" | jq -c --arg session "$1" --arg agent "$2" \
+    '.session_id = $session | if $agent == "" then . else . + {agent_id: $agent, agent_type: "builder"} end')
+  run_hook "$input"
+  expect_result "For session $1${2:+ and its agent $2}, the hook for Bash \"$3\"" "$4" "$5"
+}
+
 # Checks each form of the repository flag before a subcommand against a fixed result:
 # expect_repository_flags <exit code> <message> <group> <subcommand> <remaining command words>
 # Each check moves the flag to just after the subcommand before it reads the command, with move_gh_repository_flags in

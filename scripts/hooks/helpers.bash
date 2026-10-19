@@ -87,6 +87,18 @@ hook_main_checkout() {
   main_checkout "${git_folders%%$'\n'*}" "${git_folders#*$'\n'}"
 }
 
+# Succeeds if the action comes from the orchestrator's session, the one that the state file in the loop's folder names,
+# and not from a subagent of it, such as a builder, whose input has the session's id too. No hook protects the state
+# file, so a builder could write its own session's id there and count as the orchestrator.
+is_orchestrator() {
+  local loop
+  if [[ -n $agent_id ]]; then
+    return 1
+  fi
+  loop=$(hook_loop_folder 2>/dev/null) || return 1
+  is_orchestrators_session "$loop" "$session_id"
+}
+
 # Adds a line to blocks.log in the loop's folder of this hook's repository. HOOK_BLOCK_LOG names another file, as in
 # the hooks' tests. The line holds the time, the check's file name and the words, with the values that could hold a
 # secret left out, so that its reader can tell a real block from a false alarm: log_block <word>...
@@ -325,7 +337,7 @@ move_gh_repository_flags() {
     return 0
   fi
   case ${command_words[1]} in
-    pr | issue | label) ;;
+    pr | issue | label | release) ;;
     *) return 0 ;;
   esac
   while ((index < ${#command_words[@]})); do
@@ -389,6 +401,31 @@ read_arguments() {
     esac
   done
   target+=(${repository[@]+"${repository[@]}"})
+}
+
+# Succeeds if the gh command in command_words has the flag --help, so that it only prints its help. -h doesn't count,
+# because gh repo create and gh repo edit read it as --homepage. gh reads a word after -- as an argument, and the word
+# after a flag that takes a value as that value, as in --description --help. The hook doesn't know which flags take a
+# value, so --help counts only after a word that isn't a flag, or after a flag that gives its value after =. It counts
+# only before the first word with an expansion, such as $text, because that word can become --, or nothing, as in
+# --body $text --help.
+prints_help() {
+  local i previous
+  for ((i = 2; i < ${#command_words[@]}; i++)); do
+    if [[ -n ${command_word_may_expand[i - 1]:-} ]]; then
+      return 1
+    fi
+    previous=${command_words[i - 1]}
+    case ${command_words[i]} in
+      --) return 1 ;;
+      --help)
+        if [[ $previous != -* || $previous == *=* ]]; then
+          return 0
+        fi
+        ;;
+    esac
+  done
+  return 1
 }
 
 # Succeeds if read_arguments or read_push_arguments found one of these flags: has_flag <flag>...
