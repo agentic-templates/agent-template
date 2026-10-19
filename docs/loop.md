@@ -56,9 +56,9 @@ on.
 - **Answers.** For each issue with `needs-decision` that the maintainer answered in a comment, carry out the answer,
   as "Labels" in `docs/planning.md` describes.
 - **Other people's issues.** Triage them, as "Triage issues that others open" in `docs/planning.md` describes.
-- **Reports.** When an agent ends, read its report, and act on what it asks of you. For each item that it lists for
-  the maintainer, such as a command that a hook told it to leave to them, ask the maintainer in an issue with
-  `needs-decision`.
+- **Reports.** When an agent ends, read its report, and act on what it asks of you. Of the items that it lists for the
+  maintainer, decide each one that "Decide or ask" in AGENTS.md lets you decide and that no hook leaves to the
+  maintainer. Ask about the rest as "Ask the maintainer" below describes.
 - **Hand-offs.** When a builder or the auditor reports that it handed off its work, because its context grew too
   long, run `scripts/clear-worktrees <issue>`, so that a new agent can check out the issue's branch. The auditor's
   issue is the one that it opened for the retrospective. If the script exits with a code other than 0, it left the
