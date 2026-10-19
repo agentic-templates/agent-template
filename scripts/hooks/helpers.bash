@@ -589,6 +589,29 @@ is_true_flag_value() {
   return 1
 }
 
+# Succeeds if read_arguments found one of these flags, which take no value, and gh reads it as true:
+# has_true_flag <flags that take a value> <flag>...
+# gh reads a short flag among several in one word, as split_flag_word does, so for gh gist create, -wp gives -p, and
+# so does -pd'My notes', where -d takes the description. It reads a value after =, as in --public=false, as
+# is_true_flag_value does.
+has_true_flag() {
+  local flags_with_value=$1 word wanted flag value value_is_next_word flags_before
+  shift
+  for word in ${flags[@]+"${flags[@]}"}; do
+    split_flag_word "$word" "$flags_with_value"
+    for wanted in "$@"; do
+      # A flag before the last in a word takes no value, so gh reads it as true.
+      if [[ $wanted == -? && $flags_before == *"${wanted#-}"* ]]; then
+        return 0
+      fi
+      if [[ $flag == "$wanted" ]] && is_true_flag_value "$value"; then
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
 # Reads the flags of a gh pr command from command_words, from its fourth word on, and fails when the command shows its
 # help or does a dry run: read_pull_request_flags <flags that take a value>
 # It sets pr_base, pr_head and pr_title to the values of --base, --head and --title, or to empty when the command
