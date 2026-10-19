@@ -334,6 +334,8 @@ expect_allow Bash 'gh gist create -d --public notes.md'
 # Posting to a repository other than this one, or one that the list names
 expect_block Bash 'gh pr comment 5 -R someone/else --body Hello' "$(other_repository someone/else)"
 expect_block Bash 'gh issue comment -Rsomeone/else 5 --body Hello' "$(other_repository someone/else)"
+# gh drops the = after a short flag when more follows it, as split_flag_word in helpers.bash describes.
+expect_block Bash 'gh issue comment -R=someone/else 5 --body Hello' "$(other_repository someone/else)"
 expect_block Bash 'gh issue -R someone/else comment 5 --body Hello' "$(other_repository someone/else)"
 expect_block Bash 'gh release -R someone/else upload v1 app.tar' "$(other_repository someone/else)"
 expect_block Bash 'gh workflow run ci.yml --repo=github.com/someone/else' "$(other_repository someone/else)"
@@ -353,6 +355,7 @@ expect_block Bash 'GH_REPO=someone/else gh api -X POST "repos/{owner}/{repo}/iss
   "$(other_repository someone/else)"
 expect_allow Bash 'gh pr comment 5 -R jtmpl/project --body Hello'
 expect_allow Bash 'gh pr comment 5 -R JTMPL/Project --body Hello'
+expect_allow Bash 'gh pr comment 5 -R=jtmpl/project --body Hello'
 expect_allow Bash 'gh pr comment 5 --body Hello'
 expect_allow Bash 'gh pr comment 5 -R jtmpl/listed --body Hello'
 expect_allow Bash 'gh issue comment 5 --body "The same bug: https://github.com/someone/else/issues/9"'

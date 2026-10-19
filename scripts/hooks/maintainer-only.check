@@ -579,7 +579,7 @@ find_destination() {
 
 # Sets destination to the repository that the words of a gh command other than gh api name, or to empty.
 find_named_repository() {
-  local i word
+  local i word flag value value_is_next_word flags_before
   destination=""
   for ((i = 2; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
@@ -593,7 +593,8 @@ find_named_repository() {
         return 0
         ;;
       -R?*)
-        destination=${word#-R}
+        split_flag_word "$word" " -R "
+        destination=$value
         return 0
         ;;
     esac
