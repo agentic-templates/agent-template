@@ -109,6 +109,9 @@ expect_no_folder "After a block in the worktree" "$worktree/.loop"
 run_copy "$main_checkout" Write "$main_checkout/CLAUDE.md"
 expect_result "For a Write of CLAUDE.md, the hook" 2 "Blocked: CLAUDE.md makes a tool skip AGENTS.md. Put its rules into AGENTS.md or a guide in docs/ instead."
 expect_last_line "After a Write of CLAUDE.md" "instruction-files.check $main_checkout/CLAUDE.md"
+run_copy "$main_checkout" Write "$test_home/.zshrc"
+expect_result "For a Write of ~/.zshrc, the hook" 2 "Blocked: $test_home/.zshrc holds settings of the machine or of a tool, and only the maintainer may change them. Ask the maintainer, and go on with the other work."
+expect_last_line "After a Write of ~/.zshrc" "maintainer-only.check $test_home/.zshrc"
 
 # Unless the check gives what it matched, the line holds the simple command that the check blocked.
 expect_line_for 'cd app && git credential fill' 'git credential fill'

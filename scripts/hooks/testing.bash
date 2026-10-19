@@ -17,6 +17,9 @@ test_cwd=$test_home/project
 # The checks log each block here, in place of .loop/blocks.log, so that the tests' blocks stay out of the
 # repository's log.
 export HOOK_BLOCK_LOG=/dev/null
+# The checks read this list of allowed repositories in place of the one in .loop/, so that the cases can post to
+# jtmpl/other.
+export HOOK_ALLOWED_REPOSITORIES=${hooks_folder%/hooks}/fixtures/allowed-repositories
 
 # Prints a sample of what a tool sends the hook before an action: sample_input <tool> <tool name> <command, patch or path>
 # The tool names are Bash, Read, Write, Edit and Codex's apply_patch. Every tool uses Claude Code's field names.

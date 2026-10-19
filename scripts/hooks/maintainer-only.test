@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+# Tests scripts/hooks/maintainer-only.check through scripts/hooks/before-tool. Most cases run a copy of the scripts in
+# a repository whose origin is jtmpl/project, so that they can list repositories in its loop's folder. The copy is in a
+# temporary folder, where deleting is allowed anyway, so the cases of deleting in the repository run this repository's
+# own hook.
+set -euo pipefail
+# shellcheck source=scripts/hooks/testing.bash
+source "${BASH_SOURCE[0]%/*}/testing.bash"
+# The cases check the list that the hook finds on its own.
+unset HOOK_ALLOWED_REPOSITORIES
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+# git looks for no repository above the temporary folder, and reads none of the person's settings.
+export GIT_CEILING_DIRECTORIES=$base GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
+own_hooks=$hooks_folder
+own_checkout=$(cd "$hooks_folder/../.." && pwd -P)
+project=$base/project
+git init --quiet "$project"
+git -C "$project" remote add origin git@github.com:jtmpl/project.git
+git -C "$project" commit --quiet --allow-empty -m Start
+cp -R "${hooks_folder%/*}" "$project/scripts"
+hooks_folder=$project/scripts/hooks
+test_cwd=$project
+# Cursor sends no folder, so its hook runs in the test's own folder.
+cd "$project"
+
+# A stand-in for gh, first on the PATH, that fails, as gh does without a network. The other checks then ask nothing
+# of GitHub, and allow these commands.
+mkdir "$base/bin"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$base/bin/gh"
+chmod +x "$base/bin/gh"
+PATH=$base/bin:$PATH
+
+ask="Ask the maintainer, and go on with the other work."
+
+# The messages that block an action: sudo_message <command>, machine <command>, settings_file <path as written>,
+# deleting <command> <what it deletes>, public <repository> and other_repository <repository>
+sudo_message() {
+  echo "Blocked: $1 runs a command as another user, such as the machine's administrator, and only the maintainer may change the machine's settings or security. Do the work without $1, such as in the repository or a temporary folder, or ask the maintainer."
+}
+machine() {
+  echo "Blocked: this $1 command changes the machine's disks, settings or security, and only the maintainer may do that. $ask"
+}
+settings_file() {
+  echo "Blocked: $1 holds settings of the machine or of a tool, and only the maintainer may change them. $ask"
+}
+deleting() {
+  echo "Blocked: $1 would delete $2, and only the maintainer may delete outside the repository, its worktrees and the temporary folders. Delete only inside them, or ask the maintainer."
+}
+public() {
+  echo "Blocked: this makes $1 public, and only the maintainer makes a repository public, unless .loop/allowed-repositories in the main checkout lists it. $ask"
+}
+other_repository() {
+  echo "Blocked: this posts to $1, which isn't this repository, and only the maintainer posts to another repository, unless .loop/allowed-repositories in the main checkout lists it. $ask"
+}
+environment="Blocked: this command prints the whole environment, which holds tokens. Print only the variables you need, by name, as in printenv PATH."
+no_verify="Blocked: --no-verify skips the pre-push hook, which scans the push for leaks. Push without it. If the scan finds a leak, take it out of the commits."
+push_to_url="Blocked: this pushes to a URL instead of a remote, and only the maintainer may push to another repository. Push to a remote that git remote -v lists, such as origin, or ask the maintainer."
+admin_merge="Blocked: --admin merges the pull request without the checks that main requires, and only the maintainer may skip them. Merge without --admin, so that the merge waits for the checks."
+security="Blocked: this changes the repository's rules or security settings, and only the maintainer may do that. $ask"
+
+# sudo, doas and su, also after env or NAME=value words
+expect_block Bash 'sudo ls' "$(sudo_message sudo)"
+expect_block Bash 'FOO=1 sudo -n true' "$(sudo_message sudo)"
+expect_block Bash 'env sudo make install' "$(sudo_message sudo)"
+expect_block Bash '/usr/bin/sudo ls' "$(sudo_message sudo)"
+expect_block Bash 'git status && doas ls' "$(sudo_message doas)"
+expect_block Bash 'su -c whoami' "$(sudo_message su)"
+expect_allow Bash 'man sudo'
+expect_allow Bash 'echo "sudo and diskutil erase are blocked"'
+expect_allow Bash $'git commit -F - <<\'EOF\'\nfix: stop sudo ls and rm -rf ~ in the docs\nEOF'
+
+# The commands that change the machine's disks, settings or security
+expect_block Bash 'diskutil eraseDisk APFS Empty disk2' "$(machine diskutil)"
+expect_block Bash 'defaults write com.apple.dock autohide -bool true' "$(machine defaults)"
+expect_block Bash 'launchctl load ~/Library/LaunchAgents/com.example.plist' "$(machine launchctl)"
+expect_block Bash 'systemctl restart nginx' "$(machine systemctl)"
+expect_block Bash 'systemctl --user restart app' "$(machine systemctl)"
+expect_block Bash 'crontab -e' "$(machine crontab)"
+expect_block Bash 'crontab jobs.txt' "$(machine crontab)"
+expect_block Bash 'dd if=image.iso of=/dev/disk2 bs=1m' "$(machine dd)"
+expect_block Bash 'sysctl -w kern.maxfiles=65536' "$(machine sysctl)"
+expect_block Bash 'networksetup -setdnsservers Wi-Fi 1.1.1.1' "$(machine networksetup)"
+expect_block Bash 'mkfs.ext4 /dev/sdb1' "$(machine mkfs.ext4)"
+expect_block Bash 'shutdown -h now' "$(machine shutdown)"
+expect_allow Bash 'diskutil list'
+expect_allow Bash 'defaults read com.apple.dock'
+expect_allow Bash 'launchctl getenv PATH'
+expect_allow Bash 'systemctl status nginx'
+expect_allow Bash 'systemctl'
+expect_allow Bash 'crontab -l'
+expect_allow Bash 'dd if=/dev/zero of=disk.img bs=1m count=1'
+expect_allow Bash 'sysctl -n hw.ncpu'
+expect_allow Bash 'networksetup -listallhardwareports'
+expect_allow Bash 'pmset -g'
+
+# Writing a settings file in the home folder, with a redirection, tee or the agent's file-writing tool
+expect_block Bash "echo 'export DEBUG=1' >> ~/.zshrc" "$(settings_file '~/.zshrc')"
+expect_block Bash 'echo "[user]" | tee -a ~/.gitconfig' "$(settings_file '~/.gitconfig')"
+# shellcheck disable=SC2016 # The command is the text that the agent sends, so $HOME stays as written.
+expect_block Bash 'cat settings.json > "$HOME/.claude/settings.json"' "$(settings_file '$HOME/.claude/settings.json')"
+expect_block Bash 'printf "*.log\n" >~/.config/git/ignore' "$(settings_file '~/.config/git/ignore')"
+expect_block Bash 'echo "Host *" >>~/.ssh/config' "$(settings_file '~/.ssh/config')"
+expect_block Write "$test_home/.zshrc" "$(settings_file "$test_home/.zshrc")"
+expect_block Edit "$test_home/.claude/settings.local.json" "$(settings_file "$test_home/.claude/settings.local.json")"
+expect_block Write "$test_home/Library/LaunchAgents/com.example.plist" \
+  "$(settings_file "$test_home/Library/LaunchAgents/com.example.plist")"
+expect_block apply_patch $'*** Begin Patch\n*** Add File: '"$test_home"$'/.codex/config.toml\n+model = "gpt-5"\n*** End Patch\n' \
+  "$(settings_file "$test_home/.codex/config.toml")"
+expect_allow Bash 'echo done > ~/.cache/notes.txt'
+expect_allow Bash 'cat ~/.zshrc'
+expect_allow Bash 'echo "*.log" > .gitignore'
+expect_allow Write "$test_home/notes/todo.md"
+expect_allow Write "$test_home/.claude/projects/notes.md"
+expect_allow Write "$project/.zshrc"
+# A relative path starts from the folder that the agent works in, or that a cd before it changes to.
+home_with_project=$base/home
+mkdir -p "$home_with_project/project"
+test_home=$home_with_project test_cwd=$home_with_project/project
+expect_block apply_patch $'*** Begin Patch\n*** Add File: ../.bashrc\n+alias ll="ls -l"\n*** End Patch\n' \
+  "$(settings_file ../.bashrc)"
+expect_block Bash 'cd ~ && echo "alias ll=\"ls -l\"" >> .bashrc' "$(settings_file .bashrc)"
+expect_allow Bash 'echo "alias ll=\"ls -l\"" >> .bashrc'
+test_home=/home-for-tests/someone test_cwd=$project
+
+# Deleting outside the repository's worktrees and the temporary folders
+expect_block Bash 'rm -rf /' "$(deleting rm /)"
+expect_block Bash 'rm -rf ~' "$(deleting rm '~')"
+expect_block Bash 'rm -rf ~/notes' "$(deleting rm '~/notes')"
+# shellcheck disable=SC2016 # The command is the text that the agent sends, so $HOME stays as written.
+expect_block Bash 'rm -rf "$HOME/notes"' "$(deleting rm '$HOME/notes')"
+expect_block Bash 'rm /etc/hosts' "$(deleting rm /etc/hosts)"
+expect_block Bash 'rmdir ~/empty' "$(deleting rmdir '~/empty')"
+expect_block Bash 'rm -rf build ~/notes' "$(deleting rm '~/notes')"
+expect_block Bash 'cd /usr && rm -rf share' "$(deleting rm share)"
+expect_block Bash 'rm -rf /tmp' "$(deleting rm /tmp)"
+expect_block Bash 'find ~ -name "*.log" -delete' "$(deleting find 'files in ~')"
+expect_block Bash "find ~/Documents -name '*.log' -exec rm -f {} +" "$(deleting find 'files in ~/Documents')"
+expect_allow Bash 'rm -rf build ./node_modules'
+expect_allow Bash 'rm -f /tmp/output.txt'
+expect_allow Bash 'cd /tmp && rm -rf scratch'
+expect_allow Bash "rm -rf '$base/scratch'"
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so the variables stay as written.
+expect_allow Bash 'rm -rf "$TMPDIR/run"'
+# shellcheck disable=SC2016
+expect_allow Bash 'cd "$folder" && rm -rf build'
+expect_allow Bash 'find /tmp -name "*.log" -delete'
+expect_allow Bash 'find ~ -name "*.log"'
+expect_allow Bash 'git rm -r ~/notes'
+hooks_folder=$own_hooks test_cwd=$own_checkout
+expect_allow Bash 'rm -rf build'
+expect_allow Bash "rm -rf '$own_checkout/.claude/worktrees/issue-1'"
+expect_allow Bash 'find . -name "*.pyc" -delete'
+expect_block Bash 'rm -rf ~/notes' "$(deleting rm '~/notes')"
+hooks_folder=$project/scripts/hooks test_cwd=$project
+
+# Printing the whole environment
+expect_block Bash 'env' "$environment"
+expect_block Bash 'env | grep TOKEN' "$environment"
+expect_block Bash 'FOO=1 env -0' "$environment"
+expect_block Bash '/usr/bin/env' "$environment"
+expect_block Bash 'printenv' "$environment"
+expect_allow Bash 'printenv HOME'
+expect_allow Bash 'env FOO=1 make test'
+expect_allow Bash 'env -u GH_TOKEN make test'
+# shellcheck disable=SC2016 # The command is the text that the agent sends, so $PATH stays as written.
+expect_allow Bash 'echo "$PATH"'
+
+# Pushing without the pre-push hook, or to a URL
+expect_block Bash 'git push --no-verify origin main' "$no_verify"
+expect_block Bash 'git -C . push --no-verify' "$no_verify"
+expect_block Bash 'git push https://github.com/someone/else.git main' "$push_to_url"
+expect_block Bash 'git push git@github.com:someone/else.git HEAD' "$push_to_url"
+expect_block Bash 'git push -o ci.skip ssh://git@github.com/jtmpl/project.git HEAD' "$push_to_url"
+expect_allow Bash 'git push -u origin HEAD'
+expect_allow Bash 'git push'
+expect_allow Bash 'git push --force-with-lease origin HEAD:main'
+expect_allow Bash 'git commit --no-verify -m "Save the work"'
+
+# Merging without the checks, and changing the rules or the security settings
+expect_block Bash 'gh pr merge 5 --admin' "$admin_merge"
+expect_block Bash 'gh pr -R jtmpl/project merge --squash --admin' "$admin_merge"
+expect_block Bash 'gh api -X PUT repos/jtmpl/project/branches/main/protection --input rules.json' "$security"
+expect_block Bash 'gh api repos/jtmpl/project/hooks --input hook.json' "$security"
+expect_block Bash 'gh api --method DELETE "repos/{owner}/{repo}/rulesets/12"' "$security"
+expect_block Bash 'gh api -X DELETE "repos/{owner}/{repo}/vulnerability-alerts"' "$security"
+expect_block Bash 'gh api -X PATCH "repos/{owner}/{repo}" -f "security_and_analysis[secret_scanning][status]=disabled"' "$security"
+expect_block Bash 'gh repo edit --enable-secret-scanning-push-protection=false' "$security"
+expect_block Bash 'gh repo edit jtmpl/project --enable-advanced-security=false' "$security"
+expect_allow Bash 'gh pr merge 5 --squash'
+expect_allow Bash 'gh pr merge 5 --subject "Allow --admin" --squash'
+expect_allow Bash 'gh api repos/jtmpl/project/branches/main/protection'
+expect_allow Bash 'gh api "repos/{owner}/{repo}/rulesets?includes_parents=false"'
+expect_allow Bash 'gh api -X get "repos/{owner}/{repo}/rulesets"'
+expect_allow Bash 'gh repo edit --enable-secret-scanning-push-protection'
+
+# Making a repository public, before and after the list of allowed repositories names it
+publishing=(
+  'gh repo create jtmpl/listed --public'
+  "gh repo create --description 'A project' jtmpl/listed --public"
+  'gh repo edit jtmpl/listed --visibility public --accept-visibility-change-consequences'
+  'gh api -X PATCH repos/jtmpl/listed -F private=false'
+  'gh api -X PATCH repos/jtmpl/listed --field=visibility=public'
+)
+for command in "${publishing[@]}"; do
+  expect_block Bash "$command" "$(public jtmpl/listed)"
+done
+mkdir "$project/.loop"
+printf '%s\n' jtmpl/listed '  https://github.com/jtmpl/From-URL.git  ' '' >"$project/.loop/allowed-repositories"
+for command in "${publishing[@]}"; do
+  expect_allow Bash "$command"
+done
+expect_block Bash 'gh repo create jtmpl/new --public' "$(public jtmpl/new)"
+expect_block Bash 'gh repo new other --public --clone' "$(public other)"
+expect_block Bash 'gh repo create --public --source . --push' "$(public 'a new repository')"
+expect_block Bash 'gh repo edit --visibility=public' "$(public 'this repository')"
+expect_block Bash 'gh api -X PATCH repos/jtmpl/other -f private=false' "$(public jtmpl/other)"
+expect_block Bash 'gh api -X POST orgs/jtmpl/repos -f name=new -F private=false' "$(public 'a repository')"
+expect_allow Bash 'gh repo create JTMPL/Listed --public'
+expect_allow Bash 'gh repo create jtmpl/from-url --public'
+expect_allow Bash 'gh repo create jtmpl/secret --private'
+expect_allow Bash 'gh repo view --json visibility'
+
+# Posting to a repository other than this one, or one that the list names
+expect_block Bash 'gh pr comment 5 -R someone/else --body Hello' "$(other_repository someone/else)"
+expect_block Bash 'gh issue comment -Rsomeone/else 5 --body Hello' "$(other_repository someone/else)"
+expect_block Bash 'gh issue -R someone/else comment 5 --body Hello' "$(other_repository someone/else)"
+expect_block Bash 'gh workflow run ci.yml --repo=github.com/someone/else' "$(other_repository someone/else)"
+expect_block Bash 'gh issue comment https://github.com/someone/else/issues/5 --body Hello' \
+  "$(other_repository someone/else)"
+expect_block Bash 'gh api -X POST repos/someone/else/issues -f title=Bug -f body=Description' \
+  "$(other_repository someone/else)"
+expect_block Bash 'gh repo edit someone/else --description "A project"' "$(other_repository someone/else)"
+expect_block Bash 'gh repo archive someone/else --yes' "$(other_repository someone/else)"
+expect_allow Bash 'gh pr comment 5 -R jtmpl/project --body Hello'
+expect_allow Bash 'gh pr comment 5 -R JTMPL/Project --body Hello'
+expect_allow Bash 'gh pr comment 5 --body Hello'
+expect_allow Bash 'gh pr comment 5 -R jtmpl/listed --body Hello'
+expect_allow Bash 'gh issue comment 5 --body "The same bug: https://github.com/someone/else/issues/9"'
+expect_allow Bash 'gh api -X POST "repos/{owner}/{repo}/issues/5/comments" -f body=Thanks'
+expect_allow Bash 'gh pr list --repo someone/else'
+expect_allow Bash 'gh pr view 42 -R someone/else'
+expect_allow Bash 'gh api repos/someone/else/issues'
+# shellcheck disable=SC2016 # The command is the text that the agent sends, so $repo stays as written.
+expect_allow Bash 'gh pr comment 5 -R "$repo" --body Hello'
+
+# A worktree reads the list in the main checkout.
+worktree=$base/worktree
+git -C "$project" worktree add --quiet --detach "$worktree"
+cp -R "$project/scripts" "$worktree/scripts"
+hooks_folder=$worktree/scripts/hooks test_cwd=$worktree
+expect_allow Bash 'gh repo create jtmpl/listed --public'
+expect_block Bash 'gh pr comment 5 -R someone/else --body Hello' "$(other_repository someone/else)"
+hooks_folder=$project/scripts/hooks test_cwd=$project
+
+# Without an origin, the hook can't tell which repository is this one.
+git -C "$project" remote remove origin
+expect_allow Bash 'gh pr comment 5 -R someone/else --body Hello'
+
+finish_tests

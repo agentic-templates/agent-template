@@ -94,7 +94,7 @@ test_main_rules() {
   no_check="Blocked: main no longer requires the check job, so a pull request can merge without passing it. A maintainer with admin access restores it by running scripts/configure-github. $report_this"
   no_title="Blocked: main no longer requires the title job, so a pull request can merge without passing it. A maintainer with admin access restores it by running scripts/configure-github. $report_this"
   no_rules="Blocked: main no longer requires the check and title jobs, so a pull request can merge without passing them. A maintainer with admin access restores them by running scripts/configure-github. $report_this"
-  merges=('gh pr merge 7 --squash' 'gh pr merge --auto --squash' 'gh pr merge 7 --admin --merge' 'gh pr merge --body "x" 7')
+  merges=('gh pr merge 7 --squash' 'gh pr merge --auto --squash' 'gh pr merge 7 --merge' 'gh pr merge --body "x" 7')
   TEST_MAIN_RULES="title CodeQL"
   for command in "${merges[@]}"; do
     expect_block Bash "$command" "$no_check"
@@ -156,6 +156,7 @@ runs_on_the_other=(
   "cd '${other_clone%/*}' && cd ${other_clone##*/} && scripts/configure-github"
   "cd ~/test-repositories/other && scripts/configure-github"
   "cd ~ && cd test-repositories/other && scripts/configure-github"
+  "cd \"\$HOME/test-repositories/other\" && scripts/configure-github"
   "cd ../home/test-repositories/other && bash scripts/configure-github"
   "GH_REPO=jtmpl/other scripts/configure-github"
   "env GH_REPO=jtmpl/other scripts/configure-github"

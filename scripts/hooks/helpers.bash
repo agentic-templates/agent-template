@@ -135,17 +135,21 @@ leave_out_after() {
   fi
 }
 
-# Adds a line to blocks.log in the loop's folder of this hook's repository, which is the one whose rules blocked the
-# action, even when the agent works in another one. HOOK_BLOCK_LOG names another file, as in the hooks' tests.
-# The line holds the time, the check's file name and the words, with the values that could hold a secret left out, so
-# that its reader can tell a real block from a false alarm: log_block <word>...
+# Prints the loop's folder of this hook's repository, which is the one whose rules apply, even when the agent works in
+# another one.
+hook_loop_folder() {
+  local git_folders
+  git_folders=$(git -C "$hooks_folder" rev-parse --path-format=absolute --git-common-dir --show-toplevel) || return 1
+  loop_folder "${git_folders%%$'\n'*}" "${git_folders#*$'\n'}"
+}
+
+# Adds a line to blocks.log in the loop's folder of this hook's repository. HOOK_BLOCK_LOG names another file, as in
+# the hooks' tests. The line holds the time, the check's file name and the words, with the values that could hold a
+# secret left out, so that its reader can tell a real block from a false alarm: log_block <word>...
 log_block() {
-  local log=${HOOK_BLOCK_LOG:-} git_folders shared_git_folder checkout line words
+  local log=${HOOK_BLOCK_LOG:-} line words
   if [[ -z $log ]]; then
-    git_folders=$(git -C "$hooks_folder" rev-parse --path-format=absolute --git-common-dir --show-toplevel) || return 0
-    shared_git_folder=${git_folders%%$'\n'*}
-    checkout=${git_folders#*$'\n'}
-    log=$(loop_folder "$shared_git_folder" "$checkout")/blocks.log
+    log=$(hook_loop_folder)/blocks.log || return 0
     mkdir -p "${log%/*}" || return 0
   fi
   line="$(date -u +%Y-%m-%dT%H:%M:%SZ) ${0##*/}"
@@ -153,6 +157,94 @@ log_block() {
     line+=" $words"
   fi
   printf '%s\n' "$line" >>"$log"
+}
+
+# Sets expanded_path to the path that a word of a command names, with ~ and $HOME filled in as the shell fills them
+# in. Fails when another variable, a command's output or another person's home folder still decides the path, because
+# the hook can't tell that path before the command runs: expand_home <word>
+expand_home() {
+  local home=${HOME%/}
+  expanded_path=$1
+  # The command's words come as written, so these match ~ and $HOME before the shell expands them.
+  # shellcheck disable=SC2016,SC2088
+  case $1 in
+    "~" | '$HOME' | '${HOME}') expanded_path=$home ;;
+    "~/"*) expanded_path=$home/${1#"~/"} ;;
+    '$HOME/'*) expanded_path=$home/${1#'$HOME/'} ;;
+    '${HOME}/'*) expanded_path=$home/${1#'${HOME}/'} ;;
+    "~"*) return 1 ;;
+  esac
+  [[ $expanded_path != *[\$\`]* ]]
+}
+
+# Prints a path with symlinks and .. resolved in its folders, also when the file or its folders don't exist yet,
+# so that two ways to write one path, such as /tmp and /private/tmp on macOS, give the same result:
+# physical_path <path> <folder that a relative path starts from>
+physical_path() {
+  local path=$1 folder rest="" part
+  local -a parts=()
+  if [[ $path != /* ]]; then
+    path=$2/$path
+  fi
+  # The deepest folder that exists can hold symlinks. The parts after it can't, so they're resolved as text.
+  folder=$path
+  while [[ -n $folder && ! -d $folder ]]; do
+    rest=/${folder##*/}$rest
+    folder=${folder%/*}
+  done
+  folder=$(CDPATH='' cd -- "${folder:-/}" && pwd -P)
+  IFS=/ read -r -a parts <<<"$rest"
+  if ((${#parts[@]} > 0)); then
+    for part in "${parts[@]}"; do
+      case $part in
+        "" | .) ;;
+        ..)
+          folder=${folder%/*}
+          folder=${folder:-/}
+          ;;
+        *) folder=${folder%/}/$part ;;
+      esac
+    done
+  fi
+  echo "$folder"
+}
+
+# Sets the array tool_paths to the files that the agent's file-writing tool would create or change: the file_path of
+# Write and Edit, or each file that a patch of Codex's apply_patch adds, changes or moves to. A patch names each file
+# on a line of its own. The files that a patch deletes aren't on the list.
+read_tool_paths() {
+  local line
+  tool_paths=()
+  case $tool_name in
+    Write | Edit) tool_paths=("$file_path") ;;
+    apply_patch)
+      while IFS= read -r line; do
+        case $line in
+          "*** Add File: "*) tool_paths+=("${line#"*** Add File: "}") ;;
+          "*** Update File: "*) tool_paths+=("${line#"*** Update File: "}") ;;
+          "*** Move to: "*) tool_paths+=("${line#"*** Move to: "}") ;;
+        esac
+      done <<<"$patch"
+      ;;
+  esac
+}
+
+# Changes command_folder as a cd command in command_words would, or empties it when the hook can't tell the folder,
+# such as when the target doesn't exist yet, or a variable other than HOME decides it. command_folder is the folder
+# that the next simple command runs in. A check sets it to ${cwd:-$PWD} before the first one, because Cursor doesn't
+# send the folder the agent works in, and then the hook's own folder counts.
+follow_cd() {
+  if [[ ${command_words[0]} != cd ]]; then
+    return 0
+  fi
+  if ((${#command_words[@]} != 2)) || [[ ${command_words[1]} == -* ]] || ! expand_home "${command_words[1]}"; then
+    command_folder=""
+    return 0
+  fi
+  if [[ -n $command_folder ]]; then
+    command_folder=$(CDPATH='' cd -- "$command_folder" 2>/dev/null && CDPATH='' cd -- "$expanded_path" 2>/dev/null && pwd) ||
+      command_folder=""
+  fi
 }
 
 # Sets the array command_words to a simple command's words from the command's name on, without the sudo,
@@ -167,6 +259,51 @@ drop_command_prefixes() {
     command_words=("${command_words[@]:1}")
     command_word_may_expand=("${command_word_may_expand[@]:1}")
   done
+}
+
+# Reads the -C options at the start of a git command, and sets these variables:
+# - git_folder: the -C options that make git work in the same folder as the command, starting from the agent's folder
+# - git_subcommand: the index of the word after the options, such as push
+read_git_options() {
+  local i=1
+  git_folder=(-C "${cwd:-.}")
+  # git takes each -C relative to the folder before it, so a check that asks git about the command's folder passes
+  # on every -C.
+  while [[ ${command_words[i]:-} == -C ]]; do
+    git_folder+=(-C "${command_words[i + 1]:-}")
+    i=$((i + 2))
+  done
+  git_subcommand=$i
+}
+
+# The flags of git push that take a value, as git push -h lists them.
+push_flags_with_value=" --repo --recurse-submodules --receive-pack --exec -o --push-option "
+
+# Reads the words of a git push command after push, and sets these variables:
+# - flags: the flags, without their values
+# - push_remote: the first word that isn't a flag or a flag's value, which names a remote or a URL, or empty
+# - push_refspecs: the other words that aren't flags or flags' values
+# Run read_git_options first.
+read_push_arguments() {
+  local i word
+  local -a words=()
+  flags=() push_remote="" push_refspecs=()
+  for ((i = git_subcommand + 1; i < ${#command_words[@]}; i++)); do
+    word=${command_words[i]}
+    case $word in
+      -*)
+        flags+=("$word")
+        if [[ $word != *=* && $push_flags_with_value == *" $word "* ]]; then
+          i=$((i + 1))
+        fi
+        ;;
+      *) words+=("$word") ;;
+    esac
+  done
+  if ((${#words[@]} > 0)); then
+    push_remote=${words[0]}
+    push_refspecs=("${words[@]:1}")
+  fi
 }
 
 # Moves repository flags between a gh command group and its subcommand just after the subcommand,
@@ -243,7 +380,7 @@ read_arguments() {
   target+=(${repository[@]+"${repository[@]}"})
 }
 
-# Succeeds if read_arguments found one of these flags: has_flag <flag>...
+# Succeeds if read_arguments or read_push_arguments found one of these flags: has_flag <flag>...
 has_flag() {
   local flag wanted
   for flag in ${flags[@]+"${flags[@]}"}; do
@@ -255,6 +392,38 @@ has_flag() {
   done
   return 1
 }
+
+# Sets api_method to the method of the gh api request whose flags read_arguments read, such as POST, in capitals when
+# it's GET. Without a method, gh api sends POST if the command adds a field or an input file, and GET otherwise.
+read_api_method() {
+  local i flag sends_body=false
+  api_method=""
+  for ((i = 0; i < ${#flags[@]}; i++)); do
+    flag=${flags[i]}
+    case $flag in
+      -X | --method) api_method=${flag_values[i]} ;;
+      --method=*) api_method=${flag#--method=} ;;
+      -X*)
+        api_method=${flag#-X}
+        api_method=${api_method#=}
+        ;;
+      -f* | -F* | --raw-field | --raw-field=* | --field | --field=* | --input | --input=*) sends_body=true ;;
+    esac
+  done
+  if [[ -z $api_method ]]; then
+    api_method=GET
+    if $sends_body; then
+      api_method=POST
+    fi
+  fi
+  # gh sends -X get as GET.
+  if [[ $api_method == [Gg][Ee][Tt] ]]; then
+    api_method=GET
+  fi
+}
+
+# The flags of gh pr merge that take a value, as gh pr merge --help lists them.
+merge_flags_with_value=" -A --author-email -b --body -F --body-file --match-head-commit -t --subject -R --repo "
 
 # The flags of gh pr create that take a value, as gh pr create --help lists them.
 pr_create_flags_with_value=" -a --assignee --attach -B --base -b --body -F --body-file -H --head -l --label -m --milestone -p --project --recover -r --reviewer -T --template -t --title -R --repo "

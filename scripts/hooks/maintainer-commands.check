@@ -12,9 +12,8 @@
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 
-# The flags that take a value, as gh pr checkout --help and gh pr merge --help list them.
+# The flags of gh pr checkout that take a value, as gh pr checkout --help lists them.
 checkout_flags_with_value=" -b --branch --worktree -R --repo "
-merge_flags_with_value=" -A --author-email -b --body -F --body-file --match-head-commit -t --subject -R --repo "
 
 report="Go on with the other work, and list the command in your report for the maintainer, who runs it."
 alert_change="Blocked: only a maintainer dismisses or changes a code scanning or Dependabot alert. Fix the code that the alert points to. If you think the alert is wrong, tell the maintainer which alert and why."
@@ -46,29 +45,6 @@ script_repository() {
     answer=$(cd -- "$1" 2>/dev/null && gh repo view --json nameWithOwner 2>/dev/null) || return 1
   fi
   jq -r .nameWithOwner <<<"$answer"
-}
-
-# Changes script_folder as a cd command would, or empties it when the hook can't tell the folder, such as when
-# the target doesn't exist yet or has a $ or a backtick.
-follow_cd() {
-  local target
-  if [[ ${command_words[0]} != cd ]]; then
-    return 0
-  fi
-  target=${command_words[1]:-}
-  if ((${#command_words[@]} != 2)) || [[ $target == -* || $target == *[\$\`]* ]]; then
-    script_folder=""
-    return 0
-  fi
-  # The command's words come as written, so ~ is matched before the shell expands it.
-  # shellcheck disable=SC2088
-  case $target in
-    "~") target=$HOME ;;
-    "~/"*) target=$HOME/${target#"~/"} ;;
-  esac
-  if [[ -n $script_folder ]]; then
-    script_folder=$(CDPATH='' cd -- "$script_folder" 2>/dev/null && CDPATH='' cd -- "$target" 2>/dev/null && pwd) || script_folder=""
-  fi
 }
 
 # Succeeds if a pull request comes from a fork: is_from_fork [<pull request>] [--repo <repository>]
@@ -120,13 +96,13 @@ check_configure_github() {
       gh_repo=${word#GH_REPO=}
     fi
   done
-  if [[ -z $script_folder || $gh_repo == *[\$\`]* ]]; then
+  if [[ -z $command_folder || $gh_repo == *[\$\`]* ]]; then
     block "Blocked: can't tell which repository scripts/configure-github would change. Clone the repository first. Then run cd <folder> && scripts/configure-github as a command of its own, with the folder written out."
   fi
   if $sets_gh_repo; then
-    repository=$(script_repository "$script_folder" "$gh_repo") || return 0
+    repository=$(script_repository "$command_folder" "$gh_repo") || return 0
   else
-    repository=$(script_repository "$script_folder") || return 0
+    repository=$(script_repository "$command_folder") || return 0
   fi
   if settings_applied_before "$repository"; then
     block "Blocked: this repository's settings were applied before, so a maintainer with admin access runs scripts/configure-github again. $report"
@@ -216,34 +192,14 @@ check_git_fetch() {
 }
 
 check_gh_api() {
-  local method="" sends_body=false i flag
   if [[ ${command_words[0]##*/} != gh || ${command_words[1]:-} != api ]]; then
     return 0
   fi
 
   # gh api's argument is the endpoint.
   read_arguments 2 "$api_flags_with_value"
-  for ((i = 0; i < ${#flags[@]}; i++)); do
-    flag=${flags[i]}
-    case $flag in
-      -X | --method) method=${flag_values[i]} ;;
-      --method=*) method=${flag#--method=} ;;
-      -X*)
-        method=${flag#-X}
-        method=${method#=}
-        ;;
-      -f* | -F* | --raw-field | --raw-field=* | --field | --field=* | --input | --input=*) sends_body=true ;;
-    esac
-  done
-
-  # Without a method, gh api sends POST if the command adds a field or an input file, and GET otherwise.
-  if [[ -z $method ]]; then
-    method=GET
-    if $sends_body; then
-      method=POST
-    fi
-  fi
-  if [[ $argument =~ $single_alert && $method != [Gg][Ee][Tt] ]]; then
+  read_api_method
+  if [[ $argument =~ $single_alert && $api_method != GET ]]; then
     block "$alert_change"
   fi
   # The query can come from a here-document or from another command through a pipe,
@@ -270,9 +226,8 @@ check_simple_command() {
 }
 
 read_input
-# The folder that scripts/configure-github would run in, which follow_cd changes, or empty when the hook can't tell.
-# Cursor doesn't send the folder the agent works in, so for Cursor the hook's own folder counts.
-script_folder=${cwd:-$PWD}
+# The folder that scripts/configure-github would run in, as follow_cd in helpers.bash describes.
+command_folder=${cwd:-$PWD}
 if [[ $tool_name == Bash ]]; then
   for_each_simple_command check_simple_command "$shell_command"
 fi
