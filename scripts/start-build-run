@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# Does step 1 of "Build the ready issues" in docs/building.md:
-# - It records the time it starts in the git folder of this checkout, in build-run-start, as scripts/check records
-#   its passes, so that scripts/build-run-report can list what merged since. The time is in UTC, as in
-#   2026-05-04T09:30:00Z.
+# Frees the issues of earlier builders when the orchestrator starts the loop, as step 4 of "Start the loop or
+# take it over" in docs/loop.md describes:
 # - It removes the current account from each ready issue assigned to it, unless scripts/pull-request-state prints
 #   merging or stopped for the issue. It prints each issue it leaves assigned, with that state.
 # - It turns on auto-merge for each open pull request of Dependabot's into main that isn't DIRTY, has no failed check,
@@ -34,13 +32,6 @@ stop() {
   echo "error: $1" >&2
   exit 1
 }
-
-if ! record=$(git rev-parse --git-path build-run-start 2>&1); then
-  stop "can't find the git folder to record the time the build run starts in, because git failed: $record"
-fi
-if ! date -u +%Y-%m-%dT%H:%M:%SZ >"$record"; then
-  stop "can't record the time the build run starts in $record. Fix the error above, and run scripts/start-build-run again."
-fi
 
 if ! assigned_issues=$(gh issue list --label ready --assignee @me --limit 200 --json number --jq '.[].number' 2>&1); then
   stop "can't list the ready issues assigned to you, because gh failed: $assigned_issues"

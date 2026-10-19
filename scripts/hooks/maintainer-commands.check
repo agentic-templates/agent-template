@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Blocks the commands that wait for a maintainer:
-# - running scripts/configure-github again on a repository whose settings were applied, because a build run
+# - running scripts/configure-github again on a repository whose settings were applied, because the loop
 #   can merge a change to the script that nobody read. The repository is the one that the script would change.
 # - checking out, fetching or merging a pull request from a fork, because a checkout brings in the pull
 #   request's hook scripts and AGENTS.md, and only a maintainer decides to put a fork's code on main

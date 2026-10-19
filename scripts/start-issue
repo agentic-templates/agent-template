@@ -78,11 +78,11 @@ fi
 if git rev-parse --verify --quiet "refs/heads/$branch" >/dev/null; then
   holder=$(git for-each-ref --format='%(worktreepath)' "refs/heads/$branch")
   if [[ -n $holder && $(cd "$holder" 2>/dev/null && pwd -P) != "$(pwd -P)" ]]; then
-    stop "the worktree at $holder has the branch $branch of issue #$issue checked out, and git lets only one worktree check out a branch. Work on the issue in that worktree, or ask the maintainer whether another agent still works there."
+    stop "the worktree at $holder has the branch $branch of issue #$issue checked out, and git lets only one worktree check out a branch. Work on the issue in that worktree, or ask the orchestrator whether another agent still works there."
   fi
   ahead=$(git rev-list --count "refs/remotes/origin/$branch..refs/heads/$branch")
   if ((ahead > 0)); then
-    stop "the local copy of the branch $branch of issue #$issue has commits that origin doesn't have. If the issue needs them, push them to origin. Otherwise, ask the maintainer what to do with them. Then run scripts/start-issue $issue again."
+    stop "the local copy of the branch $branch of issue #$issue has commits that origin doesn't have. If the issue needs them, push them to origin. Otherwise, ask the orchestrator what to do with them. Then run scripts/start-issue $issue again."
   fi
   if ! output=$(git switch --quiet "$branch" 2>&1 && git merge --ff-only --quiet "refs/remotes/origin/$branch" 2>&1); then
     stop "can't check out the branch $branch of issue #$issue, because git failed: $output"

@@ -67,10 +67,10 @@ bug|d73a4a|Something is broken, such as a crash, a wrong result or docs that don
 feature|a2eeef|A change to what users can do or read, other than a fix
 maintenance|c5def5|Work that leaves what users can do and read unchanged, such as speed-ups, refactoring, tests or CI
 research|d4c5f9|Something to find out before building, such as whether a library works. Ends in a comment
-needs-triage|fbca04|No maintainer has accepted or rejected this yet
+needs-triage|fbca04|Someone outside the project opened it, and nobody has accepted or rejected it yet
 needs-breakdown|f9d0c4|Accepted, but too big for one pull request. Split it before building
 needs-decision|d876e3|Waiting for a maintainer to answer a question or make a decision
-ready|0e8a16|A maintainer wants it built, and it meets the definition of ready. Build runs take only these
+ready|0e8a16|It meets the definition of ready, so the loop builds it
 dependencies|0366d6|Dependabot's version updates
 retrospective|5319e7|A retrospective's pull request. scripts/loop/meter counts the merges since the newest one
 LABELS

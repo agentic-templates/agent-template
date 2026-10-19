@@ -6,8 +6,8 @@
 # runs in to origin/main instead of removing it. It prints each folder it left and why, and fails when it can't free
 # the folder it runs in. scripts/start-build-run runs it.
 # Given an issue, as in scripts/clear-worktrees 12, it frees only that issue's branches, whether or not the issue has
-# the ready label, and it frees a locked worktree too. It fails when it leaves any folder that holds them. "Build the
-# ready issues" runs it this way for the issue of a helper that failed, and so has stopped.
+# the ready label, and it frees a locked worktree too. It fails when it leaves any folder that holds them. The
+# orchestrator runs it this way for the issue of a builder that stopped, as "Take in" in docs/loop.md describes.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=scripts/secret-file-names
@@ -127,7 +127,7 @@ unfinished_operation() {
 
 # Sets reason to why a folder must stay as it is, and fails, or succeeds if nothing keeps it. It doesn't look for a
 # merge or a rebase, because the script aborts those in the folder it runs in once nothing else keeps the folder.
-# Given an issue, a lock doesn't keep a folder, because the helper that locked it has stopped: check_folder <index>
+# Given an issue, a lock doesn't keep a folder, because the builder that locked it has stopped: check_folder <index>
 check_folder() {
   local path=${worktree_paths[$1]} lock=${worktree_locks[$1]} git_dir untracked file secret_files=""
   if [[ -z $given_issue && $lock == locked ]]; then

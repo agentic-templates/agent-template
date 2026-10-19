@@ -2,7 +2,7 @@
 
 ## Labels
 
-- `needs-triage`: the issue forms add it to the issues that others open. Don't add it to an issue that a maintainer asked for, or that you create at triage or while planning.
+- `needs-triage`: the issue forms add it to the issues that others open. Don't add it to an issue that you open.
 - `needs-decision`: only for a question that the maintainer must answer, as "Decide or ask" in AGENTS.md describes. Write the question in the issue, with the option you recommend. When the maintainer decides, write the decision into the issue's body, and remove the label.
 
 ## Triage new ideas
@@ -49,18 +49,18 @@ If an issue came from an account that isn't a maintainer's, and its verdict is *
 
 ## Write a research issue
 
-- A research issue's "Done when" asks for a comment with the answer, a recommendation and the evidence that the maintainer needs to decide.
+- A research issue's "Done when" asks for a comment with the answer, a recommendation and the evidence behind it.
 - Each issue that depends on the answer is blocked by the research issue.
 
 ## Definition of ready
 
-Every issue that gets the `ready` label, including research issues and parents, must come from a maintainer's account. A maintainer approves each one. The one exception is a bug that an agent finds and reproduces while it works on another issue: that agent marks it ready itself, as step 4 of "Make a change" in AGENTS.md describes.
+Only an issue that a maintainer's account opened can get the `ready` label, including research issues and parents. Besides the orchestrator, an agent adds the label only to a bug that it finds and reproduces while it works on another issue, as step 4 of "Make a change" in AGENTS.md describes.
 
 An issue can get `ready` when all of these are true:
 
 - It asks for one change that fits in one pull request.
 - "Why" says who needs the change and what for.
-- Someone could check each "Done when" item by running or looking at something. Where speed or accuracy matters, the item gives a number that the maintainer approved.
+- Someone could check each "Done when" item by running or looking at something. Where speed or accuracy matters, the item gives a number.
 - Nothing is left that only the maintainer can decide.
 - "What should change" says what's out of scope, if the agent that builds the issue might otherwise do more than the issue asks for.
 - It's blocked by every issue whose change it needs first.
@@ -75,7 +75,6 @@ Plan all the issues that a goal needs before anyone builds them.
 1. Agree on the goal with the maintainer: what a user can do afterwards that they can't do now.
 2. Triage anything new, including open issues that need triage.
 3. Choose the backlog issues that the goal needs, and leave out the rest. Add the issues the goal still lacks, including research issues for what someone has to find out, and break down any big issue you chose.
-4. Link each issue to the issues whose change it needs first, with `gh issue edit <issue> --add-blocked-by <other issue>`. Link only real dependencies. Every blocker must be part of this plan, have the `ready` label already or be closed. A build run can build several issues at once, so only a link makes sure that one change comes before another.
+4. Link each issue to the issues whose change it needs first, with `gh issue edit <issue> --add-blocked-by <other issue>`. Link only real dependencies. Every blocker must be part of this plan, have the `ready` label already or be closed. The loop builds several issues at once, so only a link makes sure that one change comes before another.
 5. Make every issue meet the definition of ready. Decide what you can, as "Decide or ask" in AGENTS.md describes.
-6. Show the maintainer the issues as a list, one line each, with any question that only they can answer.
-7. Add the `ready` label to each issue the maintainer approved, with `gh issue edit <issue> --add-label ready`.
+6. Add the `ready` label to each issue that meets the definition of ready, with `gh issue edit <issue> --add-label ready`.

@@ -250,7 +250,7 @@ git -C "$case_dir/main" commit --quiet -am "feat: total February"
 committed=$(head_commit)
 git -C "$case_dir/main" switch --quiet main
 run_start_issue feature 12-fix-totals fail
-expect_result 1 "error: the local copy of the branch 12-fix-totals of issue #12 has commits that origin doesn't have. If the issue needs them, push them to origin. Otherwise, ask the maintainer what to do with them. Then run scripts/start-issue 12 again."
+expect_result 1 "error: the local copy of the branch 12-fix-totals of issue #12 has commits that origin doesn't have. If the issue needs them, push them to origin. Otherwise, ask the orchestrator what to do with them. Then run scripts/start-issue 12 again."
 expect_equal "the checked-out branch" "$(checked_out)" main
 expect_equal "the branch" "$(local_commit 12-fix-totals)" "$committed"
 
@@ -260,7 +260,7 @@ push_to_github 12-fix-totals 2026-05-04T09:30:00Z
 fetch_branch 12-fix-totals
 git -C "$case_dir/main" worktree add --quiet "$case_dir/agent-1" 12-fix-totals
 run_start_issue feature 12-fix-totals fail
-expect_result 1 "error: the worktree at $case_dir/agent-1 has the branch 12-fix-totals of issue #12 checked out, and git lets only one worktree check out a branch. Work on the issue in that worktree, or ask the maintainer whether another agent still works there."
+expect_result 1 "error: the worktree at $case_dir/agent-1 has the branch 12-fix-totals of issue #12 checked out, and git lets only one worktree check out a branch. Work on the issue in that worktree, or ask the orchestrator whether another agent still works there."
 expect_equal "the checked-out branch" "$(checked_out)" main
 
 begin_case "When another worktree is in the middle of a rebase of the branch"

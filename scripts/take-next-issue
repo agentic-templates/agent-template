@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Takes the next ready issue that a build run can start: scripts/take-next-issue [<issue to skip>...]
+# Takes the next ready issue that a builder can start: scripts/take-next-issue [<issue to skip>...]
 # It considers each ready issue that has exactly one type label, no status label, no assignee and no open sub-issues,
-# whose blocking issues are all closed, and for which scripts/pull-request-state prints none or left behind. It skips
-# the issues it's given. It assigns the lowest-numbered of them to the current account, and then checks that the issue
-# still has ready, because a maintainer may have asked another agent to work on it since the script listed the ready
-# issues. If it doesn't, the script removes the assignment and takes the next one.
+# whose blocking issues are all closed, for which scripts/pull-request-state prints none or left behind, and none of
+# whose branches a worktree has checked out. It skips the issues it's given. It assigns the lowest-numbered of them to the current account, and then checks that the issue
+# still has ready, because someone may have removed the label since the script listed the ready issues. If it
+# doesn't, the script removes the assignment and takes the next one.
 # It prints one line: the issue's number and the first of these kinds that fits it, or none when no issue fits.
 # - research: it has the research label.
 # - parent: it has sub-issues, which are all closed.
 # - left behind <pull request>: scripts/pull-request-state prints left behind for it.
 # - other: none of the above.
 # It stops with an error when gh fails. It asks gh about the repository of this checkout, or the one in GH_REPO.
-# Step 3 of "Build the ready issues" in docs/building.md runs it.
+# The orchestrator runs it, as "Launch" in docs/loop.md describes.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=scripts/ready-issues
@@ -29,7 +29,7 @@ for skipped_issue in "$@"; do
   fi
 done
 
-# Prints, lowest first, the numbers of the issues that a build run can start, judged by everything but their pull
+# Prints, lowest first, the numbers of the issues that a builder can start, judged by everything but their pull
 # requests, leaving out the issues to skip: issues_to_consider [<issue to skip>...]
 issues_to_consider() {
   local issue
@@ -38,6 +38,22 @@ issues_to_consider() {
       printf '%s\n' "$issue"
     fi
   done <<<"$(ready_issue_numbers)"
+}
+
+# Succeeds if a worktree has a branch of the issue checked out. The builder's scripts/start-issue couldn't check
+# that branch out, because git lets only one worktree check out a branch: is_held_by_worktree <issue>
+is_held_by_worktree() {
+  local linked_branches branch url
+  if ! linked_branches=$(gh issue develop --list "$1" 2>&1); then
+    stop "can't list the branches of issue #$1, because gh failed: $linked_branches"
+  fi
+  # gh prints each branch, a tab and the branch's URL.
+  while IFS=$'\t' read -r branch url; do
+    if [[ -n $branch && -n $url && -n $(git for-each-ref --format='%(worktreepath)' "refs/heads/$branch") ]]; then
+      return 0
+    fi
+  done <<<"$linked_branches"
+  return 1
 }
 
 # Prints an issue's kind: kind_of <issue> <what scripts/pull-request-state prints for it>
@@ -66,7 +82,7 @@ for issue in $(issues_to_consider "$@"); do
   if ! pull_request_state=$(scripts/pull-request-state "$issue"); then
     exit 1
   fi
-  if ! can_start_with_pull_request_state "$pull_request_state"; then
+  if ! can_start_with_pull_request_state "$pull_request_state" || is_held_by_worktree "$issue"; then
     continue
   fi
   if ! answer=$(gh issue edit "$issue" --add-assignee @me 2>&1); then
