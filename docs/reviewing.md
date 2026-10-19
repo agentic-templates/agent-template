@@ -4,7 +4,7 @@
 
 - Compare the change with its issue's "Done when" list and the definition of done in AGENTS.md.
 - Report only errors: wrong behavior, a missing test, a security problem, or text or code that breaks AGENTS.md or a guide in `docs/`. Don't ask for changes that a formatter would make, or for work outside the issue.
-- Give each error a case that shows it, such as an input and the wrong result it gives, or a sentence and the rule it breaks. Then say what to change and why. For a security problem, name the code it's in instead of a case, because such an input spells out an attack. Don't write a test for it either, because whoever fixes it does.
+- Give each error a case that shows it, such as an input and the wrong result it gives, or a sentence and the rule it breaks. Then say what to change and why. For a security problem, name the code it's in instead of giving a case, because an agent that receives a report with the steps of an attack may refuse to act on it.
 - If an error shows only with an input that someone would have to craft on purpose, and nobody outside the project can give that input, report the error as a note after the other errors, because it needn't block the merge.
 - Report to whoever asked for the review. Don't change files or labels, make commits, or post comments or reviews. If you find no errors, say so in one line.
 
