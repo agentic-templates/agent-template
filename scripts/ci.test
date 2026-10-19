@@ -7,14 +7,15 @@ cd "$(dirname "$0")/.."
 base=$(mktemp -d)
 trap 'rm -rf "$base"' EXIT
 
-# Prints the command of a step in a job of .github/workflows/ci.yml: step_command <job> <step name>
-step_command() {
-  awk -v job="$1" -v step="$2" '
+# Prints a key's value in a step of a job, such as the step's command: step_value <workflow> <job> <step name> <key>
+step_value() {
+  awk -v job="$2" -v step="$3" -v key="        $4: " '
     $0 == "  " job ":" { in_job = 1; next }
     in_job && /^  [[:alnum:]_-]+:/ { exit }
     in_job && $0 == "      - name: " step { in_step = 1; next }
-    in_step && /^        run: / { sub(/^        run: /, ""); print; exit }
-  ' .github/workflows/ci.yml
+    in_step && /^      - / { exit }
+    in_step && index($0, key) == 1 { print substr($0, length(key) + 1); exit }
+  ' "$1"
 }
 
 # The jobs that run the tests of the scripts and hooks, each with its own bash or tools.
@@ -22,13 +23,13 @@ test_jobs=(script-tests bash-3-2 macos)
 test_step="Run the tests of the scripts and hooks"
 
 # Run the workflow's command so removing the runner from CI also fails these cases.
-step=$(step_command script-tests "$test_step")
+step=$(step_value .github/workflows/ci.yml script-tests "$test_step" run)
 if [[ -z $step ]]; then
   echo "error: the script-tests job has no step \"$test_step\". Add the step to .github/workflows/ci.yml." >&2
   exit 1
 fi
 for job in "${test_jobs[@]}"; do
-  if [[ $(step_command "$job" "$test_step") != "$step" ]]; then
+  if [[ $(step_value .github/workflows/ci.yml "$job" "$test_step" run) != "$step" ]]; then
     echo "error: the step \"$test_step\" of the $job job in .github/workflows/ci.yml must run $step, as the step of the script-tests job does. Add the step, or change its command to $step." >&2
     exit 1
   fi
@@ -89,13 +90,14 @@ check_matrix() {
   fi
 }
 
-# Checks the result of check_matrix: expect_matrix <description> <workflow> <job> <exit code> <errors>
-expect_matrix() {
-  local description=$1 matrix_status=0 errors
+# Checks the result of a check of a job, such as check_matrix:
+# expect_check <check> <description> <workflow> <job> <exit code> <errors>
+expect_check() {
+  local check=$1 description=$2 check_status=0 errors
   case_count=$((case_count + 1))
-  errors=$(check_matrix "$2" "$3" 2>&1) || matrix_status=$?
-  if [[ $matrix_status != "$4" || $errors != "$5" ]]; then
-    echo "error: the check of the matrix $description. Expected status $4 and errors \"$5\", got status $matrix_status and errors \"$errors\"." >&2
+  errors=$("$check" "$3" "$4" 2>&1) || check_status=$?
+  if [[ $check_status != "$5" || $errors != "$6" ]]; then
+    echo "error: $check $description. Expected status $5 and errors \"$6\", got status $check_status and errors \"$errors\"." >&2
     failed_cases=$((failed_cases + 1))
   fi
 }
@@ -112,19 +114,64 @@ write_matrix_workflow() {
 }
 
 write_matrix_workflow "$base/complete.yml" "1/3, 2/3, 3/3"
-expect_matrix "passes for every part from 1/3 to 3/3" "$base/complete.yml" tests 0 ""
+expect_check check_matrix "passes for every part from 1/3 to 3/3" "$base/complete.yml" tests 0 ""
 write_matrix_workflow "$base/missing.yml" "1/4, 2/4, 4/4"
-expect_matrix "fails when a part is missing" "$base/missing.yml" tests 1 \
+expect_check check_matrix "fails when a part is missing" "$base/missing.yml" tests 1 \
   "error: the matrix of the tests job in $base/missing.yml lists the parts 1/4, 2/4, 4/4, so some test files don't run. List the parts 1/4, 2/4, 3/4, 4/4."
 write_matrix_workflow "$base/extra.yml" "1/2, 2/2, 3/2"
-expect_matrix "fails when a part is above the count" "$base/extra.yml" tests 1 \
+expect_check check_matrix "fails when a part is above the count" "$base/extra.yml" tests 1 \
   "error: the matrix of the tests job in $base/extra.yml lists the parts 1/2, 2/2, 3/2, so some test files don't run. List the parts 1/2, 2/2."
 write_matrix_workflow "$base/none.yml"
-expect_matrix "fails when the job has no matrix" "$base/none.yml" tests 1 \
+expect_check check_matrix "fails when the job has no matrix" "$base/none.yml" tests 1 \
   "error: the tests job in $base/none.yml has no matrix of parts. Give it one, such as \"part: [1/2, 2/2]\", because its test step runs scripts/test-scripts --part."
 for job in "${test_jobs[@]}"; do
-  expect_matrix "of the $job job in .github/workflows/ci.yml lists every part" .github/workflows/ci.yml "$job" 0 ""
+  expect_check check_matrix "passes for the $job job in .github/workflows/ci.yml" .github/workflows/ci.yml "$job" 0 ""
 done
+
+# Cases for the user that runs the tests in the bash-3-2 job. Its container runs as root, and root can write to a folder
+# that a test made read-only, so a test of how a script handles such a folder would fail only in that job.
+
+# Prints an error and fails unless the test step of a job runs GitHub's bash shell with su, as a user other than root:
+# check_test_user <workflow> <job>
+check_test_user() {
+  local shell pattern='^su ([a-z_][a-z0-9_-]*) -c "bash --noprofile --norc -eo pipefail [{]0[}]"$'
+  shell=$(step_value "$1" "$2" "$test_step" shell)
+  if [[ $shell =~ $pattern && ${BASH_REMATCH[1]} != root ]]; then
+    return 0
+  fi
+  echo "error: the step \"$test_step\" of the $2 job in $1 must run the tests as a user other than root, because root can write to a folder that a test made read-only. Its shell is \"$shell\". Make it su <user> -c \"bash --noprofile --norc -eo pipefail {0}\", with a user that an earlier step adds." >&2
+  return 1
+}
+
+# Writes a workflow whose job tests has the test step, with the shell given, and a step after it with a shell of its
+# own: write_user_workflow <file> [<shell>]
+write_user_workflow() {
+  {
+    printf '%s\n' "jobs:" "  tests:" "    steps:" "      - name: $test_step"
+    if [[ -n ${2:-} ]]; then
+      printf '%s\n' "        shell: $2"
+    fi
+    printf '%s\n' "        run: scripts/test-scripts" "      - name: Later step" "        shell: bash" "        run: true"
+  } >"$1"
+}
+
+# Prints the error of check_test_user for the tests job: user_error <workflow> <shell>
+user_error() {
+  echo "error: the step \"$test_step\" of the tests job in $1 must run the tests as a user other than root, because root can write to a folder that a test made read-only. Its shell is \"$2\". Make it su <user> -c \"bash --noprofile --norc -eo pipefail {0}\", with a user that an earlier step adds."
+}
+
+tester_shell='su tester -c "bash --noprofile --norc -eo pipefail {0}"'
+write_user_workflow "$base/tester.yml" "$tester_shell"
+expect_check check_test_user "passes for su as a user other than root" "$base/tester.yml" tests 0 ""
+write_user_workflow "$base/no-shell.yml"
+expect_check check_test_user "fails when the test step has no shell" "$base/no-shell.yml" tests 1 \
+  "$(user_error "$base/no-shell.yml" "")"
+root_shell='su root -c "bash --noprofile --norc -eo pipefail {0}"'
+write_user_workflow "$base/root.yml" "$root_shell"
+expect_check check_test_user "fails for su as root" "$base/root.yml" tests 1 "$(user_error "$base/root.yml" "$root_shell")"
+write_user_workflow "$base/bash.yml" bash
+expect_check check_test_user "fails for a shell without su" "$base/bash.yml" tests 1 "$(user_error "$base/bash.yml" bash)"
+expect_check check_test_user "passes for the bash-3-2 job in .github/workflows/ci.yml" .github/workflows/ci.yml bash-3-2 0 ""
 
 # Makes a folder for a case, with a copy of the runner and of the file it reads, an empty scripts/hooks/, a stand-in
 # for scripts/test-check that does nothing, a stand-in for jq and an empty temporary folder, and sets case_dir to it.

@@ -132,11 +132,6 @@ jobs:
     # The Docker library's image of the tag bash:3.2.
     container:
       image: bash:3.2@sha256:0fd7cb8499c63a3c9345e7088a9cd83bb69f6e895e83833859aff838a0312091
-    # A container job's steps run with sh unless the job names a shell, and scripts/ci.test runs the test step with
-    # bash.
-    defaults:
-      run:
-        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -155,12 +150,18 @@ jobs:
         with:
           persist-credentials: false
 
-      # The runner's user owns the checkout, but the job runs as the container's root, and git refuses a repository
-      # that another user owns.
-      - name: Give the checkout to root
-        run: chown -R root:root .
+      # The runner's user owns the checkout, and git refuses a repository that another user owns.
+      - name: Add the user that runs the tests, and give it the checkout
+        run: |
+          adduser -D tester
+          chown -R tester:tester .
 
+      # The container runs as root, and root can write to a folder that a test made read-only, so the tests run as
+      # another user, as in the other jobs.
+      # The runner splits the shell's line at spaces outside double quotes, and single quotes don't group words.
+      # BusyBox's su keeps the environment, other than HOME, SHELL, USER and LOGNAME, so PART reaches the tests.
       - name: Run the tests of the scripts and hooks
+        shell: su tester -c "bash --noprofile --norc -eo pipefail {0}"
         run: scripts/test-scripts --part "$PART"
         env:
           PART: ${{ matrix.part }}
