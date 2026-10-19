@@ -21,8 +21,9 @@ git -C "$main_checkout" worktree add --quiet --detach "$worktree"
 cp -R "${hooks_folder%/*}" "$main_checkout/scripts"
 cp -R "${hooks_folder%/*}" "$worktree/scripts"
 log=$main_checkout/.loop/blocks.log
-# The hook must block a long command within this many seconds, well within the time that the tools give a hook.
-max_seconds=10
+# The hook must block a long command within this many seconds of CPU time, well within the time that the tools give
+# a hook.
+max_cpu_seconds=10
 
 env_message="Blocked: .env holds secrets, and AGENTS.md says never to read them. .env.example lists the variables."
 token_message="Blocked: this command prints the token that gh uses, and AGENTS.md says never to read or print secrets. gh commands use the token without it."
@@ -136,18 +137,24 @@ expect_line_for 'git credential fill --with-token --verbose' 'git credential fil
 # A command that spans lines takes one line.
 expect_line_for $'git credential fill "first line\nsecond line"' 'git credential fill first line second line'
 
-# A long command with line breaks takes little time to log. bash 3.2 took minutes to replace the line breaks in a word
-# of 60 KB.
+# The hook blocks a long command with line breaks in little time. bash 3.2 took minutes to replace the line breaks in
+# a word of 60 KB. The case measures the CPU time of the hook, because a busy machine, as in CI, stretches the time on
+# the clock many times over.
 body="" logged_body=""
 for ((line = 1; line <= 2500; line++)); do
   body+="Line $line of a long body"$'\n'
   logged_body+="Line $line of a long body "
 done
-SECONDS=0
-expect_line_for "git credential fill \"$body\"" "git credential fill $logged_body"
+TIMEFORMAT='%U %S'
+{ time run_copy "$main_checkout" Bash "git credential fill \"$body\""; } 2>"$base/cpu-time"
+expect_result "For git credential fill with a long body, the hook" 2 "$token_message"
+expect_last_line "After git credential fill with a long body" "forbidden-commands.check git credential fill $logged_body"
+read -r user_seconds system_seconds <"$base/cpu-time"
+# The times have three decimals, so without the dot they're in milliseconds.
+cpu_milliseconds=$((10#${user_seconds/./} + 10#${system_seconds/./}))
 case_count=$((case_count + 1))
-if ((SECONDS > max_seconds)); then
-  echo "error: the hook took $SECONDS seconds to block a command of ${#body} characters, and the limit is $max_seconds." >&2
+if ((cpu_milliseconds > max_cpu_seconds * 1000)); then
+  echo "error: the hook took $cpu_milliseconds ms of CPU time to block a command of ${#body} characters, and the limit is $max_cpu_seconds seconds." >&2
   failed_cases=$((failed_cases + 1))
 fi
 
