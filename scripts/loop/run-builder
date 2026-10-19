@@ -5,10 +5,12 @@
 
 <issue> <kind> is the line that scripts/take-next-issue printed, such as 12 other. The builder runs on the account
 called NAME in .loop/accounts.json, which scripts/loop/meter --help describes, or on the tool's first account there.
-It works in .claude/worktrees/run-<issue> in the main checkout, on the issue's branch. When the run ends, the script
-runs scripts/clear-worktrees <issue>, which commits the changes that the builder left on the branch, pushes the
-branch unless it has an open pull request, and removes the worktree. The run fails when that script leaves the
-worktree. The script doesn't start when that worktree exists already, or when the issue has needs-triage.
+It works in .claude/worktrees/run-<issue> in the main checkout, on the issue's branch. When the run ends,
+scripts/clear-worktrees <issue> commits the changes that the builder left on the branch and removes the worktree, and
+the script pushes the branch. If the branch has a pull request, the script turns off its auto-merge and makes it a
+draft before the push. If scripts/clear-worktrees or a check refuses the changes, the script keeps them in the
+worktree or on the local branch, and the run fails and says where they are. The script doesn't start when that
+worktree exists already, or when the issue has needs-triage.
 
 A Claude builder builds the issue as "Build one issue" in docs/building.md describes.
 
@@ -169,9 +171,10 @@ def build(
 ) -> str:
     """Runs the builder in its worktree, saves the changes that it left on the issue's branch, and removes the
     worktree. Returns how the run ended."""
+    branch = issue_branch(issue["number"], repository, folders)
     failure: Stop | None = None
     try:
-        branch = make_worktree(issue["number"], repository, folders)
+        add_worktree(branch, folders)
         brief = brief_for(issue, kind, options.tool)
         (folders.run / "brief.md").write_text(brief)
         if options.tool == "claude":
@@ -187,14 +190,14 @@ def build(
     finally:
         # Another run on the issue can't start while the worktree exists, and scripts/start-issue can't check out the
         # branch while the worktree has it.
-        problem = clear_worktree(issue["number"], folders)
+        problem = clear_worktree(issue["number"], branch, folders)
         if problem:
             raise Stop(f"{failure}, and {problem}" if failure else problem) from failure
 
 
-def clear_worktree(issue: int, folders: Folders) -> str:
-    """Saves the changes in the worktree on the issue's branch and removes the worktree, as scripts/clear-worktrees
-    does for the issue. Returns why the worktree stays, or an empty string."""
+def clear_worktree(issue: int, branch: str, folders: Folders) -> str:
+    """Saves the changes in the worktree on the issue's branch, as scripts/clear-worktrees does for the issue, removes
+    the worktree and pushes the branch. Returns where the changes stay when that fails, or an empty string."""
     if not folders.worktree.exists():
         return ""
     # Git runs the main checkout's hooks, because the worktree's copies are files that the builder can change.
@@ -211,11 +214,38 @@ def clear_worktree(issue: int, folders: Folders) -> str:
     )
     if done.returncode != 0:
         return f"scripts/clear-worktrees failed: {one_line(done.stdout + done.stderr)}"
-    # The script leaves a worktree that doesn't hold the issue's branch, as when the worktree holds the commit of a
-    # Codex builder's changes that a check refused.
+    # The script skips a worktree that doesn't hold the issue's branch, such as one where a check refused the commit of
+    # a Codex builder's changes.
     if folders.worktree.exists():
+        if has_unpushed_changes(folders):
+            return f"the changes stay in {folders.worktree}, off the issue's branch"
         git(["worktree", "remove", "--force", str(folders.worktree)], folders.checkout, folders.hooks)
+    try:
+        push_saved_changes(branch, folders)
+    except Stop as stop:
+        return f"the changes stay on the local branch {branch}, because {stop}"
     return ""
+
+
+def has_unpushed_changes(folders: Folders) -> bool:
+    """Whether the worktree has changes that aren't committed, or commits that no branch on origin has."""
+    if git(["status", "--porcelain"], folders.worktree, folders.hooks).strip():
+        return True
+    unpushed = ["rev-list", "--max-count=1", "HEAD", "--not", "--remotes=origin"]
+    return bool(git(unpushed, folders.worktree, folders.hooks).strip())
+
+
+def push_saved_changes(branch: str, folders: Folders) -> None:
+    """Pushes the commits that the local branch has and origin's doesn't, such as those that scripts/clear-worktrees
+    saved and didn't push because the branch has a pull request. The pull request becomes a draft without auto-merge
+    first, so that the unfinished changes can't merge."""
+    unpushed = ["rev-list", "--max-count=1", f"refs/heads/{branch}", "--not", f"refs/remotes/origin/{branch}"]
+    if not git(unpushed, folders.checkout, folders.hooks).strip():
+        return
+    pull_request = own_pull_request(branch, folders.checkout)
+    if pull_request is not None:
+        hold_for_review(pull_request, folders.checkout)
+    git(["push", "--quiet", "origin", f"refs/heads/{branch}:refs/heads/{branch}"], folders.checkout, folders.hooks)
 
 
 def option(flag: str, value: str | None) -> list[str]:
@@ -285,8 +315,8 @@ def label_names(issue: dict[str, Any]) -> list[str]:
     return [label["name"] for label in issue["labels"]]
 
 
-def make_worktree(issue: int, repository: str, folders: Folders) -> str:
-    """Adds the worktree on the issue's branch, and returns the branch."""
+def issue_branch(issue: int, repository: str, folders: Folders) -> str:
+    """The issue's branch on origin, which the script creates if the issue has none."""
     git(["fetch", "--prune", "--quiet", "origin"], folders.checkout, folders.hooks)
     branch = newest_linked_branch(issue, repository, folders.checkout)
     if branch is None:
@@ -295,9 +325,12 @@ def make_worktree(issue: int, repository: str, folders: Folders) -> str:
         branch = newest_linked_branch(issue, repository, folders.checkout)
     if branch is None:
         raise Stop(f"gh issue develop created no branch for issue #{issue} that origin has.")
+    return branch
+
+
+def add_worktree(branch: str, folders: Folders) -> None:
     git(["worktree", "add", "--quiet", str(folders.worktree), branch], folders.checkout, folders.hooks)
     git(["merge", "--ff-only", "--quiet", f"refs/remotes/origin/{branch}"], folders.worktree, folders.hooks)
-    return branch
 
 
 def newest_linked_branch(issue: int, repository: str, checkout: Path) -> str | None:

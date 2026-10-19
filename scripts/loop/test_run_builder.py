@@ -342,6 +342,16 @@ class WorktreeTest(RunBuilderTest):
         self.assertTrue(printed.endswith(f"| no report, see {self.run_folder()}\n"))
         self.assertEqual(self.calls("claude"), [])
 
+    def test_fails_and_leaves_the_folder_that_has_the_branch_when_git_cannot_add_the_worktree(self) -> None:
+        self.git("switch", "--quiet", "--create", BRANCH)
+        (self.repo / "half.txt").write_text("half\n")
+        status, printed, _ = self.run_builder("--tool", "claude")
+        self.assertEqual(status, 1)
+        self.assertIn(f"| failed: git failed: fatal: '{BRANCH}' is already used by worktree at", printed)
+        self.assertEqual(self.git("branch", "--show-current"), BRANCH)
+        self.assertEqual(self.git("status", "--porcelain"), "?? half.txt")
+        self.assertEqual(self.calls("claude"), [])
+
 
 class ClaudeTest(RunBuilderTest):
     def test_claude_builder_builds_the_issue_in_its_worktree_and_says_where_its_report_is(self) -> None:
@@ -438,15 +448,30 @@ class UnsavedWorkTest(RunBuilderTest):
         self.assert_branch_holds_the_unsaved_work()
         self.assertEqual(self.hooks_that_ran(), list(GIT_HOOKS))
 
-    def test_commits_but_does_not_push_the_changes_on_a_branch_that_has_an_open_pull_request(self) -> None:
+    def test_makes_the_pull_request_of_the_branch_a_draft_without_auto_merge_before_it_pushes_the_changes(self) -> None:
         self.answer("gh", f"pr list --head {BRANCH} --state open --json number --jq length", {"stdout": "1\n"})
+        listed = {**OWN_PULL_REQUEST, "autoMergeRequest": {"enabledAt": "2026-10-18T00:00:00Z"}}
+        self.answer("gh", "pr list", {"stdout": json.dumps([listed])})
         self.answer("claude", "", {"stdout": lines(INIT, RESULT), "write": {"half.txt": "half\n"}})
         status, printed, _ = self.run_builder("--tool", "claude")
         self.assertEqual(status, 0, printed)
-        self.assertEqual(self.git("log", "-1", "--format=%s", BRANCH), SAVE_SUBJECT)
+        self.assertEqual(self.arguments("gh", "pr merge"), [["pr", "merge", "6", "--disable-auto"]])
+        self.assertEqual(self.arguments("gh", "pr ready"), [["pr", "ready", "6", "--undo"]])
+        self.assert_branch_holds_the_unsaved_work()
+        self.assertEqual(self.git("rev-parse", BRANCH), self.origin_git("rev-parse", BRANCH))
+
+    def test_fails_and_says_where_the_changes_are_when_the_push_of_the_saved_changes_fails(self) -> None:
+        self.answer("gh", f"pr list --head {BRANCH} --state open --json number --jq length", {"stdout": "1\n"})
+        self.answer("claude", "", {"stdout": lines(INIT, RESULT), "write": {"half.txt": "half\n"}})
+        (self.repo / "git-hooks" / "pre-push").write_text('#!/bin/sh\necho "the hook refuses the push" >&2\nexit 1\n')
+        status, printed, _ = self.run_builder("--tool", "claude")
+        self.assertEqual(status, 1)
+        self.assertIn(
+            f"| failed: the changes stay on the local branch {BRANCH}, because git failed: the hook refuses the push",
+            printed,
+        )
         self.assertEqual(self.git("show", f"{BRANCH}:half.txt"), "half")
         self.assertEqual(self.origin_git("rev-parse", BRANCH), self.origin_git("rev-parse", "main"))
-        self.assertFalse(self.worktree.exists())
 
     def test_fails_and_keeps_the_worktree_when_clear_worktrees_leaves_it(self) -> None:
         stopped = {"type": "result", "subtype": "error_during_execution", "is_error": True, "errors": ["Usage limit"]}
@@ -579,7 +604,12 @@ class CodexTest(RunBuilderTest):
 
 
 class CodexPushTest(RunBuilderTest):
-    """What keeps a Codex builder's commit from going out."""
+    """What keeps a Codex builder's commit from going out, and keeps its changes in the worktree."""
+
+    def assert_kept_in_the_worktree(self, printed: str) -> None:
+        self.assertIn(f", and the changes stay in {self.worktree}, off the issue's branch |", printed)
+        self.assertTrue((self.worktree / "built.txt").exists())
+        self.assert_pushed_nothing()
 
     def test_pushes_nothing_when_the_pull_request_would_break_the_writing_rules(self) -> None:
         self.answer("codex", "", self.codex_answer({"built.txt": "x"}, report="One; two."))
@@ -587,14 +617,14 @@ class CodexPushTest(RunBuilderTest):
         self.assertEqual(status, 1)
         self.assertIn("| failed: the pull request's text has problems, so the script pushed nothing:", printed)
         self.assertIn("has a semicolon in prose", printed)
-        self.assert_pushed_nothing()
+        self.assert_kept_in_the_worktree(printed)
 
     def test_pushes_nothing_when_a_git_hook_of_the_main_checkout_refuses_the_push(self) -> None:
         (self.repo / "git-hooks" / "pre-push").write_text('#!/bin/sh\necho "the hook refuses the push" >&2\nexit 1\n')
         status, printed, _ = self.run_builder("--tool", "codex")
         self.assertEqual(status, 1)
         self.assertIn("| failed: git failed: the hook refuses the push", printed)
-        self.assert_pushed_nothing()
+        self.assert_kept_in_the_worktree(printed)
 
     def test_pushes_nothing_when_a_file_has_the_name_of_a_secret(self) -> None:
         self.answer("codex", "", self.codex_answer({"built.txt": "x", "config/.netrc": "machine github.com"}))
@@ -603,8 +633,8 @@ class CodexPushTest(RunBuilderTest):
         self.assertIn(
             "| failed: codex left files whose names suggest a secret, so the script pushed nothing: ", printed
         )
-        self.assertIn("config/.netrc |", printed)
-        self.assert_pushed_nothing()
+        self.assertIn("config/.netrc, and the changes stay in", printed)
+        self.assert_kept_in_the_worktree(printed)
 
     def test_pushes_nothing_when_the_leak_scan_finds_a_token(self) -> None:
         # The token is put together here, because the leak scan blocks a token in the files.
@@ -614,7 +644,7 @@ class CodexPushTest(RunBuilderTest):
         self.assertEqual(status, 1)
         self.assertIn("| failed: scripts/leak-scan refused codex's commit, so the script pushed nothing:", printed)
         self.assertNotIn(token, printed)
-        self.assert_pushed_nothing()
+        self.assert_kept_in_the_worktree(printed)
 
 
 class CodexReviewTest(RunBuilderTest):
@@ -662,6 +692,8 @@ class CodexReviewTest(RunBuilderTest):
         )
         self.assertNotIn("scripts/hooks/new.check", self.origin_git("ls-tree", "-r", "--name-only", BRANCH))
         self.assertEqual(self.calls("gh", "pr create"), [])
+        self.assertIn(f", and the changes stay in {self.worktree}, off the issue's branch |", printed)
+        self.assertTrue((self.worktree / "scripts" / "hooks" / "new.check").exists())
 
 
 class CodexProblemTest(unittest.TestCase):
