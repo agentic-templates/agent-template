@@ -64,6 +64,7 @@ env_option() {
 }
 environment="Blocked: this command prints the whole environment, which holds tokens. Print only the variables you need, by name, as in printenv PATH. To list the variables' names without their values, run $list_names."
 no_verify="Blocked: --no-verify skips the pre-push hook, which scans the push for leaks. Push without it. If the scan finds a leak, take it out of the commits."
+hooks_path="Blocked: setting core.hooksPath for a push can skip the pre-push hook, which scans the push for leaks. Push without setting it."
 push_to_url="Blocked: this pushes to a URL instead of a remote, and only the maintainer may do that. Push to a remote that git remote -v lists, such as origin, or ask the maintainer."
 admin_merge="Blocked: --admin merges the pull request without the checks that main requires, and only the maintainer may skip them. Merge without --admin, so that the merge waits for the checks."
 security="Blocked: this changes the repository's rules or security settings, and only the maintainer may do that. $ask"
@@ -250,6 +251,22 @@ expect_block Bash 'git push origin HEAD --no-verif' "$no_verify"
 expect_allow Bash 'git push --verb origin HEAD'
 # --veri is the start of --verify, which runs the pre-push hook.
 expect_allow Bash 'git push --veri origin HEAD'
+# git's options before the subcommand, with and without a value
+expect_block Bash 'git -c color.ui=never push --no-verify' "$no_verify"
+expect_block Bash 'git --git-dir=.git push --no-verify' "$no_verify"
+expect_block Bash 'git --git-dir .git --no-pager --work-tree . push --no-verify' "$no_verify"
+expect_block Bash 'git --attr-source HEAD -C . push https://github.com/someone/else.git main' "$push_to_url"
+expect_allow Bash 'git -c color.ui=never push origin HEAD'
+# git reads -h, --help, -v and --version as the subcommand help or version, which then reads the words after it.
+expect_allow Bash 'git --help push --no-verify'
+expect_allow Bash 'git -c color.ui=never -h push --no-verify'
+# git reads the name of a setting in any case.
+expect_block Bash 'git -c core.hooksPath=/tmp/hooks push' "$hooks_path"
+expect_block Bash 'git -c Core.HooksPath=/tmp/hooks push origin HEAD' "$hooks_path"
+expect_block Bash 'git -c core.hookspath push' "$hooks_path"
+expect_block Bash 'git --config-env=core.hooksPath=HOOKS push' "$hooks_path"
+expect_block Bash 'git --config-env core.hooksPath=HOOKS push' "$hooks_path"
+expect_allow Bash 'git -c core.hooksPathOld=/tmp/hooks push'
 expect_block Bash 'git push https://github.com/someone/else.git main' "$push_to_url"
 expect_block Bash 'git push git@github.com:someone/else.git HEAD' "$push_to_url"
 expect_block Bash 'git push -o ci.skip ssh://git@github.com/jtmpl/project.git HEAD' "$push_to_url"
