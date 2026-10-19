@@ -52,9 +52,12 @@ done
 # Each case copies this git repository, which holds the tracked files as they are on disk, with one cp, because
 # copying the files one by one took most of a case's time.
 starting_copy=$results/starting-copy
-# -f skips the submodules and deleted files that git ls-files also lists.
+# -f skips the submodules and deleted files that git ls-files also lists. The ShellCheck cases test how scripts/check
+# finds and checks the shell files, and scripts/check's own run checks this repository's files. So their copies leave
+# out the tests and the hooks' checks, which took nine of the eleven seconds of ShellCheck on a copy, as issue #91
+# measured.
 git ls-files -z | while IFS= read -r -d '' file; do
-  if [[ -f $file ]]; then
+  if [[ -f $file && ! (-n $shellcheck_only && ($file == *.test || $file == *.check)) ]]; then
     mkdir -p "$starting_copy/$(dirname "$file")"
     cp -p "$file" "$starting_copy/$file"
   fi
@@ -183,10 +186,6 @@ while [[ -e $shellcheck_fixture ]]; do
   shellcheck_fixture=$shellcheck_fixture-fixture
 done
 
-shellcheck_repository_as_it_is() {
-  :
-}
-
 shellcheck_unquoted_variable() {
   cat > "$copy/$shellcheck_fixture" <<'SCRIPT'
 #!/usr/bin/env bash
@@ -196,7 +195,6 @@ SCRIPT
   chmod +x "$copy/$shellcheck_fixture"
 }
 
-run_case shellcheck_repository_as_it_is pass
 run_case shellcheck_unquoted_variable fail \
   "$shellcheck_fixture" \
   "SC2086"

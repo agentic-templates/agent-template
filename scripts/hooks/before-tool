@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The agent's tool runs this hook before each action, because .claude/settings.json and .codex/hooks.json list it.
 # It reads the fields of the tool's input that the checks use, and runs each check in this folder, the files that end
-# in .check. A check blocks the action with exit code 2 and the reason on stderr, and this script passes both on.
+# in .check. It sources a check in bash in a subshell, and runs a check in another language as a program.
+# A check blocks the action with exit code 2 and the reason on stderr, and this script passes both on.
 # The check also adds a line to .loop/blocks.log in the main checkout, as log_block in helpers.bash describes.
 # Before an Agent call, the hook adds a line to .loop/agents.jsonl there instead, and checks nothing.
 # To add a check, add its .check file and its .test file. A check for a tool that isn't in the list below also adds
@@ -48,14 +49,49 @@ case $HOOK_TOOL_NAME in
   *) exit 0 ;;
 esac
 
-for check in "${BASH_SOURCE[0]%/*}"/*.check; do
-  if [[ ! -x $check ]]; then
-    continue
+# Each check in bash runs in a subshell of this one, which has read helpers.bash, rather than in a bash process of its
+# own, because starting bash and reading helpers.bash took half the CPU time of a check, as issue #91 measured. A check is
+# in bash when its first line runs bash. The subshell ends with the code of the first check that blocks the action, or
+# with code 1 when helpers.bash fails.
+(
+  helpers=${BASH_SOURCE[0]%/*}/helpers.bash
+  # source can't fail the subshell on a missing file, because set -e isn't on yet.
+  if [[ ! -r $helpers ]]; then
+    exit 1
   fi
-  reason=$("$check" 2>&1 >/dev/null </dev/null)
-  if (($? == 2)); then
-    printf '%s\n' "$reason" >&2
-    exit 2
+  # shellcheck source=scripts/hooks/helpers.bash
+  source "$helpers"
+  # The checks find the simple commands of a shell command split already, as for_each_simple_command in
+  # simple-commands.bash describes. When splitting fails, the subshell ends with code 1, as each check would.
+  read_input
+  if [[ $tool_name == Bash ]]; then
+    split_command "$shell_command"
   fi
-done
+  # The options and the trap of helpers.bash would turn a check's code 2 into a failure of this subshell. Each check
+  # turns them on again for itself when it sources helpers.bash.
+  set +eEu +o pipefail
+  trap - ERR
+  runs_bash='^#!(/bin/|/usr/bin/env )bash([[:space:]]|$)'
+  for check in "${BASH_SOURCE[0]%/*}"/*.check; do
+    if [[ ! -x $check ]]; then
+      continue
+    fi
+    first_line=""
+    IFS= read -r first_line <"$check"
+    if [[ $first_line =~ $runs_bash ]]; then
+      # With set -e, a check that bash can't parse ends with code 2, as it would in a process of its own.
+      # shellcheck source=/dev/null # ShellCheck checks each check as a file of its own.
+      reason=$(set -e && source "$check" 2>&1 >/dev/null </dev/null)
+    else
+      reason=$("$check" 2>&1 >/dev/null </dev/null)
+    fi
+    if (($? == 2)); then
+      printf '%s\n' "$reason" >&2
+      exit 2
+    fi
+  done
+)
+if (($? == 2)); then
+  exit 2
+fi
 exit 0

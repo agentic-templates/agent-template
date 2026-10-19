@@ -156,11 +156,9 @@ if [[ -n "$too_big" ]]; then
   exit 1
 fi
 
-# Succeeds if a line of the input is exactly the text: has_line <text>
-# With -q, grep would stop reading at the first match. The command that writes to grep could then fail
-# on the closed pipe, and pipefail would fail the whole pipeline.
+# Succeeds if a line of a text is exactly another text: has_line <lines> <text>
 has_line() {
-  grep -F -x -- "$1" >/dev/null
+  [[ $'\n'$1$'\n' == *$'\n'"$2"$'\n'* ]]
 }
 
 # Each tracked text file stays at 1,000 lines or fewer, because an agent reads a whole file into its context.
@@ -206,14 +204,14 @@ while IFS= read -r -d '' file && IFS= read -r line_count; do
     continue
   fi
   files_over_the_limit+=$file$'\n'
-  if ! has_line "$file" <<<"$listed_files"; then
+  if ! has_line "$listed_files" "$file"; then
     echo "error: $file has $line_count lines, and the limit is $max_file_lines. Move a part with its own responsibility into a file of its own." >&2
     long_file_error=yes
   fi
 done < <(git grep --null -I -c '' -- "${not_generated_or_vendored[@]}")
 
 while IFS= read -r path; do
-  if [[ -n $path ]] && ! has_line "$path" <<<"$files_over_the_limit"; then
+  if [[ -n $path ]] && ! has_line "$files_over_the_limit" "$path"; then
     echo "error: $long_files_list lists $path, which scripts/check accepts without the list. Remove its line, or fix the path." >&2
     long_file_error=yes
   fi
@@ -284,6 +282,27 @@ form_field_labels() {
   done
 }
 
+# The headings of each Markdown file that a section name pointed to so far. The check reads each file once, because
+# reading it again for each name took three quarters of the check's time, as issue #91 measured. heading_lists holds
+# the headings of the file at the same place in heading_files, one to a line.
+heading_files=()
+heading_lists=()
+
+# Succeeds if a Markdown file has a heading with the text, at any level: has_heading <file> <text>
+has_heading() {
+  local file=$1 text=$2 place=0 headings_of_file
+  while ((place < ${#heading_files[@]})) && [[ ${heading_files[place]} != "$file" ]]; do
+    place=$((place + 1))
+  done
+  if ((place == ${#heading_files[@]})); then
+    # A file that sed can't read has no headings.
+    headings_of_file=$(headings "$file") || headings_of_file=""
+    heading_files+=("$file")
+    heading_lists+=("$headings_of_file")
+  fi
+  has_line "${heading_lists[place]}" "$text"
+}
+
 # Prints each section name in a Markdown file on a line of its own: its line number, the name and the file
 # that the name points to, separated by tabs. The file is empty for describes and says: section_names_in <file>
 section_names_in() {
@@ -305,7 +324,7 @@ section_names_in() {
 check_section_name() {
   local file=$1 line_number=$2 name=$3 target=$4
   if [[ -z $target ]]; then
-    if headings "$file" | has_line "$name" || form_field_labels | has_line "$name"; then
+    if has_heading "$file" "$name" || has_line "$field_labels" "$name"; then
       return 0
     fi
     echo "error: $file:$line_number names \"$name\", which matches no heading in $file and no field label in $issue_forms/. Fix the name, or the heading." >&2
@@ -315,12 +334,14 @@ check_section_name() {
     echo "error: $file:$line_number names \"$name\" in $target, which doesn't exist. Write the path from the repository's root to the file." >&2
     return 1
   fi
-  if ! headings "$target" | has_line "$name"; then
+  if ! has_heading "$target" "$name"; then
     echo "error: $file:$line_number names \"$name\" in $target, which has no such heading. Fix the name, or the heading." >&2
     return 1
   fi
 }
 
+# The labels of the fields in the issue forms, one to a line
+field_labels=$(form_field_labels) || field_labels=""
 broken_name=""
 while IFS= read -r -d '' file; do
   # -f skips the deleted files that git ls-files also lists.

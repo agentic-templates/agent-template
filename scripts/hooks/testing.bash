@@ -23,42 +23,42 @@ export HOOK_ALLOWED_REPOSITORIES=${hooks_folder%/hooks}/fixtures/allowed-reposit
 
 # Prints a sample of what a tool sends the hook before an action: sample_input <tool> <tool name> <command, patch or path>
 # The tool names are Bash, Read, Write, Edit and Codex's apply_patch. Every tool uses Claude Code's field names.
+# One jq call builds the whole input, because the cases start jq so often that each call counts.
+# shellcheck disable=SC2016 # The $ in the jq programs names jq's variables, such as $value.
 sample_input() {
-  local tool=$1 tool_name=$2 value=$3 tool_input
+  local tool=$1 tool_name=$2 value=$3 tool_input program
   case $tool_name in
-    Bash | apply_patch) tool_input=$(jq -n --arg command "$value" '{command: $command}') ;;
-    Read) tool_input=$(jq -n --arg path "$value" '{file_path: $path}') ;;
-    Write) tool_input=$(jq -n --arg path "$value" '{file_path: $path, content: "Rules"}') ;;
-    Edit) tool_input=$(jq -n --arg path "$value" '{file_path: $path, old_string: "Rules", new_string: "More rules"}') ;;
+    Bash | apply_patch) tool_input='{command: $value}' ;;
+    Read) tool_input='{file_path: $value}' ;;
+    Write) tool_input='{file_path: $value, content: "Rules"}' ;;
+    Edit) tool_input='{file_path: $value, old_string: "Rules", new_string: "More rules"}' ;;
   esac
   case $tool in
     claude-code)
-      jq -n --arg home "$test_home" --arg cwd "$test_cwd" --arg tool_name "$tool_name" --argjson tool_input "$tool_input" \
-        '{session_id: "abc123", transcript_path: "\($home)/.claude/projects/p/abc123.jsonl",
-          cwd: $cwd, permission_mode: "default", hook_event_name: "PreToolUse",
-          tool_name: $tool_name, tool_input: $tool_input, tool_use_id: "toolu_01"}'
+      program='{session_id: "abc123", transcript_path: "\($home)/.claude/projects/p/abc123.jsonl",
+        cwd: $cwd, permission_mode: "default", hook_event_name: "PreToolUse",
+        tool_name: $tool_name, tool_input: TOOL_INPUT, tool_use_id: "toolu_01"}'
       ;;
     codex)
-      jq -n --arg cwd "$test_cwd" --arg tool_name "$tool_name" --argjson tool_input "$tool_input" \
-        '{session_id: "abc123", turn_id: "1", transcript_path: null, cwd: $cwd,
-          hook_event_name: "PreToolUse", model: "gpt-5", permission_mode: "default",
-          tool_name: $tool_name, tool_input: $tool_input, tool_use_id: "call_01"}'
+      program='{session_id: "abc123", turn_id: "1", transcript_path: null, cwd: $cwd,
+        hook_event_name: "PreToolUse", model: "gpt-5", permission_mode: "default",
+        tool_name: $tool_name, tool_input: TOOL_INPUT, tool_use_id: "call_01"}'
       ;;
     copilot-cli)
-      jq -n --arg cwd "$test_cwd" --arg tool_name "$tool_name" --argjson tool_input "$tool_input" \
-        '{session_id: "abc123", timestamp: 1759536000000, cwd: $cwd,
-          hook_event_name: "PreToolUse", tool_name: $tool_name, tool_input: $tool_input}'
+      program='{session_id: "abc123", timestamp: 1759536000000, cwd: $cwd,
+        hook_event_name: "PreToolUse", tool_name: $tool_name, tool_input: TOOL_INPUT}'
       ;;
     cursor)
       if [[ $tool_name == Bash ]]; then
         tool_name=Shell
       fi
-      jq -n --arg cwd "$test_cwd" --arg tool_name "$tool_name" --argjson tool_input "$tool_input" \
-        '{conversation_id: "abc123", generation_id: "def456", model: "auto", hook_event_name: "PreToolUse",
-          cursor_version: "2.1.0", workspace_roots: [$cwd], transcript_path: null,
-          tool_name: $tool_name, tool_input: $tool_input}'
+      program='{conversation_id: "abc123", generation_id: "def456", model: "auto", hook_event_name: "PreToolUse",
+        cursor_version: "2.1.0", workspace_roots: [$cwd], transcript_path: null,
+        tool_name: $tool_name, tool_input: TOOL_INPUT}'
       ;;
   esac
+  jq -n --arg home "$test_home" --arg cwd "$test_cwd" --arg tool_name "$tool_name" --arg value "$value" \
+    "${program/TOOL_INPUT/$tool_input}"
 }
 
 # Prints the tools that send an action: tools_for <tool name>
@@ -72,7 +72,8 @@ tools_for() {
   esac
 }
 
-# Runs one check on an input, as scripts/hooks/before-tool runs it, and prints what the check prints:
+# Runs one check on an input, with the variables that scripts/hooks/before-tool sets for the checks, and prints what
+# the check prints:
 # run_check <check, such as posted-text> <input>
 run_check() {
   local fields
@@ -80,14 +81,16 @@ run_check() {
   (
     eval "$fields"
     export HOOK_TOOL_NAME HOOK_COMMAND HOOK_FILE_PATH HOOK_CWD LC_ALL=C
-    "$hooks_folder/$1.check"
+    bash "$hooks_folder/$1.check"
   )
 }
 
 # Runs the hook on an input, and sets hook_status and hook_message: run_hook <input>
+# run_check and run_hook start the script with bash, without the env of its first line, because the cases start them
+# about 2,000 times, and env would add a process each time. scripts/hooks/settings.test runs the hook as the tools do.
 run_hook() {
   hook_status=0
-  hook_message=$(HOME=$test_home "$hooks_folder/before-tool" 2>&1 >/dev/null <<<"$1") || hook_status=$?
+  hook_message=$(HOME=$test_home bash "$hooks_folder/before-tool" 2>&1 >/dev/null <<<"$1") || hook_status=$?
 }
 
 # Checks the hook's result for one case: expect_result <description> <exit code> <message>

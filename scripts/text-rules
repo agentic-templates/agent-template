@@ -172,6 +172,11 @@ without_html_comments() {
 # Prints the problem with each path into a home folder in a line: home_path_problems <where> <line>
 home_path_problems() {
   local path paths
+  # Most lines hold no such path. Skipping the subshell below for them cut the CPU time of the hooks' tests of posted
+  # text by a twentieth, as issue #91 measured.
+  if [[ ! $2 =~ $home_path ]]; then
+    return 0
+  fi
   paths=$(home_paths_in "$2")
   if [[ -z $paths ]]; then
     return 0
