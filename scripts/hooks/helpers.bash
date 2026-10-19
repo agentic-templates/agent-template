@@ -401,40 +401,38 @@ issue_create_flags_with_value=" -a --assignee --attach --blocked-by --blocking -
 issue_edit_flags_with_value=" --add-assignee --add-blocked-by --add-blocking --add-label --add-project --add-sub-issue --attach -b --body -F --body-file -m --milestone --parent --remove-assignee --remove-blocked-by --remove-blocking --remove-label --remove-project --remove-sub-issue -t --title --type -R --repo "
 pr_close_flags_with_value=" -c --comment -R --repo "
 
-# Reads the words of a gh command from an index on, and sets these variables:
+# Reads the words of a gh command from an index on, each word that starts with a dash as split_flag_word reads it, and
+# sets these variables:
 # - argument: the first word that isn't a flag or a flag's value, or empty
-# - repository: --repo and the value of -R or --repo, or empty
+# - repository: --repo and the value of -R or --repo, or empty, as in --repo jtmpl/other for -dRjtmpl/other
 # - target: the words that name the argument to other gh commands: the argument, and the words in repository
-# - flags: the flags, without their values
-# - flag_values: the value of each flag in flags that takes the next word as its value, or empty
+# - flags: the words that start with a dash, as the command writes them, such as -cn or --title=Title
+# - flag_values: for each word in flags, the next word when it's the value of the word's last flag, or empty
 # read_arguments <index> <flags that take a value>
 read_arguments() {
-  local i word
+  local i word flag value value_is_next_word flags_before
   argument="" repository=() target=() flags=() flag_values=()
   for ((i = $1; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
-    case $word in
-      -R | --repo)
-        repository=(--repo "${command_words[i + 1]:-}")
-        i=$((i + 1))
-        ;;
-      --repo=*) repository=(--repo "${word#--repo=}") ;;
-      -*)
-        flags+=("$word")
-        if [[ $word != *=* && $2 == *" $word "* ]]; then
-          flag_values+=("${command_words[i + 1]:-}")
-          i=$((i + 1))
-        else
-          flag_values+=("")
-        fi
-        ;;
-      *)
-        if [[ -z $argument ]]; then
-          argument=$word
-          target=("$word")
-        fi
-        ;;
-    esac
+    if [[ $word != -* ]]; then
+      if [[ -z $argument ]]; then
+        argument=$word
+        target=("$word")
+      fi
+      continue
+    fi
+    split_flag_word "$word" "$2"
+    flags+=("$word")
+    if [[ -n $value_is_next_word ]]; then
+      i=$((i + 1))
+      value=${command_words[i]:-}
+      flag_values+=("$value")
+    else
+      flag_values+=("")
+    fi
+    if [[ $flag == -R || $flag == --repo ]]; then
+      repository=(--repo "$value")
+    fi
   done
   target+=(${repository[@]+"${repository[@]}"})
 }

@@ -176,6 +176,13 @@ expect_repository_flags 2 "Blocked: pull request 7 $from_dependabot" pr close '7
 for repository in '-R jtmpl/other' '--repo jtmpl/other' '--repo=jtmpl/other'; do
   expect_gh_call "gh pr $repository close 7" "pr view 7 --repo jtmpl/other --json author"
 done
+# A word can hold several short flags, and a value for the last of them, as split_flag_word in helpers.bash reads it.
+# The -c of gh pr close takes a comment, and its -d takes no value.
+for repository in -Rjtmpl/other -R=jtmpl/other -dRjtmpl/other '-dR jtmpl/other'; do
+  expect_gh_call "gh pr close 7 $repository" "pr view 7 --repo jtmpl/other --json author"
+done
+expect_gh_call 'gh pr close 7 -cRjtmpl/other' "pr view 7 --json author"
+expect_block Bash 'gh pr close -dc "Superseded by #8" 7' "Blocked: pull request 7 $from_dependabot"
 expect_allow Bash 'gh pr view 7'
 expect_allow Bash 'gh pr comment 7 --body "@dependabot rebase"'
 # The orchestrator merges Dependabot's pull requests, as "Stuck pull requests" in docs/loop.md describes.
@@ -330,6 +337,11 @@ expect_repository_flags 2 "${needs_triage/edit 12/edit 12 --repo jtmpl/other}" i
 for repository in '-R jtmpl/other' '--repo jtmpl/other' '--repo=jtmpl/other'; do
   expect_gh_call "gh issue $repository develop 12" "issue view 12 --repo jtmpl/other --json labels"
 done
+# The -c of gh issue develop is --checkout, which takes no value, so -cn fix-12 is -c -n fix-12.
+for command in 'gh issue develop -c -n fix-12 12' 'gh issue develop -cn fix-12 12' 'gh issue develop -cnfix-12 12'; do
+  expect_block Bash "$command" "$needs_triage"
+done
+expect_gh_call 'gh issue develop 12 -cRjtmpl/other' "issue view 12 --repo jtmpl/other --json labels"
 expect_allow Bash 'gh issue view 12'
 expect_allow Bash 'gh issue edit 12 --remove-label needs-triage'
 expect_allow Bash 'gh issue develop'
