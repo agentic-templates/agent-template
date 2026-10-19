@@ -240,17 +240,6 @@ for rulesets in "main none" "none main"; do
   expect_block Bash "cd -P '$other_clone' && scripts/configure-github" "$cannot_tell"
 done
 
-# Runs the hook on a command of a session, or of a subagent of it, and checks its result:
-# expect_from <session> <agent id or ""> <command> <exit code> <message>
-# A subagent's input has the id of its session, and its own in agent_id.
-expect_from() {
-  local input
-  input=$(sample_input claude-code Bash "$3" | jq -c --arg session "$1" --arg agent "$2" \
-    '.session_id = $session | if $agent == "" then . else . + {agent_id: $agent, agent_type: "builder"} end')
-  run_hook "$input"
-  expect_result "For session $1${2:+ and its agent $2}, the hook for Bash \"$3\"" "$4" "$5"
-}
-
 # A run of scripts/configure-github by the orchestrator, the session that the state file names, once the settings were
 # applied. It runs the main checkout's script in the main checkout, while the checkout's scripts folder is the same as
 # on main on GitHub.

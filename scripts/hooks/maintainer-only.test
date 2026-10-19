@@ -309,6 +309,7 @@ expect_allow Bash 'gh gist create -d --public notes.md'
 expect_block Bash 'gh pr comment 5 -R someone/else --body Hello' "$(other_repository someone/else)"
 expect_block Bash 'gh issue comment -Rsomeone/else 5 --body Hello' "$(other_repository someone/else)"
 expect_block Bash 'gh issue -R someone/else comment 5 --body Hello' "$(other_repository someone/else)"
+expect_block Bash 'gh release -R someone/else upload v1 app.tar' "$(other_repository someone/else)"
 expect_block Bash 'gh workflow run ci.yml --repo=github.com/someone/else' "$(other_repository someone/else)"
 expect_block Bash 'gh issue comment https://github.com/someone/else/issues/5 --body Hello' \
   "$(other_repository someone/else)"

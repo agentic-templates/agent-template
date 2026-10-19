@@ -153,17 +153,6 @@ runs_configure_github() {
   is_configure_github "$script_word"
 }
 
-# Succeeds if the action comes from the orchestrator's session, and not from a subagent of it, such as a builder,
-# whose input has the session's id too.
-is_orchestrator() {
-  local loop
-  if [[ -n $agent_id ]]; then
-    return 1
-  fi
-  loop=$(hook_loop_folder 2>/dev/null) || return 1
-  is_orchestrators_session "$loop" "$session_id"
-}
-
 # Adds 1 to other_commands for a simple command other than a cd without redirections, because a redirection can write
 # a file, also on a cd: count_other_command <word>...
 count_other_command() {

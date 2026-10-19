@@ -8,6 +8,10 @@
 # - gh issue develop on an issue with needs-triage, because no maintainer has accepted the issue yet
 # - gh auth token, gh auth status with --show-token, gh auth git-credential and git credential fill, because they print
 #   the token that gh uses, and AGENTS.md says never to read or print secrets
+# - publishing a release or putting a version tag on GitHub, unless the orchestrator's session runs it, because the
+#   orchestrator releases a commit that it checked on main, as "Publish a release" in docs/releasing.md describes. A
+#   version tag matches v*, because only such tags can use the release environment, whose jobs start without approval.
+#   The check reads only the command, so it misses a push that git's settings make push tags, such as push.followTags.
 # It asks gh and git about the pull request, the issue or the branch, and allows the command when they fail, such as
 # without a network.
 # shellcheck source=scripts/hooks/helpers.bash
@@ -23,6 +27,12 @@ token_flags_with_value=" -h --hostname -u --user "
 status_flags_with_value=" -h --hostname --jq --json --template "
 
 prints_token="Blocked: this command prints the token that gh uses, and AGENTS.md says never to read or print secrets. gh commands use the token without it."
+publishes_release="Blocked: only the orchestrator publishes a release or puts a version tag on GitHub, because it releases a commit that it checked on main, as \"Publish a release\" in docs/releasing.md describes. Go on with the other work, and list the command in your report."
+
+# The endpoints of gh api that create, change or delete a release: a repository's releases, or one release by its id.
+release_endpoint='(^|/)repos/[^/]+/[^/]+/releases(/[0-9]+)?/?(\?|$)'
+# The endpoints of gh api that create, change or delete a ref, such as a tag.
+ref_endpoint='(^|/)repos/[^/]+/[^/]+/git/refs(/|\?|$)'
 
 # gh --version takes about 54 ms of CPU, the largest part of the hook's call for a gh command, as issue #116 measured.
 # So the check records the gh that it found and the first line of what its gh --version printed, and runs
@@ -118,6 +128,52 @@ check_gh_api() {
   if [[ $argument =~ $approval ]]; then
     block "Blocked: a maintainer decides whether to approve a workflow run, because the run executes the code of a pull request from outside the project. Go on with the other work, and list the run in your report for the maintainer."
   fi
+  read_api_method
+  if [[ $api_method == GET ]]; then
+    return 0
+  fi
+  if [[ $argument =~ $release_endpoint ]]; then
+    block_release
+  fi
+  # A request that creates or moves a tag names it in a field or in the query of a mutation, which can be in any word
+  # of the command or in a here-document, so the whole command is searched. The hook can't read a file that gives them.
+  if [[ $shell_command == *refs/tags/v* ]] &&
+    [[ $argument =~ $ref_endpoint || ($argument == graphql && $shell_command == *mutation*) ]]; then
+    block_release
+  fi
+}
+
+# Blocks a command that publishes a release or puts a version tag on GitHub, unless the orchestrator's session runs it.
+block_release() {
+  if ! is_orchestrator; then
+    block "$publishes_release"
+  fi
+}
+
+check_gh_release() {
+  if prints_help; then
+    return 0
+  fi
+  case ${command_words[2]:-} in
+    create | new) block_release ;;
+    edit)
+      if publishes_draft; then
+        block_release
+      fi
+      ;;
+  esac
+}
+
+# Succeeds if gh release edit in command_words sets --draft to false, which publishes the draft. gh reads the value as
+# Go's strconv.ParseBool does.
+publishes_draft() {
+  local word
+  for word in "${command_words[@]:3}"; do
+    case $word in
+      --draft=0 | --draft=f | --draft=F | --draft=false | --draft=FALSE | --draft=False) return 0 ;;
+    esac
+  done
+  return 1
 }
 
 # Succeeds if a pull request is one of Dependabot's: is_from_dependabot [<pull request>] [--repo <repository>]
@@ -155,9 +211,15 @@ check_gh_issue_develop() {
 }
 
 check_git_push() {
+  read_push_arguments
+  check_push_to_dependabot
+  check_push_of_version_tag
+}
+
+# Run read_push_arguments first.
+check_push_to_dependabot() {
   local refspec branch
   local -a refspecs=(HEAD)
-  read_push_arguments
   # Without a refspec, git pushes the current branch.
   if ((${#push_refspecs[@]} > 0)); then
     refspecs=("${push_refspecs[@]}")
@@ -174,6 +236,79 @@ check_git_push() {
       block "Blocked: $branch is the branch of one of Dependabot's pull requests, and Dependabot stops rebasing a pull request once someone else pushes to it. Make the update in a pull request of your own instead, as \"Stuck pull requests\" in docs/loop.md describes."
     fi
   done
+}
+
+# Blocks a push that puts a version tag on GitHub, unless the orchestrator's session runs it: one with a flag that pushes
+# tags, or with a refspec that can push to a version tag. git push <remote> tag <name> pushes refs/tags/<name>.
+# Run read_push_arguments first.
+check_push_of_version_tag() {
+  local flag i refspec
+  for flag in ${flags[@]+"${flags[@]}"}; do
+    if pushes_tags "$flag"; then
+      block_release
+    fi
+  done
+  for ((i = 0; i < ${#push_refspecs[@]}; i++)); do
+    refspec=${push_refspecs[i]}
+    if [[ $refspec == tag ]] && ((i + 1 < ${#push_refspecs[@]})); then
+      i=$((i + 1))
+      refspec=refs/tags/${push_refspecs[i]}
+    fi
+    if pushes_to_version_tag "$refspec"; then
+      block_release
+    fi
+  done
+}
+
+# Succeeds if a flag of git push pushes tags: --tags, --follow-tags or --mirror, or the start of one of them, as in
+# --tag, because git takes the start of an option as the option. git fails on a start that other options have too, such
+# as --t, so such a start may count: pushes_tags <flag>
+pushes_tags() {
+  local option
+  if [[ $1 != --?* ]]; then
+    return 1
+  fi
+  for option in --tags --follow-tags --mirror; do
+    if [[ $option == "$1"* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Succeeds if a refspec of git push, [+]<source>[:<destination>], can push to a version tag. Without a colon, the
+# destination is the source. git pushes to a destination that doesn't start with refs/ as a branch when the source is a
+# branch, and as a tag when the source is a tag, so such a destination counts as a tag unless git names the source as a
+# branch. A tag that an earlier part of the command creates counts too, because git doesn't have it yet when the hook
+# runs: pushes_to_version_tag <refspec>
+pushes_to_version_tag() {
+  local refspec=${1#+} source destination full_source
+  source=${refspec%%:*}
+  destination=${refspec#*:}
+  if [[ $destination == refs/* ]]; then
+    names_version_tag "$destination"
+    return
+  fi
+  if ! names_version_tag "refs/tags/$destination"; then
+    return 1
+  fi
+  # git rev-parse would read a source that starts with - as an option, and git push can't push it as a branch either.
+  if [[ $source == -* ]] ||
+    ! full_source=$(git "${git_folder[@]}" rev-parse --symbolic-full-name "$source" 2>/dev/null); then
+    return 0
+  fi
+  [[ $full_source != refs/heads/* ]]
+}
+
+# Succeeds if a full ref can name a version tag, as refs/tags/v1.0.0 does. A refspec's pattern, which holds a *, counts
+# when the refs that it matches can include a version tag, as with refs/tags/* and refs/*: names_version_tag <ref>
+names_version_tag() {
+  local before_star=${1%%\**}
+  if [[ $before_star == "$1" ]]; then
+    [[ $1 == refs/tags/v* ]]
+    return
+  fi
+  [[ refs/tags/v == "$before_star"* || $before_star == refs/tags/v* ]]
 }
 
 check_gh_auth_token() {
@@ -218,6 +353,7 @@ check_simple_command() {
   check_gh_version
   case "${command_words[1]:-} ${command_words[2]:-}" in
     "api "*) check_gh_api ;;
+    "release "*) check_gh_release ;;
     "pr close") check_gh_pr_close ;;
     "issue develop") check_gh_issue_develop ;;
     "auth token") check_gh_auth_token ;;
