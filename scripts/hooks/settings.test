@@ -83,6 +83,17 @@ expect_problem "$copies/two.json" claude-code "$copies/two.json isn't one JSON o
 echo '[]' >"$copies/array.json"
 expect_problem "$copies/array.json" codex "$copies/array.json isn't one JSON object, so the agents that read it run no hooks. Fix its JSON."
 
+# Auto mode's classifier blocks closing an issue or a pull request that the session didn't open, and the loop closes
+# them by design, such as when a builder gives an issue back. An allow rule skips the classifier, but not the hooks,
+# which block both commands for another repository, as maintainer-only.test shows.
+for rule in 'Bash(gh issue close:*)' 'Bash(gh pr close:*)'; do
+  case_count=$((case_count + 1))
+  if ! jq -e --arg rule "$rule" 'any(.permissions.allow[]?; . == $rule)' .claude/settings.json >/dev/null; then
+    echo "error: .claude/settings.json doesn't allow $rule, so auto mode's classifier can block the loop from closing an issue or a pull request that another session opened. Add it to permissions.allow." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+done
+
 # The commands in a git worktree. Claude Code can run the commands in the main checkout while the agent works in a
 # worktree, and the main checkout can be older than the worktree. The cases run in a repository whose hooks print
 # their own path, with a worktree, and in a second repository with the same hooks. git looks for no repository above
