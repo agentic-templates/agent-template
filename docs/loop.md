@@ -181,11 +181,12 @@ on its second, and end your turn.
 Ask the maintainer each question that only they can answer, in an issue with `needs-decision`, as "Labels" in
 `docs/planning.md` describes, and keep working on the rest.
 
-If you have a tool that sends a push notification, as with `claude --remote-control`, also send one with the issue's
-title and link each time you open such an issue.
-
 When a hook or the permission classifier blocks something that the loop needs, don't work around it. Ask in the
 same way for the permission that lets the loop do it itself.
+
+Each time you write a question for the maintainer in an issue with `needs-decision`, or an agent's report names an
+issue where it wrote one, send the maintainer a push notification with the issue's title and link, using the
+`PushNotification` tool.
 
 ## Start a retrospective
 
