@@ -296,11 +296,10 @@ git_options_with_value=" -C -c --git-dir --work-tree --namespace --config-env --
 # Reads the options at the start of a git command, before its subcommand, and sets these variables:
 # - git_folder: the options that make git work in the same repository as the command, starting from the agent's folder:
 #   each -C, --git-dir and --work-tree
-# - git_setting_names: the name of each setting that -c <name>=<value> or --config-env=<name>=<variable> gives
 # - git_subcommand: the index of the word after the options, such as push
 read_git_options() {
   local i=1 word option value
-  git_folder=(-C "${cwd:-.}") git_setting_names=()
+  git_folder=(-C "${cwd:-.}")
   while [[ ${command_words[i]:-} == -* ]]; do
     word=${command_words[i]}
     # git runs these as its subcommand help or version, with the words after them as its arguments.
@@ -318,26 +317,10 @@ read_git_options() {
       # git takes each -C relative to the folder before it, and a relative --git-dir or --work-tree relative to the
       # folder after every -C, so a check that asks git about the command's repository passes these on in their order.
       -C | --git-dir | --work-tree) git_folder+=("$option" "$value") ;;
-      -c | --config-env) git_setting_names+=("${value%%=*}") ;;
     esac
     i=$((i + 1))
   done
   git_subcommand=$i
-}
-
-# Succeeds if a -c or --config-env option that read_git_options read gives a setting: gives_git_setting <name>
-# It compares the names in any case, because git reads the section and the key of a name, as in core.hooksPath, in any
-# case.
-gives_git_setting() {
-  local name gives=1
-  shopt -s nocasematch
-  for name in ${git_setting_names[@]+"${git_setting_names[@]}"}; do
-    if [[ $name == "$1" ]]; then
-      gives=0
-    fi
-  done
-  shopt -u nocasematch
-  return $gives
 }
 
 # The flags of git push that take a value, as git push -h lists them.
