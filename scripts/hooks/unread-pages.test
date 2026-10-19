@@ -38,11 +38,17 @@ work_in() {
 # Prints the message that blocks a pull request with pages that no reader has read: unread <page>...
 unread() {
   local page
-  echo "Blocked: this pull request adds or rewrites text in pages that no fresh reader has read as the pull request has them. Give each page to a reader, as \"Review a changed page with a fresh reader\" in docs/pages.md describes:"
+  echo "Blocked: this pull request adds or rewrites text in pages that no fresh reader has read as they are now. Give each page to a reader, as \"Review a changed page with a fresh reader\" in docs/pages.md describes:"
   for page in "$@"; do
     echo "scripts/fresh-reader \"<reader>\" $page"
   done
-  echo "If you change a page after the reader read it, run its command again. Then open the pull request again."
+  echo "If you change a page after the reader read it, run its command again. Then commit the pages, and run gh pr create in a command of its own."
+}
+
+# Prints the message that blocks a pull request while pages have changes that aren't committed:
+# uncommitted <the pages, separated by commas>
+uncommitted() {
+  echo "Blocked: these pages have changes that aren't committed, so this hook can't tell which text the pull request holds: $1. Commit them first, and then run gh pr create in a command of its own."
 }
 
 # Runs the check on a command from the folder that the agent works in, and checks its exit code and message:
@@ -132,6 +138,40 @@ commit_all "docs: say what to do with the reader's answer"
 expect_check "$create" 2 "$(unread docs/writing.md)"
 read_page docs/writing.md
 expect_check "$create" 0 ""
+
+# Changes that aren't committed count, because a command such as git commit -am ... && gh pr create commits them before
+# gh pr create runs, and the check runs before the command. A committed line that no reader read, with a line on disk
+# that the reader read with it, needs only the commit, and then gh pr create in a command of its own.
+git switch --quiet -c on-disk main
+echo "It starts a builder for each ready issue." >>docs/loop.md
+commit_all "docs: say which issues the loop builds"
+echo "It waits for the checks." >>docs/loop.md
+read_page docs/loop.md
+commit_and_create="git commit -qam 'docs: say what the loop waits for' && $create"
+expect_check "$commit_and_create" 2 "$(uncommitted docs/loop.md)"
+read_page docs/loop.md
+expect_check "$commit_and_create" 2 "$(uncommitted docs/loop.md)"
+commit_all "docs: say that the loop waits for the checks"
+expect_check "$create" 0 ""
+# A line on disk that no reader read, after the reader read the committed page
+echo "It merges each pull request through the merge queue." >>docs/loop.md
+expect_check "$commit_and_create" 2 "$(unread docs/loop.md)"
+expect_check "$create" 2 "$(unread docs/loop.md)"
+read_page docs/loop.md
+expect_check "$create" 2 "$(uncommitted docs/loop.md)"
+git checkout --quiet -- docs/loop.md
+
+# A page that the branch's commits don't change counts once it changes on disk. A change on disk that only deletes lines
+# needs no reader, but it needs the commit.
+echo "Each builder works in a worktree of its own." >>README.md
+expect_check "$commit_and_create" 2 "$(unread README.md)"
+git checkout --quiet -- README.md
+sed '/^Run the loop/d' README.md >"$base/README.md"
+mv "$base/README.md" README.md
+expect_check "$create" 2 "$(uncommitted README.md)"
+# The pages on disk aren't those of the branch that --head names.
+expect_check 'gh pr create --head readme --title "docs: say where the builders work" --body "Closes #1"' 0 ""
+git checkout --quiet -- README.md
 
 # A branch that adds text to README.md, to a page in a folder inside docs/, to a file in docs/ that isn't Markdown, and
 # to a file outside docs/. Each page that no reader has read is in the message.
