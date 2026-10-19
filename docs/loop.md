@@ -129,6 +129,9 @@ After each issue, go back to step 1. Start an auditor too when "Start a retrospe
   and start it again each time it ends.
 - **Settings.** Once a pull request that changes `scripts/configure-github` merges, bring the main checkout's `main` up
   to date with `origin/main`. Then run `scripts/configure-github` there, so that GitHub's settings match main.
+- **Releases.** Once a goal is done, publish a release as "Publish a release" in `docs/releasing.md` describes, and
+  don't wait for the maintainer to ask. A goal is done when its issue closes as completed. For a goal of more than one
+  pull request, that's its parent issue.
 
 ### Record
 

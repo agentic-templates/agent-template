@@ -13,8 +13,6 @@ test_home=$folders/home
 test_cwd=$folders/project
 other_clone=$test_home/test-repositories/other
 mkdir -p "$test_cwd" "$other_clone"
-# Cursor sends no folder, so its hook runs in the test's own folder.
-cd "$test_cwd"
 
 # The agent's checkout is the main checkout of a repository that holds a copy of the scripts, whose hooks the cases run,
 # so that the hook finds the main checkout and its state file. origin/main has the same files, and a builder's worktree

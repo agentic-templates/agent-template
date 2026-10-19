@@ -4,13 +4,11 @@ set -euo pipefail
 # shellcheck source=scripts/hooks/testing.bash
 source "${BASH_SOURCE[0]%/*}/testing.bash"
 
-# The agent works in a project in a temporary home folder. Cursor sends no folder, so its hook runs in the test's own
-# folder, which is the project too.
+# The agent works in a project in a temporary home folder.
 folders=$(CDPATH='' cd -- "$(mktemp -d)" && pwd -P)
 test_home=$folders/home
 test_cwd=$test_home/project
 mkdir -p "$test_cwd"
-cd "$test_cwd"
 
 # A stand-in for gh, first on the PATH, so that the cases ask nothing of GitHub. It answers gh issue view <number>
 # with the file <number>.json in TEST_ISSUES, or in its folder jtmpl-other for --repo jtmpl/other, and fails for an
