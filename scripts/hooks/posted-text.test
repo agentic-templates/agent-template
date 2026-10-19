@@ -229,6 +229,9 @@ expect_allow Bash 'gh pr reopen 5'
 
 # Commands that post nothing
 expect_allow Bash "gh issue comment 7 --body '$semicolon_line' --help"
+# gh reads -eh as -e -h, and -ch as -c -h.
+expect_allow Bash "gh issue comment 7 --body '$semicolon_line' -eh"
+expect_allow Bash "gh pr review 5 --body '$semicolon_line' -ch"
 expect_allow Bash "echo gh issue comment 7 --body '$semicolon_line'"
 expect_allow Bash 'gh issue view 7 --comments'
 

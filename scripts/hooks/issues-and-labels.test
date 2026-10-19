@@ -203,6 +203,8 @@ expect_block Bash 'gh issue create --label feature --body "$(cat body.md)"' \
 # Help, and commands that create no issue
 expect_allow Bash 'gh issue create --help'
 expect_allow Bash 'gh issue create -h'
+# gh reads -wh as -w -h.
+expect_allow Bash 'gh issue create -wh'
 expect_allow Bash 'gh issue list --label bug'
 expect_allow Bash 'gh issue view 7'
 expect_allow Bash 'echo gh issue create'

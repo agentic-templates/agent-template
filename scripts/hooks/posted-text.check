@@ -32,10 +32,12 @@ read_text() {
   for ((i = 3; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
     case $word in
-      -h | --help) return 1 ;;
       -*) split_flag_word "$word" "$flags_with_value" ;;
       *) continue ;;
     esac
+    if asks_gh_for_help; then
+      return 1
+    fi
     if [[ $flags_with_value != *" $flag "* ]]; then
       continue
     fi

@@ -589,6 +589,16 @@ split_flag_word() {
   done
 }
 
+# Succeeds if the word that split_flag_word last split asks gh for help, so that gh shows the command's help and posts
+# nothing, as -h, --help and -dh do. gh has no flag -h of its own, so it stops at the h of a word of short flags and
+# shows the help, even with a value after the h, as in -h=false. It reads --help=false as no request for help.
+asks_gh_for_help() {
+  if [[ $flag == -h || $flags_before == *h* ]]; then
+    return 0
+  fi
+  [[ $flag == --help && -z $value ]]
+}
+
 # Reads the flags of a gh pr command from command_words, from its fourth word on, and fails when the command shows its
 # help or does a dry run: read_pull_request_flags <flags that take a value>
 # It sets pr_base, pr_head and pr_title to the values of --base, --head and --title, or to empty when the command
@@ -602,10 +612,13 @@ read_pull_request_flags() {
   for ((i = 3; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
     case $word in
-      -h | --help | --dry-run) return 1 ;;
+      --dry-run) return 1 ;;
       -*) split_flag_word "$word" "$flags_with_value" ;;
       *) continue ;;
     esac
+    if asks_gh_for_help; then
+      return 1
+    fi
     # A flag before the last in a word takes no value, so a -d there opens a draft.
     if [[ $flags_before == *d* ]]; then
       pr_is_draft=yes

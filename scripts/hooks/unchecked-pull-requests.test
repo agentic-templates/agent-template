@@ -161,6 +161,7 @@ expect_block Bash 'gh pr create --head jtmpl: --title "Add notes" --body "Closes
 forget_pass
 expect_allow Bash 'gh pr create --help'
 expect_allow Bash 'gh pr create -h'
+expect_allow Bash 'gh pr create -dh'
 expect_allow Bash 'gh pr create --fill --dry-run'
 expect_allow Bash 'gh pr view 7'
 expect_allow Bash 'echo gh pr create'

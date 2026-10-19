@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tests that split_flag_word in helpers.bash splits a word of a gh command into the flag and its value as gh reads them.
+# Tests that split_flag_word in helpers.bash splits a word of a gh command into the flag and its value as gh reads them,
+# and that asks_gh_for_help reads such a word as a request for help as gh does.
 set -euo pipefail
 # shellcheck source=scripts/hooks/testing.bash
 source "${BASH_SOURCE[0]%/*}/testing.bash"
@@ -47,5 +48,30 @@ expect_split -cc -c "" "" c
 # that takes one.
 expect_split -c=bText -c bText "" ""
 expect_split -cc=false -c false "" c
+
+# Checks whether asks_gh_for_help reads a word of gh pr review, as split_flag_word splits it, as a request for help:
+# expect_help <word> <yes or no>
+expect_help() {
+  local flag value value_is_next_word flags_before answer=no
+  case_count=$((case_count + 1))
+  split_flag_word "$1" "$review_flags"
+  if asks_gh_for_help; then
+    answer=yes
+  fi
+  if [[ $answer != "$2" ]]; then
+    echo "error: asks_gh_for_help must answer [$2] for [$1], but it answered [$answer]." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# gh shows its help when it reaches -h in a word of short flags, even with a value after it, because gh has no flag
+# -h of its own. It reads --help=false as no request for help.
+for word in -h --help -ch -hc -cch -hb -h=false -ch=false -hc=false; do
+  expect_help "$word" yes
+done
+# Here the h is the value of a flag, or the word holds no h.
+for word in -c --comment -bh -cbh -Rh -c=h --body=-h --help=false; do
+  expect_help "$word" no
+done
 
 finish_tests
