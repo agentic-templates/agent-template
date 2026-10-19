@@ -1,8 +1,8 @@
 # shellcheck shell=bash
-# Functions that read the open pull requests into main and answer questions about them, for scripts/start-build-run
-# and scripts/stuck-pull-requests. A pull request's checks are the ones that the rules for main require, which
-# scripts/required-checks lists. They ask gh about the repository of this checkout, or the one in GH_REPO. Run them
-# from the repository's root.
+# Functions that read the open pull requests into main and answer questions about them, for
+# scripts/merge-dependabot-pull-requests, scripts/stuck-pull-requests and scripts/wait-for-pull-requests. A pull
+# request's checks are the ones that the rules for main require, which scripts/required-checks lists. They ask gh about
+# the repository of this checkout, or the one in GH_REPO. Run them from the repository's root.
 # shellcheck source=scripts/required-checks
 source scripts/required-checks
 
@@ -14,6 +14,7 @@ source scripts/required-checks
 # - check <pull request> <ID> <name> <conclusion>, for each check run on the pull request's latest commit. A later run
 #   has a higher ID. The conclusion is empty until the run finishes.
 # - removal <pull request> <time> <reason>, for each time the merge queue removed the pull request
+# - times <pull request> <when it was opened> <when its latest commit was committed>
 # - closes <pull request> <issue> <in this repository> <state> <has the ready label>
 # A field that can be empty comes last, because read joins the tabs around an empty field.
 read_open_pull_requests() {
@@ -26,12 +27,13 @@ query($owner: String!, $repo: String!, $endCursor: String) {
     nameWithOwner
     pullRequests(states: OPEN, baseRefName: "main", first: 25, after: $endCursor) {
       nodes {
-        number isCrossRepository isInMergeQueue mergeStateStatus
+        number isCrossRepository isInMergeQueue mergeStateStatus createdAt
         author { __typename login }
         autoMergeRequest { enabledAt }
         commits(last: 1) {
           nodes {
             commit {
+              committedDate
               statusCheckRollup { contexts(first: 100) { nodes { __typename ... on CheckRun { databaseId name conclusion } } } }
             }
           }
@@ -57,6 +59,7 @@ GRAPHQL
     | (["pull-request", $number, .isCrossRepository,
         ((if .author.__typename == "Bot" then "app/" else "" end) + (.author.login // "ghost")),
         .isInMergeQueue, .mergeStateStatus, (.autoMergeRequest.enabledAt // "")] | @tsv),
+      (["times", $number, .createdAt, (.commits.nodes[0].commit.committedDate // "")] | @tsv),
       (.commits.nodes[].commit.statusCheckRollup.contexts.nodes // [] | .[] | select(.__typename == "CheckRun")
         | ["check", $number, .databaseId, .name, (.conclusion // "")] | @tsv),
       (.timelineItems.nodes[] | ["removal", $number, .createdAt, (.reason // "")] | @tsv),
@@ -145,20 +148,101 @@ have_checks_passed() {
   done <<<"$required"
 }
 
-# Succeeds if the merge queue removed a pull request, and the pull request isn't back in the queue, and auto-merge
-# wasn't turned on after the latest removal: is_out_of_queue <pull request> <in the merge queue>
-# <when auto-merge was turned on, or nothing>
-is_out_of_queue() {
+# Prints the time of the latest removal of a pull request from the merge queue, or nothing if the queue never removed
+# it: latest_removal <pull request>
+latest_removal() {
   local time latest=""
-  if [[ $2 == true ]]; then
-    return 1
-  fi
   while IFS=$'\t' read -r time _; do
     if [[ -n $time && $time > $latest ]]; then
       latest=$time
     fi
   done <<<"$(facts removal "$1")"
+  printf '%s\n' "$latest"
+}
+
+# Succeeds if the merge queue removed a pull request, and the pull request isn't back in the queue, and auto-merge
+# wasn't turned on after the latest removal: is_out_of_queue <pull request> <in the merge queue>
+# <when auto-merge was turned on, or nothing>
+is_out_of_queue() {
+  local latest
+  if [[ $2 == true ]]; then
+    return 1
+  fi
+  latest=$(latest_removal "$1")
   [[ -n $latest && ! $3 > $latest ]]
+}
+
+# Prints a sentence about the times the merge queue removed a pull request, or nothing if it never did:
+# removals_in_words <pull request> <in the merge queue> <when auto-merge was turned on, or nothing>
+removals_in_words() {
+  local time reason count=0 reasons="" sentence
+  while IFS=$'\t' read -r time reason; do
+    if [[ -n $time ]]; then
+      count=$((count + 1))
+      reasons+=${reason:-unknown}$'\n'
+    fi
+  done <<<"$(facts removal "$1")"
+  if ((count == 0)); then
+    return 0
+  fi
+  if ((count == 1)); then
+    sentence="The merge queue removed it 1 time, with the reason $(in_words "$reasons")"
+  else
+    sentence="The merge queue removed it $count times, with the reasons $(in_words "$reasons")"
+  fi
+  if is_out_of_queue "$1" "$2" "$3"; then
+    sentence+=", and it isn't back in the queue"
+  fi
+  echo "$sentence."
+}
+
+# Dependabot stops rebasing a pull request of its own that's older than this, as "Managing pull requests for
+# dependency updates" in GitHub's docs says.
+dependabot_rebase_days=30
+
+# Succeeds if a pull request is too old for Dependabot to rebase it: is_too_old_for_dependabot_rebases <pull request>
+# CURRENT_TIME, in GitHub's time format, stands in for the clock, for the tests.
+is_too_old_for_dependabot_rebases() {
+  local opened _committed cutoff
+  IFS=$'\t' read -r opened _committed <<<"$(facts times "$1")"
+  if [[ -z $opened ]]; then
+    return 1
+  fi
+  # shellcheck disable=SC2016 # $now and $days are jq variables, which jq expands.
+  cutoff=$(jq -rn --arg now "${CURRENT_TIME:-}" --argjson days "$dependabot_rebase_days" \
+    '(if $now == "" then now else ($now | fromdateiso8601) end) - $days * 86400 | floor | todateiso8601')
+  [[ $opened < $cutoff ]]
+}
+
+# Succeeds if a pull request has a commit that was committed after its latest removal from the merge queue:
+# has_commit_since_removal <pull request>
+has_commit_since_removal() {
+  local _opened committed
+  IFS=$'\t' read -r _opened committed <<<"$(facts times "$1")"
+  [[ -n $committed && $committed > $(latest_removal "$1") ]]
+}
+
+# Prints what keeps one of Dependabot's pull requests from merging without the orchestrator, as sentences, or nothing
+# if nothing does: dependabot_problems <pull request> <in the merge queue> <merge state>
+# <when auto-merge was turned on, or nothing>
+# A DIRTY pull request isn't a problem while Dependabot still rebases it. A removal from the merge queue isn't one
+# once Dependabot has pushed a commit after it, such as a rebase after a conflict with another of its updates.
+dependabot_problems() {
+  local problems="" failed
+  if [[ $2 == true ]]; then
+    return 0
+  fi
+  if [[ $3 == DIRTY ]] && is_too_old_for_dependabot_rebases "$1"; then
+    problems+=" It's DIRTY, and Dependabot doesn't rebase a pull request that's older than $dependabot_rebase_days days."
+  fi
+  failed=$(failed_checks_in_words "$1")
+  if [[ -n $failed ]]; then
+    problems+=" The $failed failed."
+  fi
+  if is_out_of_queue "$1" "$2" "$4" && ! has_commit_since_removal "$1"; then
+    problems+=" $(removals_in_words "$1" "$2" "$4")"
+  fi
+  printf '%s\n' "${problems# }"
 }
 
 # Prints each open issue in this repository that a pull request closes: open_issues_closed_by <pull request>

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Turns on auto-merge for each open pull request of Dependabot's into main that can merge without the orchestrator, so
+# that it merges once its checks pass, as "Land" in docs/loop.md describes. It skips one that comes from a fork, is in
+# the merge state UNKNOWN or DIRTY, has auto-merge on already, is in the merge queue, or that dependabot_problems in
+# scripts/open-pull-requests finds a problem with. While scripts/check-main-rules exits with code 1, it turns on none,
+# and prints that script's error.
+# It stops with an error, and exits with code 1, when gh fails. It asks gh about the repository of this checkout,
+# or the one in GH_REPO.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/open-pull-requests
+source scripts/open-pull-requests
+
+# Prints the numbers of the pull requests to turn auto-merge on for, one to a line, from what read_open_pull_requests
+# read.
+pull_requests_to_merge() {
+  local kind number is_from_fork author is_in_queue merge_state auto_merge_since
+  while IFS=$'\t' read -r kind number is_from_fork author is_in_queue merge_state auto_merge_since; do
+    if [[ $kind != pull-request || $is_from_fork == true ]] || ! is_by_dependabot "$author"; then
+      continue
+    fi
+    if [[ $merge_state == UNKNOWN || $merge_state == DIRTY || -n $auto_merge_since || $is_in_queue == true ]]; then
+      continue
+    fi
+    if [[ -z $(dependabot_problems "$number" "$is_in_queue" "$merge_state" "$auto_merge_since") ]]; then
+      printf '%s\n' "$number"
+    fi
+  done <<<"$pull_requests"
+}
+
+# read_open_pull_requests prints its own error.
+read_open_pull_requests || exit 1
+to_merge=$(pull_requests_to_merge)
+if [[ -z $to_merge ]]; then
+  exit 0
+fi
+
+# Like the hook for gh pr merge, the script goes ahead when scripts/check-main-rules can't tell.
+status=0
+problem=$(scripts/check-main-rules 2>&1) || status=$?
+if ((status == 1)); then
+  printf '%s\n' "$problem" >&2
+  echo "error: scripts/merge-dependabot-pull-requests turned on auto-merge for no pull request of Dependabot's, because of the error above. Go on with the other work, and ask the maintainer about it." >&2
+  exit 0
+fi
+
+for number in $to_merge; do
+  # With checks that have passed, gh pr merge adds the pull request to the merge queue instead.
+  if ! answer=$(gh pr merge "$number" 2>&1 </dev/null); then
+    echo "error: can't turn on auto-merge for pull request $number of Dependabot's, because gh failed: $answer" >&2
+    exit 1
+  fi
+done
