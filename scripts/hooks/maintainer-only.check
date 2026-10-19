@@ -1,0 +1,716 @@
+#!/usr/bin/env bash
+# Blocks the actions that only the maintainer may take, with a message that says what to do instead:
+# - sudo, doas and su, and the commands that change the machine's disks, settings or security, such as defaults write
+# - writing a settings file in the home folder, such as ~/.zshrc, a file in ~/.config/ or ~/.claude/settings.json, with
+#   a redirection, tee, cp and the like, sed -i, perl -i or the agent's file-writing tool, and git config --global or
+#   --system
+# - deleting with rm, find and the like outside the repository's worktrees and the temporary folders
+# - making a gist public, and making a repository public or posting with gh to a repository other than this one, unless
+#   the list of allowed repositories names it. The list is .loop/allowed-repositories in the main checkout, with one
+#   owner/name to a line.
+# - pushing to a URL instead of a remote, and git push --no-verify, which skips the leak scan
+# - gh pr merge --admin, and changing the repository's rulesets or security settings with gh api, gh repo edit or
+#   gh repo deploy-key
+# - printing the whole environment with env or printenv, because it holds tokens
+# A path or a repository that a variable other than HOME decides goes ahead, because the hook can't tell it before the
+# command runs.
+# shellcheck source=scripts/hooks/helpers.bash
+source "${BASH_SOURCE[0]%/*}/helpers.bash"
+
+# The flags that take a value, as gh repo create --help and gh repo edit --help list them.
+repo_create_flags_with_value=" -d --description -g --gitignore -h --homepage -l --license -r --remote -s --source -t --team -p --template "
+repo_edit_flags_with_value=" --add-topic --default-branch -d --description -h --homepage --remove-topic --squash-merge-commit-message --visibility "
+
+# The endpoints of gh api that hold the repository's rules and security settings, such as its rulesets, its deploy
+# keys and the settings that scripts/configure-github turns on.
+security_endpoint='rulesets|/protection|/collaborators|/keys|/hooks|actions/permissions|/environments|vulnerability-alerts|automated-security-fixes|private-vulnerability-reporting|code-scanning/default-setup'
+
+ask="Ask the maintainer, and go on with the other work."
+# AGENTS.md lets agents make public the repositories that they create from this template to test it.
+test_repositories="If it's a repository that agents created from this template to test it, add its owner/name to .loop/allowed-repositories in the main checkout first. Otherwise, ask the maintainer, and go on with the other work."
+security_change="Blocked: this changes the repository's rules or security settings, and only the maintainer may do that. $ask"
+
+# The physical path of the home folder, and the folders inside which an agent may delete, which is_settings_file and
+# may_delete find when they first need them.
+physical_home=""
+deletable_folders=()
+
+# Succeeds if a word is one of the others: is_one_of <word> <other>...
+is_one_of() {
+  local word=$1 other
+  shift
+  for other in "$@"; do
+    if [[ $word == "$other" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Prints the physical path that a word names, or fails when the hook can't tell it: when a variable other than HOME
+# decides it, or when it's relative and the folder is unknown:
+# resolved_path <word> <folder that a relative path starts from, or empty when the hook can't tell it>
+resolved_path() {
+  if ! expand_home "$1" || [[ $expanded_path != /* && -z $2 ]]; then
+    return 1
+  fi
+  physical_path "$expanded_path" "$2"
+}
+
+# Blocks sudo, doas and su, also after env or NAME=value words: check_sudo <the words before the command's name>...
+check_sudo() {
+  local word name=${command_words[0]:-}
+  name=${name##*/}
+  # drop_command_prefixes drops each sudo before the command's name.
+  for word in "$@"; do
+    if [[ $word == sudo ]]; then
+      name=sudo
+    fi
+  done
+  if is_one_of "$name" sudo doas su; then
+    block "Blocked: $name runs a command as another user, such as the machine's administrator, and only the maintainer may change the machine's settings or security. Do the work without $name, such as in the repository or a temporary folder, or ask the maintainer."
+  fi
+}
+
+# Succeeds if command_words changes the machine's disks, settings or security. For a command that can also only read
+# them, its first argument usually tells which, as in defaults read and defaults write.
+changes_machine() {
+  local name=${command_words[0]##*/} first=${command_words[1]:-} i word operand=""
+  case $name in
+    mkfs* | newfs* | fdisk | gpt | csrutil | spctl | systemsetup | nvram | kextload | kextunload | fdesetup | profiles | \
+      chsh | dscl | passwd | shutdown | reboot | halt | ufw | iptables | pfctl | bless)
+      return 0
+      ;;
+    diskutil) ! is_one_of "$first" list info activity ;;
+    defaults) ! is_one_of "$first" read read-type domains find help ;;
+    launchctl) ! is_one_of "$first" list print print-disabled getenv help version blame ;;
+    crontab) [[ $first != -l ]] ;;
+    pmset) [[ $first != -g ]] ;;
+    scutil) ! is_one_of "$first" --get --dns --proxy --nwi -r ;;
+    networksetup) [[ ! $first =~ ^-(list|get|print) ]] ;;
+    softwareupdate) ! is_one_of "$first" -l --list --history ;;
+    tmutil) ! is_one_of "$first" status listbackups latestbackup destinationinfo machinedirectory version ;;
+    systemctl)
+      # The first word that isn't an option, as in systemctl --user restart app
+      for ((i = 1; i < ${#command_words[@]}; i++)); do
+        if [[ ${command_words[i]} != -* ]]; then
+          operand=${command_words[i]}
+          break
+        fi
+      done
+      ! is_one_of "$operand" "" status show cat list-units list-unit-files list-timers is-active is-enabled is-failed help
+      ;;
+    sysctl | dd)
+      for ((i = 1; i < ${#command_words[@]}; i++)); do
+        word=${command_words[i]}
+        if [[ ($name == sysctl && ($word == -w || $word == *=*)) || ($name == dd && $word == of=/dev/*) ]]; then
+          return 0
+        fi
+      done
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# Succeeds if the simple command prints the whole environment: printenv without a name, or env without a command.
+# drop_command_prefixes drops env and its NAME=value words: prints_environment <the words before the command's name>...
+prints_environment() {
+  local word printer=""
+  local -a rest=(${command_words[@]+"${command_words[@]}"})
+  for word in "$@"; do
+    if [[ $word == env ]]; then
+      printer="env"
+    fi
+  done
+  if ((${#rest[@]} > 0)) && is_one_of "${rest[0]##*/}" env printenv; then
+    printer=${rest[0]##*/}
+    rest=("${rest[@]:1}")
+  fi
+  if [[ -z $printer ]]; then
+    return 1
+  fi
+  # Any other word is a command that env runs, or a variable that printenv prints.
+  for word in ${rest[@]+"${rest[@]}"}; do
+    if [[ $word != -* && ! ($printer == env && $word =~ ^[A-Za-z_][A-Za-z0-9_]*=) ]]; then
+      return 1
+    fi
+  done
+}
+
+# Succeeds if a physical path is a settings file of the machine or of a tool in the home folder: a file right in the
+# home folder whose name starts with a dot, such as .zshrc, a file in .config/, .ssh/ or Library/LaunchAgents/, or the
+# settings of Claude Code or Codex: is_settings_file <physical path>
+is_settings_file() {
+  local relative
+  if [[ -z $physical_home ]]; then
+    physical_home=$(physical_path "$HOME" /)
+  fi
+  if [[ $1 != "$physical_home"/* ]]; then
+    return 1
+  fi
+  relative=${1#"$physical_home"/}
+  [[ $relative =~ ^(\.[^/]+|\.config/.+|\.ssh/.+|\.claude/settings[^/]*\.json|\.codex/config\.toml|Library/LaunchAgents/.+)$ ]]
+}
+
+# Blocks a write to a settings file in the home folder:
+# block_if_settings_file <path as the command or the tool names it> <folder that a relative path starts from, or empty>
+# [<the part of the action to log, if not the simple command>]
+block_if_settings_file() {
+  local path
+  path=$(resolved_path "$1" "$2") || return 0
+  if is_settings_file "$path"; then
+    block "Blocked: $1 holds settings of the machine or of a tool, and only the maintainer may change them. $ask" ${3+"$3"}
+  fi
+}
+
+# Blocks cp, mv, install or ln when it writes a settings file in the home folder: the file that its last word names,
+# or a file in the folder that its last word or -t names.
+check_copy() {
+  local name=${command_words[0]##*/} with_value=" -S --suffix " i word folder="" destination path source
+  local -a operands=()
+  if [[ $name == install ]]; then
+    with_value+="-m --mode -o --owner -g --group "
+  fi
+  for ((i = 1; i < ${#command_words[@]}; i++)); do
+    word=${command_words[i]}
+    case $word in
+      -t | --target-directory)
+        folder=${command_words[i + 1]:-}
+        i=$((i + 1))
+        ;;
+      --target-directory=*) folder=${word#*=} ;;
+      -*)
+        if [[ $with_value == *" $word "* ]]; then
+          i=$((i + 1))
+        fi
+        ;;
+      *) operands+=("$word") ;;
+    esac
+  done
+  if [[ -z $folder ]]; then
+    # With one word, ln makes the link in the folder that it runs in, and the other commands fail.
+    if ((${#operands[@]} < 2)); then
+      return 0
+    fi
+    destination=${operands[${#operands[@]} - 1]}
+    unset 'operands[${#operands[@]} - 1]'
+    path=$(resolved_path "$destination" "$command_folder") || return 0
+    if [[ ! -d $path && $destination != */ ]]; then
+      block_if_settings_file "$destination" "$command_folder"
+      return 0
+    fi
+    folder=$destination
+  fi
+  for source in ${operands[@]+"${operands[@]}"}; do
+    source=${source%/}
+    block_if_settings_file "${folder%/}/${source##*/}" "$command_folder"
+  done
+}
+
+# Blocks sed -i or perl -i when it changes a settings file in the home folder.
+check_in_place_edit() {
+  local name=${command_words[0]##*/} with_value in_place_option i word in_place=""
+  local -a operands=()
+  # -i, or a group of the options that take no value, such as sed -ni or perl -pi, also with a suffix, as in -i.bak
+  case $name in
+    sed)
+      with_value=" -e --expression -f --file "
+      in_place_option='^-[nrEsuz]*i'
+      ;;
+    perl)
+      with_value=" -e -E "
+      in_place_option='^-[pnaslwtTWX]*i'
+      ;;
+  esac
+  for ((i = 1; i < ${#command_words[@]}; i++)); do
+    word=${command_words[i]}
+    if [[ $word != -* ]]; then
+      operands+=("$word")
+    elif [[ $with_value == *" $word "* ]]; then
+      i=$((i + 1))
+    elif [[ $word == --in-place || $word == --in-place=* || $word =~ $in_place_option ]]; then
+      in_place=yes
+      # The sed of macOS takes the word after -i as the suffix of a backup, such as '' or .bak.
+      if [[ $name == sed && $word == -i ]] && [[ -z ${command_words[i + 1]:-} || ${command_words[i + 1]:-} == .* ]]; then
+        i=$((i + 1))
+      fi
+    fi
+  done
+  if [[ -z $in_place ]]; then
+    return 0
+  fi
+  # The first word can be the script rather than a file, but a script doesn't name a settings file.
+  for word in ${operands[@]+"${operands[@]}"}; do
+    block_if_settings_file "$word" "$command_folder"
+  done
+}
+
+# Blocks git config when it changes the settings of git for the person, with --global, or for the machine, with
+# --system. It allows reading them, as with --get or --list, or with a name and no value.
+check_git_config() {
+  local i word scope="" writes="" count=0 first=""
+  for ((i = git_subcommand + 1; i < ${#command_words[@]}; i++)); do
+    word=${command_words[i]}
+    case $word in
+      --global | --system) scope=$word ;;
+      --get | --get-all | --get-regexp | --get-urlmatch | --get-color | --get-colorbool | -l | --list) return 0 ;;
+      --add | --append | --replace-all | --unset | --unset-all | --rename-section | --remove-section | -e | --edit)
+        writes=yes
+        ;;
+      # The options that take the next word as their value, as git config -h lists them
+      -f | --file | --blob | --type | --default | --comment) i=$((i + 1)) ;;
+      -*) ;;
+      *)
+        count=$((count + 1))
+        if ((count == 1)); then
+          first=$word
+        fi
+        ;;
+    esac
+  done
+  if [[ -z $scope ]]; then
+    return 0
+  fi
+  case $first in
+    get | list) return 0 ;;
+    set | unset | rename-section | remove-section | edit) writes=yes ;;
+  esac
+  if [[ -n $writes ]] || ((count > 1)); then
+    block "Blocked: git config $scope changes the settings of git outside this repository, and only the maintainer may change them. $ask"
+  fi
+}
+
+# Sets deletable_folders to the folders inside which an agent may delete: the repository's worktrees, the main checkout
+# among them, and the temporary folders.
+find_deletable_folders() {
+  local line folder
+  # The hook's own checkout counts too, in case git can't list the worktrees.
+  deletable_folders=("$(physical_path "$hooks_folder/../.." /)")
+  # git lists each worktree's physical path.
+  while IFS= read -r line; do
+    if [[ $line == "worktree "* ]]; then
+      deletable_folders+=("${line#worktree }")
+    fi
+  done < <(git -C "$hooks_folder" worktree list --porcelain 2>/dev/null)
+  for folder in "${TMPDIR:-/tmp}" /tmp /var/folders; do
+    deletable_folders+=("$(physical_path "$folder" /)")
+  done
+}
+
+# Succeeds if a command may delete a physical path: one inside the repository's worktrees or the temporary folders,
+# or for find, which deletes only inside the folders that it starts from, one of those folders too:
+# may_delete <physical path> <the command's name>
+may_delete() {
+  local folder
+  if ((${#deletable_folders[@]} == 0)); then
+    find_deletable_folders
+  fi
+  for folder in "${deletable_folders[@]}"; do
+    if [[ $1 == "$folder"/* || ($2 == find && $1 == "$folder") ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+is_deleting_command() {
+  is_one_of "$1" rm rmdir unlink shred srm trash
+}
+
+# Succeeds if the find command in command_words deletes what it finds, with -delete, or with -exec and the like
+# followed by a command that deletes, as in -exec rm {} +.
+find_deletes() {
+  local i next
+  for ((i = 1; i < ${#command_words[@]}; i++)); do
+    case ${command_words[i]} in
+      -delete) return 0 ;;
+      -exec | -execdir | -ok | -okdir)
+        next=${command_words[i + 1]:-}
+        if is_deleting_command "${next##*/}"; then
+          return 0
+        fi
+        ;;
+    esac
+  done
+  return 1
+}
+
+# Blocks a command that deletes outside the repository's worktrees and the temporary folders.
+check_delete() {
+  local name=${command_words[0]##*/} i word path what
+  local -a targets=()
+  if is_deleting_command "$name"; then
+    for ((i = 1; i < ${#command_words[@]}; i++)); do
+      if [[ ${command_words[i]} != -* ]]; then
+        targets+=("${command_words[i]}")
+      fi
+    done
+  elif [[ $name == find ]] && find_deletes; then
+    # The folders that find starts from come before its first expression, which starts with -, ( or !.
+    for ((i = 1; i < ${#command_words[@]}; i++)); do
+      if [[ ${command_words[i]} == [-\(\!]* ]]; then
+        break
+      fi
+      targets+=("${command_words[i]}")
+    done
+  fi
+  for word in ${targets[@]+"${targets[@]}"}; do
+    path=$(resolved_path "$word" "$command_folder") || continue
+    if may_delete "$path" "$name"; then
+      continue
+    fi
+    what=$word
+    if [[ $name == find ]]; then
+      what="files in $word"
+    fi
+    block "Blocked: $name would delete $what, and only the maintainer may delete outside the repository, its worktrees and the temporary folders. Delete only inside them, or ask the maintainer."
+  done
+}
+
+check_git_push() {
+  read_push_arguments
+  if has_flag --no-verify; then
+    block "Blocked: --no-verify skips the pre-push hook, which scans the push for leaks. Push without it. If the scan finds a leak, take it out of the commits."
+  fi
+  # A URL, or an address such as git@github.com:owner/name.git
+  if [[ $push_remote == *://* || $push_remote =~ ^[^/]+@[^/]+: ]]; then
+    block "Blocked: this pushes to a URL instead of a remote, and only the maintainer may do that. Push to a remote that git remote -v lists, such as origin, or ask the maintainer."
+  fi
+}
+
+# Sets name_with_owner to owner/name of a repository as gh or git names it: owner/name, host/owner/name, a URL such as
+# https://github.com/owner/name/issues/5, or an address such as git@github.com:owner/name.git:
+# read_name_with_owner <repository>
+read_name_with_owner() {
+  local name=$1 owner
+  if [[ $name =~ ^[A-Za-z][A-Za-z0-9+.-]*://[^/]+/([^/]+/[^/]+) ]]; then
+    name=${BASH_REMATCH[1]}
+  elif [[ $name =~ ^[^/]+:(.+)$ ]]; then
+    name=${BASH_REMATCH[1]}
+  fi
+  name=${name%/}
+  name=${name%.git}
+  if [[ $name == */*/* ]]; then
+    owner=${name%/*}
+    name=${owner##*/}/${name##*/}
+  fi
+  name_with_owner=$name
+}
+
+# Succeeds if the list of allowed repositories names a repository, in any case. HOOK_ALLOWED_REPOSITORIES names another
+# list, as in the hooks' tests: is_allowed <repository>
+is_allowed() {
+  local wanted list=${HOOK_ALLOWED_REPOSITORIES:-} line
+  if [[ -z $1 ]]; then
+    return 1
+  fi
+  read_name_with_owner "$1"
+  wanted=$name_with_owner
+  if [[ -z $list ]]; then
+    list=$(hook_loop_folder)/allowed-repositories || return 1
+  fi
+  if [[ ! -f $list ]]; then
+    return 1
+  fi
+  shopt -s nocasematch
+  while read -r line || [[ -n $line ]]; do
+    read_name_with_owner "$line"
+    if [[ -n $line && $name_with_owner == "$wanted" ]]; then
+      shopt -u nocasematch
+      return 0
+    fi
+  done <"$list"
+  shopt -u nocasematch
+  return 1
+}
+
+# Succeeds if an agent may post to a repository, as gh or git names it: this hook's repository, which its origin names,
+# or one that the list of allowed repositories names. Without an origin, the hook can't tell which repository is this
+# one, so it allows them all: may_post_to <repository>
+may_post_to() {
+  local origin
+  origin=$(git -C "$hooks_folder" remote get-url origin 2>/dev/null) || return 0
+  read_name_with_owner "$origin"
+  origin=$name_with_owner
+  read_name_with_owner "$1"
+  shopt -s nocasematch
+  if [[ $name_with_owner == "$origin" ]]; then
+    shopt -u nocasematch
+    return 0
+  fi
+  shopt -u nocasematch
+  is_allowed "$1"
+}
+
+# Blocks making a repository public, unless the list of allowed repositories names it:
+# block_if_public_unless_allowed <repository, or empty when the command names none> <what the message calls it then>
+block_if_public_unless_allowed() {
+  local name=$2
+  if is_allowed "$1"; then
+    return 0
+  fi
+  if [[ -n $1 ]]; then
+    read_name_with_owner "$1"
+    name=$name_with_owner
+  fi
+  block "Blocked: this makes $name public, and only the maintainer may make a repository public. $test_repositories"
+}
+
+check_repo_create() {
+  read_arguments 3 "$repo_create_flags_with_value"
+  if has_flag --public; then
+    block_if_public_unless_allowed "$argument" "a new repository"
+  fi
+}
+
+check_repo_edit() {
+  local i visibility=""
+  read_arguments 3 "$repo_edit_flags_with_value"
+  for ((i = 0; i < ${#flags[@]}; i++)); do
+    case ${flags[i]} in
+      --visibility) visibility=${flag_values[i]} ;;
+      --visibility=*) visibility=${flags[i]#--visibility=} ;;
+      --enable-secret-scanning=false | --enable-secret-scanning-push-protection=false | --enable-advanced-security=false)
+        block "$security_change"
+        ;;
+    esac
+  done
+  if [[ $visibility == public ]]; then
+    block_if_public_unless_allowed "$argument" "this repository"
+  fi
+}
+
+check_gh_api() {
+  local i field="" makes_public=""
+  read_arguments 2 "$api_flags_with_value"
+  read_api_method
+  if [[ $api_method == GET ]]; then
+    return 0
+  fi
+  if [[ $argument =~ $security_endpoint ]]; then
+    block "$security_change"
+  fi
+  for ((i = 0; i < ${#flags[@]}; i++)); do
+    case ${flags[i]} in
+      -f | -F | --field | --raw-field) field=${flag_values[i]} ;;
+      --field=* | --raw-field=*) field=${flags[i]#*=} ;;
+      -f?* | -F?*) field=${flags[i]:2} ;;
+      *) continue ;;
+    esac
+    case $field in
+      security_and_analysis*) block "$security_change" ;;
+      private=false | visibility=public) makes_public=yes ;;
+    esac
+  done
+  if [[ -n $makes_public ]]; then
+    find_destination
+    block_if_public_unless_allowed "$destination" "a repository"
+  fi
+}
+
+# Succeeds if the gh command in command_words can post or change something on GitHub, rather than only read it.
+# For gh api, run read_arguments and read_api_method first.
+gh_posts() {
+  case ${command_words[1]:-} in
+    api) [[ $api_method != GET ]] ;;
+    "" | -* | search | status | browse | auth | config | alias | extension | completion | help | version) return 1 ;;
+    *)
+      case ${command_words[2]:-} in
+        "" | -* | list | view | status | diff | checks | check | download | watch | clone | checkout) return 1 ;;
+      esac
+      ;;
+  esac
+}
+
+# The flags of gh commands that take text, which can hold the URL of an issue of another repository
+text_flags=" -b --body -t --title -c --comment -F --body-file --description -n --notes --notes-file --subject -T --template "
+
+# Sets destination to the repository that a gh command posts to, as the command or git names it, or to empty when the
+# hook can't tell. gh takes the repository from the first of these that it finds:
+# - the endpoint of gh api, such as repos/owner/name/issues, unless it's repos/{owner}/{repo}
+# - for any other command, -R or --repo, the repository that gh repo edit and the like take, or the URL of an issue or
+#   a pull request
+# - GH_REPO, whose value check_gh puts in gh_repo
+# - the remote named origin of the folder that the command runs in
+# For gh api, run read_arguments first.
+find_destination() {
+  local origin
+  destination=""
+  if [[ ${command_words[1]:-} == api ]]; then
+    if [[ ! $argument =~ ^/?repos/([^/]+/[^/?#]+) ]]; then
+      return 0
+    fi
+    if [[ ${BASH_REMATCH[1]} != "{owner}/{repo}" ]]; then
+      destination=${BASH_REMATCH[1]}
+      return 0
+    fi
+  else
+    find_named_repository
+  fi
+  if [[ -n $destination ]]; then
+    return 0
+  fi
+  if [[ -n $gh_repo ]]; then
+    destination=$gh_repo
+    return 0
+  fi
+  if [[ -z $command_folder ]]; then
+    return 0
+  fi
+  origin=$(git -C "$command_folder" remote get-url origin 2>/dev/null) || return 0
+  # gh posts to a repository on a host, such as https://github.com/owner/name or git@github.com:owner/name, and fails
+  # for a repository in a local folder.
+  if [[ $origin =~ ^(https?|ssh|git):// || ($origin != *://* && $origin =~ ^[^/]+:) ]]; then
+    destination=$origin
+  fi
+}
+
+# Sets destination to the repository that the words of a gh command other than gh api name, or to empty.
+find_named_repository() {
+  local i word
+  destination=""
+  for ((i = 2; i < ${#command_words[@]}; i++)); do
+    word=${command_words[i]}
+    case $word in
+      -R | --repo)
+        destination=${command_words[i + 1]:-}
+        return 0
+        ;;
+      --repo=*)
+        destination=${word#--repo=}
+        return 0
+        ;;
+      -R?*)
+        destination=${word#-R}
+        return 0
+        ;;
+    esac
+  done
+  if [[ ${command_words[1]:-} == repo ]]; then
+    case ${command_words[2]:-} in
+      edit) read_arguments 3 "$repo_edit_flags_with_value" ;;
+      delete | archive | unarchive) read_arguments 3 " " ;;
+      *) return 0 ;;
+    esac
+    destination=$argument
+    return 0
+  fi
+  # The URL can stand anywhere among the words after the subcommand.
+  for ((i = 3; i < ${#command_words[@]}; i++)); do
+    word=${command_words[i]}
+    if [[ $text_flags == *" $word "* ]]; then
+      i=$((i + 1))
+    elif [[ $word =~ ^https?://[^/]+/[^/]+/[^/]+ ]]; then
+      destination=$word
+      return 0
+    fi
+  done
+}
+
+# Blocks a gh command that posts to a repository other than this one, unless the list of allowed repositories names
+# it.
+check_destination() {
+  if ! gh_posts; then
+    return 0
+  fi
+  find_destination
+  if [[ -z $destination || $destination == *[\$\`]* ]] || may_post_to "$destination"; then
+    return 0
+  fi
+  read_name_with_owner "$destination"
+  block "Blocked: this posts to $name_with_owner, which isn't this repository, and only the maintainer may post to another repository. $test_repositories"
+}
+
+# check_gh <the words before the command's name, such as GH_REPO=owner/name>...
+check_gh() {
+  local word
+  gh_repo=""
+  for word in "$@"; do
+    if [[ $word == GH_REPO=* ]]; then
+      gh_repo=${word#GH_REPO=}
+    fi
+  done
+  move_gh_repository_flags
+  case "${command_words[1]:-} ${command_words[2]:-}" in
+    "pr merge")
+      read_arguments 3 "$merge_flags_with_value"
+      if has_flag --admin; then
+        block "Blocked: --admin merges the pull request without the checks that main requires, and only the maintainer may skip them. Merge without --admin, so that the merge waits for the checks."
+      fi
+      ;;
+    "repo create" | "repo new") check_repo_create ;;
+    "repo edit") check_repo_edit ;;
+    "repo deploy-key")
+      if [[ ${command_words[3]:-} == add || ${command_words[3]:-} == delete ]]; then
+        block "$security_change"
+      fi
+      ;;
+    "gist create" | "gist new")
+      # The flags that take a value, as gh gist create --help lists them
+      read_arguments 3 " -d --desc -f --filename "
+      if has_flag -p --public; then
+        block "Blocked: this makes a gist public, and only the maintainer may make something public outside this repository. $ask"
+      fi
+      ;;
+    "api "*) check_gh_api ;;
+  esac
+  check_destination
+}
+
+check_simple_command() {
+  local prefix_count file i
+  drop_command_prefixes "$@"
+  # The words that drop_command_prefixes dropped, such as sudo or env
+  prefix_count=$(($# - ${#command_words[@]}))
+  check_sudo "${@:1:prefix_count}"
+  written_files=()
+  record_written_files
+  for file in ${written_files[@]+"${written_files[@]}"}; do
+    block_if_settings_file "$file" "$command_folder"
+  done
+  if prints_environment "${@:1:prefix_count}"; then
+    block "Blocked: this command prints the whole environment, which holds tokens. Print only the variables you need, by name, as in printenv PATH."
+  fi
+  if ((${#command_words[@]} == 0)); then
+    return 0
+  fi
+  if changes_machine; then
+    block "Blocked: this ${command_words[0]##*/} command changes the machine's disks, settings or security, and only the maintainer may do that. $ask"
+  fi
+  case ${command_words[0]##*/} in
+    tee)
+      for ((i = 1; i < ${#command_words[@]}; i++)); do
+        if [[ ${command_words[i]} != -* ]]; then
+          block_if_settings_file "${command_words[i]}" "$command_folder"
+        fi
+      done
+      ;;
+    cp | mv | install | ln) check_copy ;;
+    sed | perl) check_in_place_edit ;;
+    git)
+      read_git_options
+      case ${command_words[git_subcommand]:-} in
+        push) check_git_push ;;
+        config) check_git_config ;;
+      esac
+      ;;
+    gh) check_gh "${@:1:prefix_count}" ;;
+  esac
+  check_delete
+  follow_cd
+}
+
+read_input
+case $tool_name in
+  Bash)
+    command_folder=${cwd:-$PWD}
+    for_each_simple_command check_simple_command "$shell_command"
+    ;;
+  Write | Edit | apply_patch)
+    read_tool_paths
+    for path in ${tool_paths[@]+"${tool_paths[@]}"}; do
+      block_if_settings_file "$path" "${cwd:-$PWD}" "$path"
+    done
+    ;;
+esac
