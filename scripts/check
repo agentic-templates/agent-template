@@ -103,9 +103,7 @@ if [[ -n "$found_home_path" ]]; then
   exit 1
 fi
 
-# Each AGENTS.md stays small, because an agent reads every one from the root down to the folder it works in.
-max_lines=199
-max_bytes=24999
+# Codex reads the AGENTS.md files from the root down to the folder it works in, up to a size limit for all of them together.
 max_bytes_on_one_path=31999
 advice='Move a procedure that only one kind of request needs into a guide of its own.'
 too_big=""
@@ -120,22 +118,6 @@ done < <(git ls-files -z -- AGENTS.md '*/AGENTS.md')
 
 if ((${#agents_files[@]} > 0)); then
   for file in "${agents_files[@]}"; do
-    lines=$(($(wc -l < "$file")))
-    bytes=$(($(wc -c < "$file")))
-    if ((lines > max_lines)); then
-      echo "error: $file has $lines lines, and the limit is $max_lines. $advice" >&2
-      too_big=yes
-    fi
-    if ((bytes > max_bytes)); then
-      echo "error: $file has $bytes bytes, and the limit is $max_bytes. $advice" >&2
-      too_big=yes
-    fi
-  done
-fi
-
-# Codex reads the AGENTS.md files from the root down to the folder it works in, up to a size limit for all of them together.
-if ((${#agents_files[@]} > 0)); then
-  for file in "${agents_files[@]}"; do
     folder=$(dirname "$file")
     bytes_on_path=0
     files_on_path=0
@@ -146,10 +128,15 @@ if ((${#agents_files[@]} > 0)); then
         files_on_path=$((files_on_path + 1))
       fi
     done
-    if ((files_on_path > 1 && bytes_on_path > max_bytes_on_one_path)); then
-      echo "error: the AGENTS.md files from the root down to $folder have $bytes_on_path bytes together, and the limit is $max_bytes_on_one_path. $advice" >&2
-      too_big=yes
+    if ((bytes_on_path <= max_bytes_on_one_path)); then
+      continue
     fi
+    if ((files_on_path == 1)); then
+      echo "error: $file has $bytes_on_path bytes, and the limit is $max_bytes_on_one_path. $advice" >&2
+    else
+      echo "error: the AGENTS.md files from the root down to $folder have $bytes_on_path bytes together, and the limit is $max_bytes_on_one_path. $advice" >&2
+    fi
+    too_big=yes
   done
 fi
 if [[ -n "$too_big" ]]; then

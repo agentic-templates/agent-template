@@ -396,36 +396,44 @@ write_lines() {
   done > "$file"
 }
 
-# Adds a line of x's to the end of a file in the copy, so that the file has the given number of bytes:
-# pad_to <path in the copy> <bytes>
+# Adds lines of x's to the end of a file in the copy, so that the file has the given number of bytes, and the given
+# number of lines if there is one: pad_to <path in the copy> <bytes> [<lines>]
 pad_to() {
-  local file=$1 bytes=$2 missing
-  missing=$((bytes - $(wc -c < "$copy/$file")))
-  if ((missing < 1)); then
-    echo "error: $file has $bytes bytes or more, so scripts/test-check can't pad it to $bytes. Raise that size in each case that pads it, and lower the sizes of the other files in the case by as much." >&2
+  local file=$1 bytes=$2 lines=${3:-} missing_lines=1 missing_bytes added
+  if [[ -n $lines ]]; then
+    missing_lines=$((lines - $(wc -l < "$copy/$file")))
+  fi
+  missing_bytes=$((bytes - $(wc -c < "$copy/$file")))
+  # Each added line but the last is an x and its line ending.
+  if ((missing_lines < 1 || missing_bytes < 2 * missing_lines - 1)); then
+    echo "error: $file is too big for scripts/test-check to pad it to $bytes bytes${lines:+ and $lines lines}. Raise that size in each case that pads it, and lower the sizes of the other files in the case by as much." >&2
     exit 1
   fi
-  printf '%s\n' "$(printf '%*s' $((missing - 1)) '' | tr ' ' x)" >> "$copy/$file"
+  for ((added = 1; added < missing_lines; added++)); do
+    printf 'x\n'
+  done >> "$copy/$file"
+  printf '%s\n' "$(printf '%*s' $((missing_bytes - 2 * (missing_lines - 1) - 1)) '' | tr ' ' x)" >> "$copy/$file"
 }
 
-agents_md_of_200_lines() {
-  write_lines "$copy/src/AGENTS.md" 200 10
+agents_md_of_200_lines_and_25000_bytes() {
+  pad_to AGENTS.md 25000 200
 }
 
-agents_md_of_199_lines() {
-  write_lines "$copy/src/AGENTS.md" 199 10
+agents_md_of_32000_bytes() {
+  pad_to AGENTS.md 32000
 }
 
-agents_md_of_25000_bytes() {
-  pad_to AGENTS.md 25000
-}
-
-agents_md_of_24999_bytes() {
-  pad_to AGENTS.md 24999
+agents_md_of_31999_bytes() {
+  pad_to AGENTS.md 31999
 }
 
 agents_md_files_of_32000_bytes_on_one_path() {
   pad_to AGENTS.md 20000
+  write_lines "$copy/src/api/AGENTS.md" 100 120
+}
+
+agents_md_files_of_31999_bytes_on_one_path() {
+  pad_to AGENTS.md 19999
   write_lines "$copy/src/api/AGENTS.md" 100 120
 }
 
@@ -435,13 +443,13 @@ agents_md_files_of_32000_bytes_on_two_paths() {
   write_lines "$copy/lib/AGENTS.md" 100 60
 }
 
-run_case agents_md_of_200_lines fail \
-  "error: src/AGENTS.md has 200 lines, and the limit is 199." \
-  "the limit is 199. Move a procedure that only one kind of request needs into a guide of its own."
-run_case agents_md_of_199_lines pass
-run_case agents_md_of_25000_bytes fail "error: AGENTS.md has 25000 bytes, and the limit is 24999."
-run_case agents_md_of_24999_bytes pass
+run_case agents_md_of_200_lines_and_25000_bytes pass
+run_case agents_md_of_32000_bytes fail \
+  "error: AGENTS.md has 32000 bytes, and the limit is 31999." \
+  "the limit is 31999. Move a procedure that only one kind of request needs into a guide of its own."
+run_case agents_md_of_31999_bytes pass
 run_case agents_md_files_of_32000_bytes_on_one_path fail "error: the AGENTS.md files from the root down to src/api have 32000 bytes together, and the limit is 31999."
+run_case agents_md_files_of_31999_bytes_on_one_path pass
 run_case agents_md_files_of_32000_bytes_on_two_paths pass
 
 # Cases for the check that limits the length of every tracked file.
