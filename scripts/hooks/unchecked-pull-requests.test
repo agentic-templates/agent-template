@@ -25,8 +25,8 @@ PATH=$base/bin:$PATH
 not_checked="Blocked: scripts/check hasn't passed on these files. Run it, fix what it reports, and open the pull request again."
 not_committed="Blocked: scripts/check passed on the files on disk, but some of their changes aren't committed. Commit them first, and then run gh pr create in a command of its own."
 
-# Makes a folder the one that the agent works in. Cursor doesn't send that folder, so the hook uses its own,
-# which is this script's: work_in <folder>
+# Makes a folder the one that the agent works in, and the one that the cases' own commands, such as git add, run in,
+# so that they act on its files: work_in <folder>
 work_in() {
   test_cwd=$1
   cd "$1"
