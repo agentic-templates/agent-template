@@ -105,17 +105,21 @@ def blocks(entry: dict[str, Any], kind: str) -> list[dict[str, Any]]:
 
 
 def working_minutes(calls: list[Call], prompts: list[dt.datetime]) -> float:
-    """The minutes from each prompt or message that the session or agent received to its last call before the next
-    one. An agent that gets a message after it finished adds to the same transcript, so the time it waited doesn't
-    count."""
+    return sum((end - start).total_seconds() for start, end in working_periods(calls, prompts)) / 60
+
+
+def working_periods(calls: list[Call], prompts: list[dt.datetime]) -> list[tuple[dt.datetime, dt.datetime]]:
+    """The periods from each prompt or message that the session or agent received to its last call before the next
+    one, in order. An agent that gets a message after it finished adds to the same transcript, so the time it waited
+    doesn't count."""
     if not calls:
-        return 0.0
+        return []
     first_start = min(call.start for call in calls)
     ends: dict[dt.datetime, dt.datetime] = {}
     for call in calls:
         start = max((prompt for prompt in prompts if prompt <= call.start), default=first_start)
         ends[start] = max(ends.get(start, call.end), call.end)
-    return sum((end - start).total_seconds() for start, end in ends.items()) / 60
+    return sorted(ends.items())
 
 
 def opened_pull_request(file: Path) -> int | None:
