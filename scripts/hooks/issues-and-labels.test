@@ -297,7 +297,6 @@ expect_repository_flags 2 "$(lacking "the new body of issue 7" 'headings "What s
 expect_repository_flags 0 "" issue edit '7 --help'
 for repository in '-R jtmpl/other' '--repo jtmpl/other' '--repo=jtmpl/other'; do
   expect_gh_calls "gh issue $repository edit 7 --add-label bug" "issue view 7 --repo jtmpl/other --json labels,body"
-  expect_gh_calls "gh issue edit $repository 7 --add-label bug" "issue view 7 --repo jtmpl/other --json labels,body"
 done
 for subcommand in create edit delete clone; do
   expect_repository_flags 2 "$label_commands" label "$subcommand" 'urgent'

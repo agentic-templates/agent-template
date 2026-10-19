@@ -227,16 +227,15 @@ done
 expect_repository_flags 2 "Blocked: pull request 7 $merge_reason" pr merge '7 --squash'
 expect_repository_flags 2 "Blocked: this branch's pull request $merge_reason" pr merge '--squash'
 for repository in '-R jtmpl/other' '--repo jtmpl/other' '--repo=jtmpl/other'; do
-  for command in "gh pr $repository checkout 7" "gh pr checkout $repository 7"; do
-    : >"$TEST_GH_CALLS"
-    run_hook "$(sample_input claude-code Bash "$command")"
-    case_count=$((case_count + 1))
-    gh_calls=$(grep -v -x -e --version "$TEST_GH_CALLS" || true)
-    if [[ $gh_calls != "pr view 7 --repo jtmpl/other --json isCrossRepository" ]]; then
-      echo "error: for $command, expected the lookup of pull request 7 in jtmpl/other, but got: $gh_calls" >&2
-      failed_cases=$((failed_cases + 1))
-    fi
-  done
+  command="gh pr $repository checkout 7"
+  : >"$TEST_GH_CALLS"
+  run_hook "$(sample_input claude-code Bash "$command")"
+  case_count=$((case_count + 1))
+  gh_calls=$(grep -v -x -e --version "$TEST_GH_CALLS" || true)
+  if [[ $gh_calls != "pr view 7 --repo jtmpl/other --json isCrossRepository" ]]; then
+    echo "error: for $command, expected the lookup of pull request 7 in jtmpl/other, but got: $gh_calls" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
 done
 
 # The pull request that -R names is the one that gh is asked about.

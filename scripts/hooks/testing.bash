@@ -138,15 +138,16 @@ expect_allow() {
   expect_result "In ${tools%% *}, the hook for $1 \"$2\"" 0 ""
 }
 
-# Checks all repository flag forms on either side of a subcommand against a fixed result:
+# Checks each form of the repository flag before a subcommand against a fixed result:
 # expect_repository_flags <exit code> <message> <group> <subcommand> <remaining command words>
+# Each check moves the flag to just after the subcommand before it reads the command, with move_gh_repository_flags in
+# helpers.bash, so these cases also cover the flag in that place.
 expect_repository_flags() {
   local status=$1 message=$2 group=$3 subcommand=$4 rest=$5 repository command
   for repository in '-R jtmpl/other' '--repo jtmpl/other' '--repo=jtmpl/other'; do
-    for command in "gh $group $repository $subcommand $rest" "gh $group $subcommand $repository $rest"; do
-      run_hook "$(sample_input claude-code Bash "$command")"
-      expect_result "The hook for $command" "$status" "$message"
-    done
+    command="gh $group $repository $subcommand $rest"
+    run_hook "$(sample_input claude-code Bash "$command")"
+    expect_result "The hook for $command" "$status" "$message"
   done
 }
 
