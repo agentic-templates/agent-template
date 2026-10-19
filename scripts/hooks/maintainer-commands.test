@@ -478,6 +478,8 @@ for command in \
   'gh api -XPATCH "repos/$repo/code-scanning/alerts/$alert?state=dismissed"' \
   'gh api repos/{owner}/{repo}/code-scanning/alerts/12 -fstate=dismissed' \
   'gh api --field state=dismissed repos/{owner}/{repo}/dependabot/alerts/3' \
+  'gh api -if state=dismissed repos/{owner}/{repo}/dependabot/alerts/3' \
+  'gh api -iX PATCH "repos/{owner}/{repo}/code-scanning/alerts/12?state=dismissed"' \
   'gh api repos/{owner}/{repo}/dependabot/alerts/3 --input=dismissal.json' \
   "gh api graphql -f query='$dismissal_query'" \
   "$dismissal_from_standard_input"; do

@@ -19,9 +19,10 @@
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 
-# The flags that take a value, as gh repo create --help and gh repo edit --help list them.
+# The flags that take a value, as gh repo create --help, gh repo edit --help and gh gist create --help list them.
 repo_create_flags_with_value=" -d --description -g --gitignore -h --homepage -l --license -r --remote -s --source -t --team -p --template "
 repo_edit_flags_with_value=" --add-topic --default-branch -d --description -h --homepage --remove-topic --squash-merge-commit-message --visibility "
+gist_create_flags_with_value=" -d --desc -f --filename "
 
 # The endpoints of gh api that hold the repository's rules and security settings, such as its rulesets, its deploy
 # keys and the settings that scripts/configure-github turns on.
@@ -586,7 +587,7 @@ block_if_public_unless_allowed() {
 
 check_repo_create() {
   read_arguments 3 "$repo_create_flags_with_value"
-  if has_flag --public; then
+  if has_true_flag "$repo_create_flags_with_value" --public; then
     block_if_public_unless_allowed "$argument" "a new repository"
   fi
 }
@@ -618,11 +619,9 @@ check_gh_api() {
   if [[ $argument =~ $security_endpoint ]]; then
     block "$security_change"
   fi
-  for ((i = 0; i < ${#flags[@]}; i++)); do
-    case ${flags[i]} in
+  for ((i = 0; i < ${#last_flags[@]}; i++)); do
+    case ${last_flags[i]} in
       -f | -F | --field | --raw-field) field=${flag_values[i]} ;;
-      --field=* | --raw-field=*) field=${flags[i]#*=} ;;
-      -f?* | -F?*) field=${flags[i]:2} ;;
       *) continue ;;
     esac
     case $field in
@@ -767,7 +766,7 @@ check_gh() {
   case "${command_words[1]:-} ${command_words[2]:-}" in
     "pr merge")
       read_arguments 3 "$merge_flags_with_value"
-      if has_flag --admin; then
+      if has_true_flag "$merge_flags_with_value" --admin; then
         block "Blocked: --admin merges the pull request without the checks that main requires, and only the maintainer may skip them. Merge without --admin, so that the merge waits for the checks."
       fi
       ;;
@@ -779,9 +778,8 @@ check_gh() {
       fi
       ;;
     "gist create" | "gist new")
-      # The flags that take a value, as gh gist create --help lists them
-      read_arguments 3 " -d --desc -f --filename "
-      if has_flag -p --public; then
+      read_arguments 3 "$gist_create_flags_with_value"
+      if has_true_flag "$gist_create_flags_with_value" -p --public; then
         block "Blocked: this makes a gist public, and only the maintainer may make something public outside this repository. $ask"
       fi
       ;;
