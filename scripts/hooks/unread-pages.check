@@ -23,11 +23,10 @@ page_paths=(':(top)README.md' ':(top)docs/*.md')
 # latest commit, or to empty when that commit is HEAD and the pages on disk count. Changes to the repository's top
 # folder, from which git hash-object reads the pages. Run find_commits first.
 find_pages() {
-  local head top
+  local top
   branch_start=$(git merge-base "$base_commit" "$head_commit") || return 1
-  head=$(git rev-parse --verify --quiet HEAD) || head=""
   pages_commit=$head_commit
-  if [[ $head_commit == "$head" ]]; then
+  if is_pull_request_at_head; then
     pages_commit=""
   fi
   top=$(git rev-parse --show-toplevel) || return 1
