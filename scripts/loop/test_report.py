@@ -197,6 +197,7 @@ class EmptyPeriodTest(ReportTest):
                     "Requests of the agents of a session that have no event: 0 of 0",
                     "Orchestrator's share of the input tokens: none used",
                     "Hook blocks: 0",
+                    "Safety classifier stops: 0 in the sessions in the main checkout, 0 in their agents",
                     "Agents' time: 0.0 min, from the transcripts of 0 agents, and 0 agents have none",
                     "Context of the orchestrator: no calls",
                     "Heavy commands: none ran",
