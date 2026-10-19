@@ -521,8 +521,8 @@ def add_worktree(branch: str, folders: Folders) -> None:
 
 
 def newest_issue_branch(issue: int, checkout: Path) -> str | None:
-    """Of the issue's branches that origin has, the one whose latest commit is newest, as scripts/start-issue picks
-    it."""
+    """Of the issue's branches that origin has, the one whose latest commit is newest, and of two equally new, the one
+    whose name sorts last, as scripts/start-issue picks it."""
     newest: tuple[int, str] | None = None
     for branch in issue_branches(issue, checkout):
         commit_time = run(["git", "log", "-1", "--format=%ct", f"refs/remotes/origin/{branch}", "--"], checkout)

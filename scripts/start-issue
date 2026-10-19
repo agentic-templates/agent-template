@@ -4,8 +4,8 @@
 # - It stops on an issue with needs-triage, as the hook for gh issue develop does, because the hooks don't see the
 #   commands that a script runs. Like the hook, it goes on when gh can't tell.
 # - It runs git fetch --prune origin. Of the issue's branches, as issue_branches in scripts/issue-branches lists them,
-#   that origin still has, it checks out the one whose latest commit on origin is newest. A local copy of that branch
-#   that's behind origin moves forward to origin's commit.
+#   that origin still has, it checks out the one whose latest commit on origin is newest, and of two equally new, the
+#   one whose name sorts last. A local copy of that branch that's behind origin moves forward to origin's commit.
 # - When the issue has no such branch, it creates one with gh issue develop --checkout. GitHub creates the branch
 #   from the latest main and links it to the issue.
 # It stops with an error, and exits with code 1, when the checkout has changes that aren't committed, when the local
@@ -51,19 +51,18 @@ if ! listed_branches=$(issue_branches "$issue" 2>&1); then
   stop "can't list the branches of issue #$issue, because gh failed: $listed_branches"
 fi
 
-# The listed branch whose latest commit on origin is newest, and that commit's time in seconds
-branch=""
-newest=-1
+# Each listed branch that origin has, after the time in seconds of its latest commit on origin, one to a line
+dated_branches=""
 while IFS= read -r listed; do
   if [[ -z $listed ]] || ! git rev-parse --verify --quiet "refs/remotes/origin/$listed" >/dev/null; then
     continue
   fi
-  commit_time=$(git log -1 --format=%ct "refs/remotes/origin/$listed")
-  if ((commit_time > newest)); then
-    branch=$listed
-    newest=$commit_time
-  fi
+  dated_branches+="$(git log -1 --format=%ct "refs/remotes/origin/$listed") $listed"$'\n'
 done <<<"$listed_branches"
+# Of the branches whose latest commits are equally new, it picks the one whose name sorts last, as
+# newest_issue_branch in scripts/loop/run-builder does, because that script makes the builder's worktree on its pick.
+newest=$(LC_ALL=C sort -k1,1n -k2,2 <<<"$dated_branches" | tail -n 1)
+branch=${newest#* }
 
 if [[ -z $branch ]]; then
   if ! output=$(gh issue develop "$issue" --checkout 2>&1); then
