@@ -19,12 +19,25 @@ mkdir "$base/bin"
 # A stand-in for gh, first on the PATH. It writes each command to TEST_GH_CALLS, one to a line, and answers only the
 # commands that the script must run, for issue 12:
 # - It prints the labels in TEST_LABELS, one to a line, as the script's --jq filter prints them.
-# - It lists the branches in TEST_ISSUE_BRANCHES, as gh issue develop --list prints them.
+# - For the GraphQL query for the issue's branches in scripts/issue-branches, it prints the branches in
+#   TEST_ISSUE_BRANCHES, one to a line, as the query's --jq filter prints them. It writes that command to
+#   TEST_GH_CALLS as "the query for the branches of issue 12".
 # - For gh issue develop 12 --checkout, it creates the branch TEST_NEW_BRANCH from main on origin, and checks it out,
 #   as gh does.
 # With fail in place of the labels, the branches or the new branch, that command fails, as gh does without the network.
 cat >"$base/bin/gh" <<'STAND_IN'
 #!/usr/bin/env bash
+if [[ $1 == api && $2 == graphql && $* == *" -F number=12 "* && $* == *"closedByPullRequestsReferences("* ]]; then
+  echo "the query for the branches of issue 12" >>"$TEST_GH_CALLS"
+  if [[ $TEST_ISSUE_BRANCHES == fail ]]; then
+    echo "error connecting to api.github.com" >&2
+    exit 1
+  fi
+  for branch in $TEST_ISSUE_BRANCHES; do
+    echo "$branch"
+  done
+  exit 0
+fi
 echo "$*" >>"$TEST_GH_CALLS"
 if [[ $* == "issue view 12 --json labels --jq .labels[].name" ]]; then
   if [[ $TEST_LABELS == fail ]]; then
@@ -33,16 +46,6 @@ if [[ $* == "issue view 12 --json labels --jq .labels[].name" ]]; then
   fi
   for label in $TEST_LABELS; do
     echo "$label"
-  done
-  exit 0
-fi
-if [[ $* == "issue develop --list 12" ]]; then
-  if [[ $TEST_ISSUE_BRANCHES == fail ]]; then
-    echo "error connecting to api.github.com" >&2
-    exit 1
-  fi
-  for branch in $TEST_ISSUE_BRANCHES; do
-    printf '%s\thttps://github.com/owner/repo/tree/%s\n' "$branch" "$branch"
   done
   exit 0
 fi
@@ -71,7 +74,7 @@ starting_case=$base/starting-case
 git init --quiet --bare --initial-branch=main "$starting_case/origin.git"
 git init --quiet --initial-branch=main "$starting_case/main"
 mkdir "$starting_case/main/scripts"
-cp scripts/start-issue scripts/needs-triage "$starting_case/main/scripts/"
+cp scripts/start-issue scripts/needs-triage scripts/issue-branches "$starting_case/main/scripts/"
 printf 'January: 120\n' >"$starting_case/main/totals.txt"
 git -C "$starting_case/main" add --all
 git -C "$starting_case/main" commit --quiet -m "feat: total the expenses"
@@ -183,6 +186,17 @@ expect_equal "the checked-out branch" "$(checked_out)" 12-fix-totals
 expect_equal "the checked-out commit" "$(head_commit)" "$(github_commit 12-fix-totals)"
 expect_equal "the branch's upstream" "$(git -C "$case_dir/main" rev-parse --abbrev-ref '12-fix-totals@{upstream}')" \
   origin/12-fix-totals
+
+# GitHub links the pull request to the issue in place of the branch, and gh issue develop --list lists no branch.
+begin_case "When a pull request from the issue's branch is open"
+new_case
+push_to_github 12-fix-totals 2026-05-04T09:30:00Z
+run_start_issue feature 12-fix-totals fail
+expect_result 0 12-fix-totals
+expect_equal "the gh commands" "$calls" \
+  $'issue view 12 --json labels --jq .labels[].name\nthe query for the branches of issue 12'
+expect_equal "the checked-out branch" "$(checked_out)" 12-fix-totals
+expect_equal "the checked-out commit" "$(head_commit)" "$(github_commit 12-fix-totals)"
 
 begin_case "When the issue has two branches, and the one that gh lists last has the newer commit"
 new_case
@@ -296,7 +310,7 @@ new_case
 run_start_issue feature "" 12-fix-totals
 expect_result 0 12-fix-totals
 expect_equal "the gh commands" "$calls" \
-  $'issue view 12 --json labels --jq .labels[].name\nissue develop --list 12\nissue develop 12 --checkout'
+  $'issue view 12 --json labels --jq .labels[].name\nthe query for the branches of issue 12\nissue develop 12 --checkout'
 expect_equal "the checked-out branch" "$(checked_out)" 12-fix-totals
 expect_equal "the checked-out commit" "$(head_commit)" "$start"
 

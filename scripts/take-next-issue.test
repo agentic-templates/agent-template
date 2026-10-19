@@ -24,8 +24,8 @@ case_folder=$base/case
 #   prints it, or with nothing when the issue has no such file
 # - the command that reads an issue's labels, with feature and ready, or with only feature when the issue is in the
 #   file lost-ready
-# - the command that lists an issue's branches, with the file branches-<issue>, or with nothing when the issue has no
-#   such file
+# - the GraphQL query for an issue's branches in scripts/issue-branches, with the file branches-<issue>, as the
+#   query's --jq filter prints it, or with nothing when the issue has no such file
 # It accepts the commands that assign an issue to the current account and remove that assignment, and writes each one
 # to the file edits, one to a line. It fails the commands that contain TEST_FAILING_CALL, as gh does without the
 # network, and every command it doesn't know.
@@ -43,6 +43,16 @@ case "$*" in
   "api graphql "*'issues(labels: ["ready"], states: OPEN'*)
     cat "$folder/issues"
     ;;
+  "api graphql "*"linkedBranches("*)
+    for argument in "$@"; do
+      if [[ $argument == number=* ]]; then
+        number=${argument#number=}
+      fi
+    done
+    if [[ -f $folder/branches-$number ]]; then
+      cat "$folder/branches-$number"
+    fi
+    ;;
   "api graphql "*)
     for argument in "$@"; do
       if [[ $argument == number=* ]]; then
@@ -57,11 +67,6 @@ case "$*" in
     echo feature
     if ! grep -qxF "$3" "$folder/lost-ready"; then
       echo ready
-    fi
-    ;;
-  "issue develop --list "*)
-    if [[ -f $folder/branches-$4 ]]; then
-      cat "$folder/branches-$4"
     fi
     ;;
   "issue edit "*" --add-assignee @me" | "issue edit "*" --remove-assignee @me") ;;
@@ -79,7 +84,8 @@ tab=$'\t'
 repo=$base/repo
 git init --quiet --initial-branch=main "$repo"
 mkdir "$repo/scripts"
-cp scripts/take-next-issue scripts/ready-issues scripts/issue-labels scripts/pull-request-state "$repo/scripts/"
+cp scripts/take-next-issue scripts/ready-issues scripts/issue-labels scripts/issue-branches scripts/pull-request-state \
+  "$repo/scripts/"
 git -C "$repo" add --all
 git -C "$repo" commit --quiet -m "feat: take the next ready issue"
 
@@ -124,10 +130,10 @@ set_pull_request_state() {
   esac
 }
 
-# Gives an issue a branch, which a worktree has checked out if the last argument is checked-out:
-# add_branch <issue> <branch> [checked-out]
+# Gives an issue a branch, as the --jq filter in scripts/issue-branches prints it, which a worktree has checked out if
+# the last argument is checked-out: add_branch <issue> <branch> [checked-out]
 add_branch() {
-  printf '%s\n' "$2${tab}https://github.com/owner/repo/tree/$2" >>"$case_folder/branches-$1"
+  printf '%s\n' "$2" >>"$case_folder/branches-$1"
   git -C "$repo" branch --quiet --force "$2"
   if [[ ${3:-} == checked-out ]]; then
     git -C "$repo" worktree add --quiet "$base/worktree" "$2"
@@ -246,6 +252,16 @@ add_issue 15 0 0 0 feature
 run_take_next_issue
 expect_result "When a worktree has a branch of the lower-numbered issue checked out" 0 "15 other" "$assign_15"
 
+# GitHub links the pull request to the issue in place of the branch, and gh issue develop --list lists no branch.
+new_case
+add_issue 12 0 0 0 feature
+set_pull_request_state 12 "left behind"
+add_branch 12 12-fix-totals checked-out
+add_issue 15 0 0 0 feature
+run_take_next_issue
+expect_result "When a worktree has the branch of the lower-numbered issue's open pull request checked out" 0 \
+  "15 other" "$assign_15"
+
 new_case
 add_issue 12 0 0 0 feature
 add_branch 12 12-fix-totals
@@ -314,7 +330,7 @@ expect_result "When scripts/pull-request-state fails" 1 \
 
 new_case
 add_issue 12 0 0 0 feature
-failing_call="issue develop"
+failing_call="linkedBranches("
 run_take_next_issue
 expect_result "When gh can't list the branches of the issue" 1 \
   "error: can't list the branches of issue #12, because gh failed: error connecting to api.github.com" ""

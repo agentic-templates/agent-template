@@ -107,12 +107,13 @@ cat >"$TEST_ANSWERS/12.json" <<'ANSWER'
 {
   "data": {
     "repository": {
+      "nameWithOwner": "owner/repo",
       "issueOrPullRequest": {
         "linkedBranches": {
           "nodes": [
             { "ref": null },
-            { "ref": { "name": "12-skip-imported-rows" } },
-            { "ref": { "name": "12-skip-the-imported-expenses" } }
+            { "ref": { "name": "12-skip-imported-rows", "repository": { "nameWithOwner": "owner/repo" } } },
+            { "ref": { "name": "12-skip-the-imported-expenses", "repository": { "nameWithOwner": "owner/repo" } } }
           ]
         },
         "closedByPullRequestsReferences": { "nodes": [] }
@@ -125,9 +126,14 @@ cat >"$TEST_ANSWERS/17.json" <<'ANSWER'
 {
   "data": {
     "repository": {
+      "nameWithOwner": "owner/repo",
       "issueOrPullRequest": {
         "linkedBranches": { "nodes": [] },
-        "closedByPullRequestsReferences": { "nodes": [{ "headRefName": "17-export-the-totals" }] }
+        "closedByPullRequestsReferences": {
+          "nodes": [
+            { "headRefName": "17-export-the-totals", "isCrossRepository": false, "repository": { "nameWithOwner": "owner/repo" } }
+          ]
+        }
       }
     }
   }
@@ -138,16 +144,17 @@ for number in 13 15 16; do
 {
   "data": {
     "repository": {
+      "nameWithOwner": "owner/repo",
       "issueOrPullRequest": { "linkedBranches": { "nodes": [] }, "closedByPullRequestsReferences": { "nodes": [] } }
     }
   }
 }
 ANSWER
 done
-echo '{"data":{"repository":{"issueOrPullRequest":{}}}}' >"$TEST_ANSWERS/14.json"
+echo '{"data":{"repository":{"nameWithOwner":"owner/repo","issueOrPullRequest":{}}}}' >"$TEST_ANSWERS/14.json"
 cat >"$TEST_ANSWERS/99.json" <<'ANSWER'
 {
-  "data": { "repository": { "issueOrPullRequest": null } },
+  "data": { "repository": { "nameWithOwner": "owner/repo", "issueOrPullRequest": null } },
   "errors": [
     {
       "type": "NOT_FOUND",

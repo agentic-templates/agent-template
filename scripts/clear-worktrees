@@ -12,6 +12,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=scripts/secret-file-names
 source scripts/secret-file-names
+# shellcheck source=scripts/issue-branches
+source scripts/issue-branches
 
 save_subject="chore: save the unfinished work of a stopped session"
 
@@ -45,18 +47,18 @@ if [[ -n $given_issue ]]; then
 elif ! issues=$(gh issue list --label ready --limit 200 --json number --jq '.[].number' 2>&1); then
   stop "can't list the ready issues, because gh failed: $issues"
 fi
-# Each line holds a branch of an issue that the script frees, a tab and the issue's number.
-issue_branches=""
+# Each line holds a branch of an issue that the script frees, as issue_branches in scripts/issue-branches lists the
+# issue's branches, a tab and the issue's number.
+branches_to_free=""
 for issue in $issues; do
-  if ! linked_branches=$(gh issue develop --list "$issue" 2>&1); then
-    stop "can't list the branches of issue #$issue, because gh failed: $linked_branches"
+  if ! listed_branches=$(issue_branches "$issue" 2>&1); then
+    stop "can't list the branches of issue #$issue, because gh failed: $listed_branches"
   fi
-  # gh prints each branch, a tab and the branch's URL.
-  while IFS=$'\t' read -r branch url; do
-    if [[ -n $branch && -n $url ]]; then
-      issue_branches+=$branch$'\t'$issue$'\n'
+  while IFS= read -r branch; do
+    if [[ -n $branch ]]; then
+      branches_to_free+=$branch$'\t'$issue$'\n'
     fi
-  done <<<"$linked_branches"
+  done <<<"$listed_branches"
 done
 
 # Prints the issue whose branch this is, or fails if it's the branch of no issue that the script frees:
@@ -68,7 +70,7 @@ issue_of() {
       printf '%s\n' "$issue"
       return 0
     fi
-  done <<<"$issue_branches"
+  done <<<"$branches_to_free"
   return 1
 }
 

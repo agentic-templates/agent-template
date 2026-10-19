@@ -17,9 +17,10 @@ export GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
 mkdir "$base/bin"
 
 # A stand-in for gh, first on the PATH. It answers only the commands that the script must run. It lists the ready
-# issues in TEST_READY_ISSUES, or fails with fail, as gh does without the network. It lists each issue's branches from
-# the lines of TEST_ISSUE_BRANCHES, which hold an issue and a branch, and says that each branch in
-# TEST_OPEN_PULL_REQUESTS has an open pull request.
+# issues in TEST_READY_ISSUES, or fails with fail, as gh does without the network. For the GraphQL query for an
+# issue's branches in scripts/issue-branches, it prints the issue's branches from the lines of TEST_ISSUE_BRANCHES,
+# which hold an issue and a branch, as the query's --jq filter prints them, or fails when TEST_ISSUE_BRANCHES is fail.
+# It says that each branch in TEST_OPEN_PULL_REQUESTS has an open pull request.
 cat >"$base/bin/gh" <<'STAND_IN'
 #!/usr/bin/env bash
 if [[ $* == "issue list --label ready --limit 200 --json number --jq .[].number" ]]; then
@@ -32,10 +33,19 @@ if [[ $* == "issue list --label ready --limit 200 --json number --jq .[].number"
   done
   exit 0
 fi
-if [[ $1 == issue && $2 == develop && $3 == --list && $# == 4 ]]; then
+if [[ $1 == api && $2 == graphql && $* == *"closedByPullRequestsReferences("* ]]; then
+  if [[ $TEST_ISSUE_BRANCHES == fail ]]; then
+    echo "error connecting to api.github.com" >&2
+    exit 1
+  fi
+  for argument in "$@"; do
+    if [[ $argument == number=* ]]; then
+      number=${argument#number=}
+    fi
+  done
   while read -r issue branch; do
-    if [[ $issue == "$4" ]]; then
-      printf '%s\thttps://github.com/owner/repo/tree/%s\n' "$branch" "$branch"
+    if [[ $issue == "$number" ]]; then
+      echo "$branch"
     fi
   done <<<"$TEST_ISSUE_BRANCHES"
   exit 0
@@ -65,7 +75,7 @@ starting_case=$base/starting-case
 git init --quiet --bare "$starting_case/origin.git"
 git init --quiet --initial-branch=main "$starting_case/main"
 mkdir "$starting_case/main/scripts"
-cp scripts/clear-worktrees scripts/secret-file-names "$starting_case/main/scripts/"
+cp scripts/clear-worktrees scripts/secret-file-names scripts/issue-branches "$starting_case/main/scripts/"
 printf 'January: 120\n' >"$starting_case/main/totals.txt"
 git -C "$starting_case/main" add --all
 git -C "$starting_case/main" commit --quiet -m "feat: total the expenses"
@@ -99,7 +109,8 @@ push_to_github() {
 }
 
 # Runs the copy of scripts/clear-worktrees in a folder, with the arguments after the first three, and sets status and
-# output: run_clear_worktrees <folder> [<branches with an open pull request>] [<ready issues, or fail>] [<argument>...]
+# output, with the issues' branches in issue_branches, or fail:
+# run_clear_worktrees <folder> [<branches with an open pull request>] [<ready issues, or fail>] [<argument>...]
 run_clear_worktrees() {
   status=0
   output=$(TEST_READY_ISSUES=${3:-12 13} TEST_ISSUE_BRANCHES=$issue_branches TEST_OPEN_PULL_REQUESTS=${2:-} \
@@ -357,6 +368,17 @@ expect_equal "the branch of issue #12 on GitHub" "$(github_commit 12-fix-totals)
 expect_equal "the changes in the worktree of issue #13" "$(git -C "$case_dir/agent-2" status --porcelain)" " M totals.txt"
 expect_equal "the branch of issue #13" "$(local_commit 13-export-csv)" "$start"
 
+# GitHub links the pull request to the issue in place of the branch, and gh issue develop --list lists no branch.
+begin_case "When it gets an issue, and a worktree holds the branch of the issue's open pull request"
+new_case
+add_worktree agent-1 12-fix-totals
+printf 'February: 80\n' >>"$case_dir/agent-1/totals.txt"
+run_clear_worktrees "$case_dir/main" 12-fix-totals "12 13" 12
+expect_result 0 "Removed $case_dir/agent-1, which held the branch of issue #12."
+expect_equal "whether the worktree exists" "$(exists "$case_dir/agent-1")" no
+expect_equal "the subject of the branch's last commit" "$(last_subject 12-fix-totals)" "$save_subject"
+expect_equal "the branch on GitHub" "$(github_commit 12-fix-totals)" "$start"
+
 begin_case "When it gets an issue that no longer has ready, and a worktree holds the issue's branch"
 new_case
 add_worktree agent-1 12-fix-totals
@@ -389,6 +411,15 @@ run_clear_worktrees "$case_dir/main" "" "12 13" 12
 expect_result 1 "Left $case_dir/agent-1, which holds the branch of issue #12, because it has untracked files whose names suggest a secret: deploy-key.pem"
 expect_equal "the changes in the worktree" "$(git -C "$case_dir/agent-1" status --porcelain)" $' M totals.txt\n?? deploy-key.pem'
 expect_equal "the branch" "$(local_commit 12-fix-totals)" "$start"
+
+begin_case "When gh can't list the branches of an issue"
+new_case
+add_worktree agent-1 12-fix-totals
+issue_branches=fail
+run_clear_worktrees "$case_dir/main" "" "12 13" 12
+issue_branches=$'12 12-fix-totals\n13 13-export-csv'
+expect_result 1 "error: can't list the branches of issue #12, because gh failed: error connecting to api.github.com"
+expect_equal "whether the worktree exists" "$(exists "$case_dir/agent-1")" yes
 
 begin_case "When it gets two arguments"
 new_case

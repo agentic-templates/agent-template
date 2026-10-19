@@ -234,7 +234,7 @@ class AgentLinesTest(RunBuilderTest):
         self.assertIsNone(self.agent_lines()[1]["pull_request"])
 
     def test_ends_a_run_that_failed_before_it_had_a_worktree(self) -> None:
-        self.answer("gh", "issue develop --list", {"stdout": ""})
+        self.answer("gh", "api graphql", {"stdout": ""})
         self.answer("gh", "issue develop", {})
         status, _, _ = self.run_builder("--tool", "claude")
         self.assertEqual(status, 1)

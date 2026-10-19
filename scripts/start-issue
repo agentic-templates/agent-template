@@ -3,9 +3,9 @@
 # It checks out the issue's branch in the checkout that holds the script, and prints the branch.
 # - It stops on an issue with needs-triage, as the hook for gh issue develop does, because the hooks don't see the
 #   commands that a script runs. Like the hook, it goes on when gh can't tell.
-# - It runs git fetch --prune origin. Of the branches that gh issue develop --list lists and that origin still has,
-#   it checks out the one whose latest commit on origin is newest. A local copy of that branch that's behind origin
-#   moves forward to origin's commit.
+# - It runs git fetch --prune origin. Of the issue's branches, as issue_branches in scripts/issue-branches lists them,
+#   that origin still has, it checks out the one whose latest commit on origin is newest. A local copy of that branch
+#   that's behind origin moves forward to origin's commit.
 # - When the issue has no such branch, it creates one with gh issue develop --checkout. GitHub creates the branch
 #   from the latest main and links it to the issue.
 # It stops with an error, and exits with code 1, when the checkout has changes that aren't committed, when the local
@@ -15,6 +15,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=scripts/needs-triage
 source scripts/needs-triage
+# shellcheck source=scripts/issue-branches
+source scripts/issue-branches
 
 # Prints an error and stops: stop <message>
 stop() {
@@ -45,16 +47,15 @@ fi
 if ! output=$(git fetch --prune --quiet origin 2>&1); then
   stop "can't fetch origin, because git failed: $output"
 fi
-if ! linked_branches=$(gh issue develop --list "$issue" 2>&1); then
-  stop "can't list the branches of issue #$issue, because gh failed: $linked_branches"
+if ! listed_branches=$(issue_branches "$issue" 2>&1); then
+  stop "can't list the branches of issue #$issue, because gh failed: $listed_branches"
 fi
 
 # The listed branch whose latest commit on origin is newest, and that commit's time in seconds
 branch=""
 newest=-1
-# gh prints each branch, a tab and the branch's URL.
-while IFS=$'\t' read -r listed url; do
-  if [[ -z $listed || -z $url ]] || ! git rev-parse --verify --quiet "refs/remotes/origin/$listed" >/dev/null; then
+while IFS= read -r listed; do
+  if [[ -z $listed ]] || ! git rev-parse --verify --quiet "refs/remotes/origin/$listed" >/dev/null; then
     continue
   fi
   commit_time=$(git log -1 --format=%ct "refs/remotes/origin/$listed")
@@ -62,7 +63,7 @@ while IFS=$'\t' read -r listed url; do
     branch=$listed
     newest=$commit_time
   fi
-done <<<"$linked_branches"
+done <<<"$listed_branches"
 
 if [[ -z $branch ]]; then
   if ! output=$(gh issue develop "$issue" --checkout 2>&1); then
