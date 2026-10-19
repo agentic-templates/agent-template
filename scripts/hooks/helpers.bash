@@ -451,40 +451,47 @@ opens_pull_request() {
   read_pull_request_flags "$pr_create_flags_with_value"
 }
 
+# Splits a word of a gh command that starts with a dash into the flag and the value that the word gives, as gh reads
+# them: split_flag_word <word> <flags that take a value>
+# It sets flag, and sets value to the value in the same word, as in --title=Title, or to empty when the word gives
+# none. A short flag that takes a value can also have it in the same word, as in -tTitle or -t=Title, which gh reads as
+# the title Title. It sets value_is_next_word to yes when the flag takes a value that the word doesn't give, because
+# the next word is then the value, even if it starts with a dash.
+split_flag_word() {
+  flag=$1 value="" value_is_next_word=""
+  if [[ $1 == --*=* ]]; then
+    flag=${1%%=*}
+    value=${1#*=}
+  elif [[ $2 == *" $1 "* ]]; then
+    value_is_next_word=yes
+  elif [[ $1 == -[!-]?* && $2 == *" ${1:0:2} "* ]]; then
+    flag=${1:0:2}
+    value=${1:2}
+    value=${value#=}
+  fi
+}
+
 # Reads the flags of a gh pr command from command_words, from its fourth word on, and fails when the command shows its
 # help or does a dry run: read_pull_request_flags <flags that take a value>
 # It sets pr_base, pr_head and pr_title to the values of --base, --head and --title, or to empty when the command
 # doesn't give the flag, and pr_has_title to yes when it gives --title, whose value can be empty. It sets pr_is_draft
 # to yes when the command opens a draft. It also records expansion syntax in the title and body, and sets the body
 # source for read_body.
-# The word after a flag that takes a value is that value, even if it starts with a dash. A short flag that takes a
-# value can also have it in the same word, as in -tTitle or -t=Title, which gh reads as the title Title.
 read_pull_request_flags() {
-  local flags_with_value=$1 i word flag value
+  local flags_with_value=$1 i word flag value value_is_next_word
   pr_base="" pr_head="" pr_title="" pr_has_title="" pr_title_may_expand="" pr_is_draft=""
   body_source="" body_word="" body_file="" body_may_expand=""
   for ((i = 3; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
     case $word in
       -h | --help | --dry-run) return 1 ;;
-      --*=*)
-        flag=${word%%=*}
-        value=${word#*=}
-        ;;
-      -*)
-        flag=$word
-        value=""
-        if [[ $flags_with_value == *" $word "* ]]; then
-          value=${command_words[i + 1]:-}
-          i=$((i + 1))
-        elif [[ $word == -[!-]?* && $flags_with_value == *" ${word:0:2} "* ]]; then
-          flag=${word:0:2}
-          value=${word:2}
-          value=${value#=}
-        fi
-        ;;
+      -*) split_flag_word "$word" "$flags_with_value" ;;
       *) continue ;;
     esac
+    if [[ -n $value_is_next_word ]]; then
+      i=$((i + 1))
+      value=${command_words[i]:-}
+    fi
     case $flag in
       -B | --base) pr_base=$value ;;
       -H | --head) pr_head=$value ;;
