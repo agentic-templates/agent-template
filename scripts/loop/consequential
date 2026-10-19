@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script --quiet
 """Lists the files of a change that a reviewer reads before the change merges: the rules, the scripts and the files
-that keep agents safe, such as the hooks, the settings and the checks.
+that keep agents safe, such as the hooks, the settings and the checks. scripts/consequential-paths holds their paths.
 
 RANGE is a git revision range, and it is origin/main...HEAD by default. When RANGE ends at HEAD, or names a single
 commit, the change includes the changes that aren't committed yet and the new files that git doesn't ignore. A renamed
@@ -8,7 +8,8 @@ file counts by its old path and its new one.
 
 The script prints each listed file that the change touches, one to a line, with its path from the top of the
 checkout, and exits with code 0. If the change touches none of them, it prints "Not consequential." and exits with
-code 1. It exits with code 2 when git fails, such as for a RANGE that names no commit.
+code 1. It exits with code 2 when it can't read scripts/consequential-paths, or when git fails, such as for a RANGE
+that names no commit.
 """
 
 import argparse
@@ -17,23 +18,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-# A mistake in one of these files can let a secret out, weaken a check, or change the rules that every later change
-# follows. In a pattern, * matches any characters, / too.
-CONSEQUENTIAL_PATTERNS = (
-    # The rules
-    "AGENTS.md",
-    "*/AGENTS.md",
-    "docs/*",
-    # The files that keep agents safe, and the files that decide what git ignores and what scripts/check runs
-    ".claude/*",
-    ".codex/*",
-    ".github/workflows/*",
-    "scripts/*",
-    ".gitignore",
-    ".python-version",
-    "pyproject.toml",
-    "uv.lock",
-)
+
+def read_patterns(path: Path) -> tuple[str, ...]:
+    """The lines of a file like scripts/consequential-paths that aren't comments."""
+    return tuple(line for line in path.read_text(encoding="utf-8").splitlines() if not line.startswith("#"))
+
+
+# The patterns of the files that a reviewer reads. The hooks read this file too.
+PATTERNS_FILE = Path(__file__).resolve().parents[1] / "consequential-paths"
 DEFAULT_RANGE = "origin/main...HEAD"
 
 
@@ -48,11 +40,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("range", nargs="?", default=DEFAULT_RANGE, metavar="RANGE", help="the change's commits")
     options = parser.parse_args(argv)
     try:
+        patterns = read_patterns(PATTERNS_FILE)
+    except OSError as error:
+        print(
+            f"error: can't read {PATTERNS_FILE}, which lists the paths of the files that a reviewer reads: "
+            f"{error.strerror}. Restore it from git, as with git restore scripts/consequential-paths.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
         files = changed_files(options.range)
     except GitError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
-    listed = consequential_files(files)
+    listed = consequential_files(files, patterns)
     if not listed:
         print("Not consequential.")
         return 1
@@ -60,13 +61,9 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def consequential_files(files: list[str]) -> list[str]:
-    """The files that a pattern in CONSEQUENTIAL_PATTERNS matches, each once, sorted."""
-    return sorted({file for file in files if is_consequential(file)})
-
-
-def is_consequential(file: str) -> bool:
-    return any(fnmatch.fnmatchcase(file, pattern) for pattern in CONSEQUENTIAL_PATTERNS)
+def consequential_files(files: list[str], patterns: tuple[str, ...]) -> list[str]:
+    """The files that one of the patterns matches, each once, sorted."""
+    return sorted({file for file in files if any(fnmatch.fnmatchcase(file, pattern) for pattern in patterns)})
 
 
 def changed_files(revision_range: str) -> list[str]:

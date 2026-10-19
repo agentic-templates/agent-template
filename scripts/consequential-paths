@@ -1,0 +1,19 @@
+# The paths of the files that a reviewer reads before a change to them merges, because a mistake in one of them can let
+# a secret out, weaken a check, or change the rules that every later change follows. scripts/loop/consequential lists
+# the files of a change that match them, and scripts/hooks/pull-request-rules.check blocks a pull request that changes
+# one unless it opens as a draft. Each line holds a pattern of letters, digits, ., _, -, / and *, and a * matches any
+# characters, / too. A test allows no other character, because Python's fnmatch and bash's [[ == ]] read some of them
+# differently, such as [^a] and \*.
+# The rules
+AGENTS.md
+*/AGENTS.md
+docs/*
+# The files that keep agents safe, and the files that decide what git ignores and what scripts/check runs
+.claude/*
+.codex/*
+.github/workflows/*
+scripts/*
+.gitignore
+.python-version
+pyproject.toml
+uv.lock
