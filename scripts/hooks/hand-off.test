@@ -186,11 +186,13 @@ run_hook 44444444-aaaa-4bbb-8ccc-000000000004 "" LOOP_HAND_OFF=1
 expect_note "For a builder whose transcript can't be found" ""
 expect_note_files "For the builders" "$builder.400000"
 
-# A note whose file the hook can't write
+# A note whose file the hook can't write, because a file stands where its folder should be. A read-only folder
+# wouldn't stop root, as in the container of CI's bash-3-2 job.
 add_reply "$orchestrator" a8 410000
-chmod 555 "$notes"
+rm -rf "$notes"
+touch "$notes"
 run_hook "$orchestrator" a8
-chmod 755 "$notes"
+rm "$notes"
 expect_note "When the hook can't write the note's file" "$soon $how scripts/hooks/hand-off couldn't write $notes/a8.400000, so it may give this note again, and scripts/loop/meter doesn't show it. List this in your report for the orchestrator."
 
 # Calls that end at the same time
