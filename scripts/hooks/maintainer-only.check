@@ -9,12 +9,12 @@
 #   the list of allowed repositories names it. The list is .loop/allowed-repositories in the main checkout, with one
 #   owner/name to a line.
 # - pushing to a URL instead of a remote, and a git push that can skip the leak scan: with --no-verify or a start of it,
-#   such as --no-veri, or with core.hooksPath set by git's -c or --config-env
+#   such as --no-veri, or with git hooks other than the ones in scripts/git-hooks of a worktree of its repository
 # - gh pr merge --admin, and changing the repository's rulesets or security settings with gh api, gh repo edit or
 #   gh repo deploy-key
 # - printing the whole environment with env or printenv, because it holds tokens
 # A path or a repository that a variable other than HOME decides goes ahead, because the hook can't tell it before the
-# command runs.
+# command runs. A push goes ahead only when the hook can tell which git hooks it runs.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 
@@ -25,6 +25,12 @@ repo_edit_flags_with_value=" --add-topic --default-branch -d --description -h --
 # The endpoints of gh api that hold the repository's rules and security settings, such as its rulesets, its deploy
 # keys and the settings that scripts/configure-github turns on.
 security_endpoint='rulesets|/protection|/collaborators|/keys|/hooks|actions/permissions|/environments|vulnerability-alerts|automated-security-fixes|private-vulnerability-reporting|code-scanning/default-setup'
+
+# The words before git that set a variable which says where git's repository and its settings are, as git help git and
+# git help config list them, and GIT_CONFIG_PARAMETERS, which holds the -c options that git passes on to the git
+# commands it runs. The hook passes on only these variables to its own git, because others, such as PATH or
+# LD_PRELOAD, could make the hook run a program that the command chooses.
+git_location_variable='^(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_CEILING_DIRECTORIES|GIT_DISCOVERY_ACROSS_FILESYSTEM|GIT_CONFIG_PARAMETERS|GIT_CONFIG_COUNT|GIT_CONFIG_KEY_[0-9]+|GIT_CONFIG_VALUE_[0-9]+|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_CONFIG_NOSYSTEM|HOME|XDG_CONFIG_HOME)='
 
 ask="Ask the maintainer, and go on with the other work."
 # AGENTS.md lets agents make public the repositories that they create from this template to test it.
@@ -371,15 +377,75 @@ check_delete() {
   done
 }
 
+# Runs git as the git command in command_words runs, in command_folder, with its options before the subcommand and the
+# variables in git_variables, but with other arguments. Run it in a subshell, because it exports the variables:
+# run_git_as_command <argument>...
+run_git_as_command() {
+  local assignment
+  for assignment in ${git_variables[@]+"${git_variables[@]}"}; do
+    export "${assignment?}"
+  done
+  git -C "$command_folder" "${command_words[@]:1:git_subcommand-1}" "$@"
+}
+
+# Prints what run_git_as_command prints with the arguments, or fails and prints git's error on one line:
+# ask_git_as_command <argument>...
+ask_git_as_command() {
+  local output
+  if output=$(run_git_as_command "$@" 2>/dev/null); then
+    printf '%s\n' "$output"
+    return 0
+  fi
+  output=$(run_git_as_command "$@" 2>&1 >/dev/null) || true
+  printf '%s\n' "${output//$'\n'/ }"
+  return 1
+}
+
+# Blocks a push when git fails with its options and variables: block_unknown_hooks <git's error>
+block_unknown_hooks() {
+  block "Blocked: the hook can't tell which git hooks this push would run, so it can't check that the pre-push hook scans the push for leaks. git fails with the push's options and the variables before git, as the command writes them: $1. Fix what git says. The hook doesn't fill in variables or run \$( ), so write those words out in full."
+}
+
+# Blocks a push that would run git hooks other than the ones in scripts/git-hooks of the main checkout or another
+# worktree of its repository, because only those scan the push for leaks. git takes the folder from core.hooksPath,
+# which the repository's config, an included file, -c, --config-env and the variables before git can set, or else uses
+# .git/hooks. A relative core.hooksPath starts from the folder that the push runs in, which -C, --git-dir and
+# --work-tree can move. So the hook asks git, with the push's options and variables as the command writes them. env's
+# -i and -u don't count, because they only take variables away, and of these variables the agent's environment usually
+# holds only HOME: check_push_hooks <the words before the command's name>...
+check_push_hooks() {
+  local word hooks worktrees physical_hooks line
+  git_variables=()
+  for word in "$@"; do
+    if [[ $word =~ $git_location_variable ]]; then
+      git_variables+=("$word")
+    fi
+  done
+  if [[ -z $command_folder ]]; then
+    block "Blocked: the hook can't tell which folder this push runs in, so it can't check that the pre-push hook scans the push for leaks. Push in a folder that exists, and name it without variables or \$( ), as in git -C <folder> push."
+  fi
+  if ! hooks=$(ask_git_as_command rev-parse --path-format=absolute --git-path hooks); then
+    block_unknown_hooks "$hooks"
+  fi
+  if ! worktrees=$(ask_git_as_command worktree list --porcelain); then
+    block_unknown_hooks "$worktrees"
+  fi
+  physical_hooks=$(physical_path "$hooks" /)
+  while IFS= read -r line; do
+    if [[ $line == "worktree "* && $(physical_path "${line#worktree }/scripts/git-hooks" /) == "$physical_hooks" ]]; then
+      return 0
+    fi
+  done <<<"$worktrees"
+  block "Blocked: this push would run the git hooks in $hooks, not the ones in scripts/git-hooks of the repository's main checkout or of one of its worktrees, so the pre-push hook wouldn't scan the push for leaks. If the repository's core.hooksPath names another folder, or none, run scripts/install-git-hooks. Push from the main checkout or a worktree, without setting core.hooksPath for the push."
+}
+
+# check_git_push <the words before the command's name>...
 check_git_push() {
   read_push_arguments
   if has_git_flag --no-verify; then
     block "Blocked: --no-verify skips the pre-push hook, which scans the push for leaks. Push without it. If the scan finds a leak, take it out of the commits."
   fi
-  # git runs the hooks in the folder that core.hooksPath names, and the hook can't tell which hooks are there.
-  if gives_git_setting core.hooksPath; then
-    block "Blocked: setting core.hooksPath for a push can skip the pre-push hook, which scans the push for leaks. Push without setting it."
-  fi
+  check_push_hooks "$@"
   # A URL, or an address such as git@github.com:owner/name.git
   if [[ $push_remote == *://* || $push_remote =~ ^[^/]+@[^/]+: ]]; then
     block "Blocked: this pushes to a URL instead of a remote, and only the maintainer may do that. Push to a remote that git remote -v lists, such as origin, or ask the maintainer."
@@ -703,7 +769,7 @@ check_simple_command() {
     git)
       read_git_options
       case ${command_words[git_subcommand]:-} in
-        push) check_git_push ;;
+        push) check_git_push "${@:1:prefix_count}" ;;
         config) check_git_config ;;
       esac
       ;;

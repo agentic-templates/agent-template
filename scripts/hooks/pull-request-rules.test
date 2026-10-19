@@ -138,6 +138,9 @@ git -C "$base/seed" add --all
 git -C "$base/seed" commit --quiet -m "chore: start the project"
 git -C "$base/seed" push --quiet "$origin" main
 git clone --quiet "$origin" "$clone"
+# git runs the clone's hooks in its scripts/git-hooks, so that scripts/hooks/maintainer-only.check lets its pushes go
+# ahead.
+git -C "$clone" config core.hooksPath scripts/git-hooks
 git -C "$clone" switch --quiet -c co-authored
 git -C "$clone" commit --quiet --allow-empty -m "feat: export the totals" -m "Co-authored-by: Claude <noreply@anthropic.com>"
 git -C "$clone" switch --quiet -c work main
