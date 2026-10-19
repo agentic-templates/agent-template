@@ -11,10 +11,11 @@ failed_cases=0
 
 base=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$base"' EXIT
-# git looks for no repository above the temporary folder, reads none of the person's settings,
-# and commits as a stand-in person.
+# git looks for no repository above the temporary folder, reads none of the person's settings, prints its messages in
+# English, and commits as a stand-in person.
 export GIT_CEILING_DIRECTORIES=$base
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export LC_ALL=C
 export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com
 export GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
 mkdir -p "$base/bin" "$base/answers"
@@ -150,6 +151,12 @@ begin_case "When a pull request merges while the main checkout has another branc
 git -C "$case_dir/main" switch --quiet --create 13-export-csv
 run_wait "$merging" ""
 expect_result 0 "$(merged_without_main "$case_dir/main has the branch 13-export-csv checked out.")"
+expect_main "$start"
+
+begin_case "When a pull request merges while the main checkout has no branch checked out"
+git -C "$case_dir/main" switch --quiet --detach
+run_wait "$merging" ""
+expect_result 0 "$(merged_without_main "$case_dir/main has no branch checked out.")"
 expect_main "$start"
 
 begin_case "When a pull request merges while the main checkout has changes that the fast-forward would overwrite"
