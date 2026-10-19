@@ -65,7 +65,8 @@ sys.stderr.write(answer.get("stderr", ""))
 sys.exit(answer.get("status", 0))
 """.replace("PYTHON", sys.executable)
 
-# The stand-in for uv runs the real uv for each call but uv sync, such as for scripts/leak-scan, which uv runs.
+# The stand-in for uv runs the real uv for each call but uv sync, such as for scripts/leak-scan, which uv runs, unless a
+# test has it run the real uv for uv sync too.
 REAL_UV = shutil.which("uv")
 # A project without packages, so that the real uv installs it without the network
 PROJECT = '[project]\nname = "project"\nversion = "0"\nrequires-python = ">=3.12"\n'
@@ -726,7 +727,8 @@ class UvCacheTest(RunBuilderTest):
         environment.start()
         self.addCleanup(environment.stop)
         self.ran = self.root / "ran"
-        self.script = f"#!/bin/sh\ntouch '{self.ran}'\nexit 1\n"
+        # A Python that uv can't use, so that a run that starts it fails
+        self.fake_python = f"#!/bin/sh\ntouch '{self.ran}'\nexit 1\n"
 
     def push_earlier_run(self, files: dict[str, str]) -> None:
         """Pushes the files to the issue's branch, as the builder of an earlier run could. A file that starts with #!
@@ -743,7 +745,8 @@ class UvCacheTest(RunBuilderTest):
         self.git("commit", "--quiet", "--message", "chore: an earlier run", folder=clone)
         self.git("push", "--quiet", "origin", BRANCH, folder=clone)
 
-    def assert_ran_nothing_of_the_worktree(self) -> None:
+    def assert_build_runs_nothing_of_the_worktree(self) -> None:
+        """Runs a Codex builder, and checks that the run ends well and ran no code of the worktree."""
         status, printed, errors = self.run_builder("--tool", "codex")
         self.assertEqual((status, errors), (0, ""), printed)
         self.assertEqual(len(self.calls("codex")), 1)
@@ -755,16 +758,16 @@ class UvCacheTest(RunBuilderTest):
         backend = f"open({str(self.ran)!r}, 'w').close()\n"
         files = {"pyproject.toml": pyproject, "uv.lock": uv_lock(pyproject), "backend.py": backend}
         self.push_earlier_run({**self.project, **files})
-        self.assert_ran_nothing_of_the_worktree()
+        self.assert_build_runs_nothing_of_the_worktree()
 
     def test_runs_no_python_that_the_python_version_of_the_worktree_names(self) -> None:
-        self.push_earlier_run({**self.project, ".python-version": "./python\n", "python": self.script})
-        self.assert_ran_nothing_of_the_worktree()
+        self.push_earlier_run({**self.project, ".python-version": "./python\n", "python": self.fake_python})
+        self.assert_build_runs_nothing_of_the_worktree()
 
     def test_runs_no_python_of_a_venv_in_the_worktree(self) -> None:
-        venv = {".venv/pyvenv.cfg": f"version_info = {PYTHON_VERSION}", ".venv/bin/python": self.script}
+        venv = {".venv/pyvenv.cfg": f"version_info = {PYTHON_VERSION}", ".venv/bin/python": self.fake_python}
         self.push_earlier_run({**self.project, **venv})
-        self.assert_ran_nothing_of_the_worktree()
+        self.assert_build_runs_nothing_of_the_worktree()
 
 
 class CodexPushTest(RunBuilderTest):
