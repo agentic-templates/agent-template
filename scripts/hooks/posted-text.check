@@ -7,7 +7,8 @@
 # - the comment that -c or --comment gives to gh issue close, gh issue reopen, gh pr close and gh pr reopen
 # It reads the title from --title, the comment from --comment, and the body as read_body in helpers.bash reads it, as
 # the command writes them, without running $( ) or filling in variables. It allows a command that gives none of them,
-# such as gh issue edit 7 --add-label ready. scripts/hooks/pull-request-rules.check checks the text of gh pr create.
+# such as gh issue edit 7 --add-label ready. scripts/hooks/pull-request-rules.check checks the text of gh pr create and
+# gh pr edit.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 # shellcheck source=scripts/text-rules
