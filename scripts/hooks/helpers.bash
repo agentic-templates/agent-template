@@ -587,6 +587,17 @@ split_flag_word() {
   done
 }
 
+# Succeeds if gh reads a flag that takes no value, such as --draft, as true, from the value that split_flag_word gives
+# it: is_true_flag_value <value>
+# The value is empty when the word gives none, as in --draft, and gh then reads the flag as true. gh reads a value after
+# =, as in --draft=1, as Go's strconv.ParseBool does.
+is_true_flag_value() {
+  case $1 in
+    "" | 1 | t | T | true | TRUE | True) return 0 ;;
+  esac
+  return 1
+}
+
 # Reads the flags of a gh pr command from command_words, from its fourth word on, and fails when the command shows its
 # help or does a dry run: read_pull_request_flags <flags that take a value>
 # It sets pr_base, pr_head and pr_title to the values of --base, --head and --title, or to empty when the command
@@ -619,11 +630,11 @@ read_pull_request_flags() {
       -b | --body) body_source=text body_word=$value body_may_expand=${command_word_may_expand[i]:-} ;;
       -F | --body-file) body_source=file body_file=$value ;;
       -d | --draft)
-        # gh reads the value of --draft=<value> as Go's strconv.ParseBool does, so --draft=false opens no draft.
-        case $value in
-          "" | 1 | t | T | true | TRUE | True) pr_is_draft=yes ;;
-          *) pr_is_draft="" ;;
-        esac
+        # gh keeps the last value that the command gives --draft, so -d --draft=false opens no draft.
+        pr_is_draft=""
+        if is_true_flag_value "$value"; then
+          pr_is_draft=yes
+        fi
         ;;
     esac
   done
