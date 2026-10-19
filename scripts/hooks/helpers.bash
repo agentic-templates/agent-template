@@ -480,12 +480,13 @@ opens_pull_request() {
 }
 
 # Sets head_commit to the latest commit of the pull request of opens_pull_request, in the repository of the current
-# folder, or fails when it can't find it: the latest commit of the branch that --head names, or HEAD.
+# folder, or fails when it can't find it: the latest commit of the branch that --head names, or HEAD when it names none.
 find_head_commit() {
-  local head_ref=HEAD
+  local head_ref=HEAD branch
   # --head can name the branch as <user>:<branch>.
-  if [[ -n $pr_head ]]; then
-    head_ref=refs/heads/${pr_head#*:}
+  branch=${pr_head#*:}
+  if [[ -n $branch ]]; then
+    head_ref=refs/heads/$branch
   fi
   head_commit=$(git rev-parse --verify --quiet "$head_ref^{commit}") || return 1
 }

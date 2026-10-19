@@ -134,6 +134,9 @@ co_authored_commit=$(git rev-parse --short co-authored)
 co_authored="Commit $co_authored_commit \"feat: export the totals\" has a Co-authored-by trailer, for Claude <noreply@anthropic.com>. Rewrite the commit without the trailer, such as with git commit --amend when it's the latest commit, and push the branch again with --force-with-lease."
 expect_block Bash "gh pr create --head co-authored --title '$title' --body-file ../body.md" "$(blocked "$co_authored")"
 expect_block Bash "gh pr create -H jtmpl:co-authored --title '$title' --body-file ../body.md" "$(blocked "$co_authored")"
+# With no branch after the colon, the commits are those of HEAD.
+expect_block Bash "gh pr create --head jtmpl: --title 'skip the expenses that were already imported' --body-file ../body.md" \
+  "$(blocked "$not_a_type")"
 
 # Bodies from here-documents and standard input, with quotes in the text, which would end a quoted word
 quoted_body=${body/"skips the expenses"/skips the \"imported\" expenses}
