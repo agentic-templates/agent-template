@@ -5,8 +5,8 @@ own:
   scripts/loop/run-tests [--part <part>/<parts>] [<folder>]
 
 The script prints the outputs of the parts in order, so that they don't mix. A failure in any part fails the script.
-With --part, as in --part 2/3, it runs only every third test of the folder, starting with the second, in its own
-process.
+With --part, as in --part 2/3, it runs only every third test of the folder, starting with the second, without
+starting other processes.
 """
 
 import argparse
@@ -20,10 +20,9 @@ import unittest
 from collections.abc import Iterator
 from pathlib import Path
 
-# The checks on a pull request should take about a minute, as "Commands" in AGENTS.md says, and in one process the
-# tests took 48 of the linux job's 77 seconds in CI. The tests spend about half their time waiting for the processes
-# that they start, so the parts outnumber the 4 cores of CI's runner.
-PARTS = 4
+# The checks on a pull request should take about a minute, as "Commands" in AGENTS.md says. With 8 parts, CI's linux
+# job took 38 seconds on average, and with 4 parts 47.5 seconds, as a comment on issue #117 shows.
+PARTS = 8
 
 
 def main() -> int:
