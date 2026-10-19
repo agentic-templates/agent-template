@@ -12,6 +12,7 @@
 #   loop once the orchestrator's process has ended. Any other session gets a line that names the orchestrator. After a
 #   compaction that Claude Code started on its own, the orchestrator also gets a line that says the file may be behind.
 #   The hook reads what started the compaction from the record that scripts/hooks/before-compact wrote, and deletes it.
+#   After a compaction of the orchestrator, it also deletes the orchestrator's request for one, .loop/compact-request.txt.
 # In a Claude Code on the web session, it also installs the tools that scripts/check runs, as CI does.
 # Copilot CLI and Cursor also run the hooks in .claude/settings.json, so the hook does nothing outside Claude Code.
 # When it fails on its own error, it exits with code 0, so that a broken hook never stops work.
@@ -234,15 +235,26 @@ if [[ -n $state_file && -f $state_file ]]; then
   # A compaction that Claude Code starts on its own can come in the middle of a step, such as after the orchestrator
   # started a builder and before it wrote the builder in its state file. A compaction that the orchestrator asks for,
   # or that the maintainer types, comes between turns. Only a session that can run the loop reads and deletes its
-  # record, because a subagent's input can hold the orchestrator's session id.
+  # record and its compaction request, because a subagent's input can hold the orchestrator's session id.
   behind_note=""
-  if [[ -n $can_run_loop && $event_source == compact ]] && record=$(compaction_record "$loop" "$session_id") &&
-    [[ -f $record ]]; then
-    trigger=""
-    IFS= read -r trigger 2>/dev/null <"$record" || true
-    rm -f "$record" || true
-    if [[ $trigger == auto ]]; then
-      behind_note="Claude Code compacted this conversation when the context filled, maybe in the middle of a step. So your state file may lack the steps you took after the time on its updated: line. Before you go on, check the file against the open pull requests, the issues assigned to you and the agents that scripts/loop/meter lists, and add to it what it lacks."
+  if [[ -n $can_run_loop && $event_source == compact ]]; then
+    # The maintainer's compaction sender types /compact when it finds the orchestrator's request. A compaction that
+    # came another way leaves the request in place, and the sender would then compact the context a second time.
+    request=$loop/compact-request.txt
+    requester=""
+    if [[ -f $request ]]; then
+      IFS= read -r requester 2>/dev/null <"$request" || true
+    fi
+    if [[ $requester == "$session_id" ]]; then
+      rm -f "$request" || true
+    fi
+    if record=$(compaction_record "$loop" "$session_id") && [[ -f $record ]]; then
+      trigger=""
+      IFS= read -r trigger 2>/dev/null <"$record" || true
+      rm -f "$record" || true
+      if [[ $trigger == auto ]]; then
+        behind_note="Claude Code compacted this conversation when the context filled, maybe in the middle of a step. So your state file may lack the steps you took after the time on its updated: line. Before you go on, check the file against the open pull requests, the issues assigned to you and the agents that scripts/loop/meter lists, and add to it what it lacks."
+      fi
     fi
   fi
   if [[ -n $can_run_loop && $owner == "$session_id" && $owner_process == "$CLAUDE_PID" ]]; then
