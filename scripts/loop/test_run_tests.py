@@ -24,7 +24,9 @@ class RunTestsTest(unittest.TestCase):
             f"        print('end {number:02}', flush=True)\n"
             for number in range(count)
         )
-        self.write_tests("test_printing", "import time\nimport unittest\n\nclass PrintingTest(unittest.TestCase):\n" + methods)
+        self.write_tests(
+            "test_printing", "import time\nimport unittest\n\nclass PrintingTest(unittest.TestCase):\n" + methods
+        )
 
     def run_script(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -87,4 +89,3 @@ class RunTestsTest(unittest.TestCase):
         done = self.run_script("--part", "2")
         self.assertEqual(done.returncode, 2)
         self.assertIn("takes a part such as 2/3, and got 2", done.stderr)
-
