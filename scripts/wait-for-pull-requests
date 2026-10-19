@@ -49,7 +49,8 @@ update_main_checkout() {
   if ! output=$(git -C "$checkout" fetch --quiet origin main 2>&1) ||
     ! output=$(git -C "$checkout" merge --ff-only --quiet origin/main 2>&1); then
     # git's reason takes several lines, and the orchestrator reads one.
-    echo "Can't fast-forward main in $checkout to origin/main, because git failed: $(printf '%s' "$output" | tr -s '\n\t' ' ')"
+    output=$(printf '%s' "$output" | tr -s '\n\t' ' ')
+    echo "Can't fast-forward main in $checkout to origin/main, because git failed: $output"
   fi
 }
 
