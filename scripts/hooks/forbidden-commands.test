@@ -13,7 +13,7 @@ test_cwd=$base/project
 other=$base/other
 git init --quiet "$test_cwd"
 git init --quiet "$other"
-# Cursor sends no folder, so its hook runs in the test's own folder.
+# The cases switch the project's branch with git symbolic-ref, which works in the folder that the test is in.
 cd "$test_cwd"
 
 # A stand-in for gh, first on the PATH, so that the cases ask nothing of GitHub. It records each call in TEST_GH_CALLS.

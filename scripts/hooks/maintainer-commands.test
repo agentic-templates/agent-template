@@ -13,7 +13,7 @@ test_home=$folders/home
 test_cwd=$folders/project
 other_clone=$test_home/test-repositories/other
 mkdir -p "$test_cwd" "$other_clone"
-# Cursor sends no folder, so its hook runs in the test's own folder.
+# The stand-in for gh answers by the folder it runs in, so the test starts in the project, where the agent works.
 cd "$test_cwd"
 
 # A stand-in for gh, first on the PATH, so that the cases ask nothing of GitHub.
