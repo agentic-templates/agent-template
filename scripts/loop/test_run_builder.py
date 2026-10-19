@@ -17,6 +17,7 @@ from unittest import mock
 from test_paths import GIT_ENVIRONMENT
 
 RUN_BUILDER = Path(__file__).with_name("run-builder")
+SCRIPTS = RUN_BUILDER.parents[1]
 # The script's file name has no .py, so the tests load it by its path.
 run_builder = types.ModuleType("run_builder")
 run_builder.__file__ = str(RUN_BUILDER)
@@ -77,6 +78,7 @@ CODEX_TURN = [
 REPORT = "The importer keeps every row now."
 # The git hooks of the main checkout, which record that they ran.
 GIT_HOOKS = ("post-checkout", "pre-commit", "pre-push")
+SAVE_SUBJECT = "chore: save the unfinished work of a stopped session"
 # A pull request that the branch has already, as gh pr list gives it.
 OWN_PULL_REQUEST = {"number": 6, "isCrossRepository": False, "isDraft": False, "autoMergeRequest": None}
 
@@ -105,8 +107,9 @@ def git(*arguments: str, folder: Path) -> str:
 @functools.cache
 def starting_repositories() -> tempfile.TemporaryDirectory[str]:
     """A folder that holds origin.git, a bare repository with one commit on main and on the issue's branch, and repo,
-    a clone of it whose origin has a GitHub URL, and whose git hooks record that they ran. Each test copies them,
-    because making them took 0.1 seconds of the 0.13 seconds of a test that stops before the run starts."""
+    a clone of it whose origin has a GitHub URL, whose git hooks record that they ran, and which has copies of
+    scripts/clear-worktrees and the script it reads. Each test copies them, because making them took 0.1 seconds of
+    the 0.13 seconds of a test that stops before the run starts."""
     folder = tempfile.TemporaryDirectory()
     root = Path(folder.name)
     origin, repo = root / "origin.git", root / "repo"
@@ -118,6 +121,9 @@ def starting_repositories() -> tempfile.TemporaryDirectory[str]:
         path.parent.mkdir(exist_ok=True)
         path.write_text(f'#!/bin/sh\ntouch "$STANDIN_DIR/{hook}-ran"\n')
         path.chmod(0o755)
+    (repo / "scripts").mkdir()
+    for script in ("clear-worktrees", "secret-file-names"):
+        shutil.copy2(SCRIPTS / script, repo / "scripts" / script)
     git("add", ".", folder=repo)
     git("commit", "--quiet", "-m", "chore: start", folder=repo)
     git("push", "--quiet", str(origin), "main", f"main:refs/heads/{BRANCH}", folder=repo)
@@ -168,6 +174,8 @@ class RunBuilderTest(unittest.TestCase):
                 "issue develop --list": [{"stdout": linked(BRANCH)}],
                 "issue comment": [{}],
                 "pr list": [{"stdout": "[]"}],
+                # scripts/clear-worktrees asks how many open pull requests the branch has.
+                f"pr list --head {BRANCH} --state open --json number --jq length": [{"stdout": "0\n"}],
                 "pr create": [{"stdout": "https://github.com/owner/repo/pull/7\n"}],
                 "pr merge": [{}],
                 "pr ready": [{}],
@@ -402,6 +410,68 @@ class ClaudeTest(RunBuilderTest):
         self.assertFalse((self.run_folder() / "report.md").exists())
 
 
+class UnsavedWorkTest(RunBuilderTest):
+    """A run that ends with changes in the worktree that nobody committed."""
+
+    def assert_branch_holds_the_unsaved_work(self) -> None:
+        self.assertEqual(self.origin_git("log", "-1", "--format=%s", BRANCH), SAVE_SUBJECT)
+        self.assertEqual(self.origin_git("show", f"{BRANCH}:half.txt"), "half")
+        self.assertFalse(self.worktree.exists())
+
+    def test_saves_the_changes_of_a_claude_builder_that_stopped_on_the_branch(self) -> None:
+        stopped = {"type": "result", "subtype": "error_during_execution", "is_error": True, "errors": ["Usage limit"]}
+        self.answer("claude", "", {"stdout": lines(INIT, stopped), "write": {"half.txt": "half\n"}})
+        status, printed, _ = self.run_builder("--tool", "claude")
+        self.assertEqual(status, 1)
+        self.assertIn("| failed: claude's result is error_during_execution: Usage limit |", printed)
+        self.assert_branch_holds_the_unsaved_work()
+
+    def test_saves_the_changes_of_a_codex_builder_that_stopped_with_the_hooks_of_the_main_checkout(self) -> None:
+        failed = {"type": "turn.failed", "error": {"message": "You've hit your usage limit."}}
+        # Codex changes the worktree's copy of a git hook, which git would run outside its sandbox.
+        changed_hook = '#!/bin/sh\ntouch "$STANDIN_DIR/branch-pre-push-ran"\n'
+        files = {"half.txt": "half\n", "git-hooks/pre-push": changed_hook}
+        self.answer("codex", "", {"stdout": lines(*CODEX_TURN[:2], failed), "write": files})
+        status, printed, _ = self.run_builder("--tool", "codex")
+        self.assertEqual(status, 1)
+        self.assertIn("| failed: codex's turn failed: You've hit your usage limit. |", printed)
+        self.assert_branch_holds_the_unsaved_work()
+        self.assertEqual(self.hooks_that_ran(), list(GIT_HOOKS))
+
+    def test_commits_but_does_not_push_the_changes_on_a_branch_that_has_an_open_pull_request(self) -> None:
+        self.answer("gh", f"pr list --head {BRANCH} --state open --json number --jq length", {"stdout": "1\n"})
+        self.answer("claude", "", {"stdout": lines(INIT, RESULT), "write": {"half.txt": "half\n"}})
+        status, printed, _ = self.run_builder("--tool", "claude")
+        self.assertEqual(status, 0, printed)
+        self.assertEqual(self.git("log", "-1", "--format=%s", BRANCH), SAVE_SUBJECT)
+        self.assertEqual(self.git("show", f"{BRANCH}:half.txt"), "half")
+        self.assertEqual(self.origin_git("rev-parse", BRANCH), self.origin_git("rev-parse", "main"))
+        self.assertFalse(self.worktree.exists())
+
+    def test_fails_and_keeps_the_worktree_when_clear_worktrees_leaves_it(self) -> None:
+        stopped = {"type": "result", "subtype": "error_during_execution", "is_error": True, "errors": ["Usage limit"]}
+        self.answer("claude", "", {"stdout": lines(INIT, stopped), "write": {"half.txt": "half\n", ".env": "A=1\n"}})
+        status, printed, _ = self.run_builder("--tool", "claude")
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "| failed: claude's result is error_during_execution: Usage limit, and scripts/clear-worktrees failed: "
+            f"Left {self.worktree}, which holds the branch of issue #12, because it has untracked files whose names "
+            "suggest a secret: .env |",
+            printed,
+        )
+        self.assertEqual((self.worktree / "half.txt").read_text(), "half\n")
+        self.assert_pushed_nothing()
+
+    def test_fails_when_clear_worktrees_leaves_the_worktree_of_a_run_that_finished(self) -> None:
+        self.answer("claude", "", {"stdout": lines(INIT, RESULT), "write": {".env": "A=1\n"}})
+        status, printed, _ = self.run_builder("--tool", "claude")
+        self.assertEqual(status, 1)
+        self.assertIn(
+            f"| failed: scripts/clear-worktrees failed: Left {self.worktree}, which holds the branch", printed
+        )
+        self.assertTrue(self.worktree.exists())
+
+
 class ClaudeProblemTest(unittest.TestCase):
     def test_is_none_for_a_success_and_exit_code_0(self) -> None:
         self.assertIsNone(run_builder.claude_problem(RESULT, 0))
@@ -487,7 +557,7 @@ class CodexTest(RunBuilderTest):
         self.assertEqual(status, 1)
         self.assertIn("| failed: codex's turn failed: You've hit your usage limit. |", printed)
         self.assertFalse(self.worktree.exists())
-        self.assert_pushed_nothing()
+        self.assertEqual(self.calls("gh", "pr create"), [])
 
     def test_pushes_to_the_pull_request_that_the_branch_has_and_leaves_its_auto_merge_alone(self) -> None:
         listed = [{**OWN_PULL_REQUEST, "number": 5, "isCrossRepository": True}, OWN_PULL_REQUEST]

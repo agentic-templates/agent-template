@@ -5,9 +5,10 @@
 
 <issue> <kind> is the line that scripts/take-next-issue printed, such as 12 other. The builder runs on the account
 called NAME in .loop/accounts.json, which scripts/loop/meter --help describes, or on the tool's first account there.
-It works in .claude/worktrees/run-<issue> in the main checkout, on the issue's branch, and the script removes the
-worktree when the run ends. The script doesn't start when that worktree exists already, or when the issue has
-needs-triage.
+It works in .claude/worktrees/run-<issue> in the main checkout, on the issue's branch. When the run ends, the script
+runs scripts/clear-worktrees <issue>, which commits the changes that the builder left on the branch, pushes the
+branch unless it has an open pull request, and removes the worktree. The run fails when that script leaves the
+worktree. The script doesn't start when that worktree exists already, or when the issue has needs-triage.
 
 A Claude builder builds the issue as "Build one issue" in docs/building.md describes.
 
@@ -166,7 +167,9 @@ def main(argv: list[str] | None = None) -> int:
 def build(
     options: argparse.Namespace, kind: str, account: Account, issue: dict[str, Any], repository: str, folders: Folders
 ) -> str:
-    """Runs the builder in its worktree, and returns how the run ended."""
+    """Runs the builder in its worktree, saves the changes that it left on the issue's branch, and removes the
+    worktree. Returns how the run ended."""
+    failure: Stop | None = None
     try:
         branch = make_worktree(issue["number"], repository, folders)
         brief = brief_for(issue, kind, options.tool)
@@ -178,11 +181,41 @@ def build(
         effort = f'model_reasoning_effort="{options.effort}"' if options.effort else None
         run_codex(brief, account, [*option("--model", options.model), *option("--config", effort)], folders)
         return finish_codex(issue, branch, folders)
+    except Stop as stop:
+        failure = stop
+        raise
     finally:
         # Another run on the issue can't start while the worktree exists, and scripts/start-issue can't check out the
         # branch while the worktree has it.
-        if folders.worktree.exists():
-            git(["worktree", "remove", "--force", str(folders.worktree)], folders.checkout, folders.hooks)
+        problem = clear_worktree(issue["number"], folders)
+        if problem:
+            raise Stop(f"{failure}, and {problem}" if failure else problem) from failure
+
+
+def clear_worktree(issue: int, folders: Folders) -> str:
+    """Saves the changes in the worktree on the issue's branch and removes the worktree, as scripts/clear-worktrees
+    does for the issue. Returns why the worktree stays, or an empty string."""
+    if not folders.worktree.exists():
+        return ""
+    # Git runs the main checkout's hooks, because the worktree's copies are files that the builder can change.
+    count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
+    hooks = {"GIT_CONFIG_COUNT": str(count + 1), f"GIT_CONFIG_KEY_{count}": "core.hooksPath"}
+    hooks[f"GIT_CONFIG_VALUE_{count}"] = folders.hooks
+    # The main checkout's copy, because the script frees the worktrees of the checkout that holds it.
+    done = subprocess.run(
+        [folders.checkout / "scripts" / "clear-worktrees", str(issue)],
+        env=os.environ | hooks,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if done.returncode != 0:
+        return f"scripts/clear-worktrees failed: {one_line(done.stdout + done.stderr)}"
+    # The script leaves a worktree that doesn't hold the issue's branch, as when the worktree holds the commit of a
+    # Codex builder's changes that a check refused.
+    if folders.worktree.exists():
+        git(["worktree", "remove", "--force", str(folders.worktree)], folders.checkout, folders.hooks)
+    return ""
 
 
 def option(flag: str, value: str | None) -> list[str]:
