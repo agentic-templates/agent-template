@@ -106,12 +106,8 @@ expect_result() {
   fi
 }
 
-# Every tool's input goes through read_input in helpers.bash, so expect_block and expect_allow run a case only in the
-# first tool that sends its action. expect_block_in_each_tool runs a case in each tool, to cover each tool's form of
-# input.
-
-# Checks that the hook blocks an action in the first tool that sends it:
-# expect_block <tool name> <command, patch or path> <message>
+# Checks that the hook blocks an action in the first tool that sends it, which is enough because every tool's input
+# goes through read_input in helpers.bash: expect_block <tool name> <command, patch or path> <message>
 expect_block() {
   local tools
   tools=$(tools_for "$1")
