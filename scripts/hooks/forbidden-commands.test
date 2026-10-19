@@ -69,7 +69,52 @@ expect_block Bash 'gh pr list' "${old_gh/2.97.0/1.99.0}"
 for TEST_GH_VERSION in 2.98.0 2.102.0 3.0.0 "that can't be read" fail; do
   expect_allow Bash 'gh pr list'
 done
+
+# Runs the hook on gh pr list, and checks its result and whether it ran gh --version:
+# expect_version_run <description> <exit code> <message> <yes or no>
+expect_version_run() {
+  local description=$1 status=$2 message=$3 must_run=$4 ran=no
+  : >"$TEST_GH_CALLS"
+  run_hook "$(sample_input claude-code Bash 'gh pr list')"
+  expect_result "$description, the hook for gh pr list" "$status" "$message"
+  if grep -qxF -e --version "$TEST_GH_CALLS"; then
+    ran=yes
+  fi
+  case_count=$((case_count + 1))
+  if [[ $ran != "$must_run" ]]; then
+    echo "error: $description, whether the hook for gh pr list runs gh --version must be $must_run, but it was $ran." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# gh --version runs again only when the hook finds another gh. The hook records the gh in the loop's folder.
+unset HOOK_GH_VERSION_FILE
+export LOOP_DIR=$base/loop
 TEST_GH_VERSION=2.98.0
+expect_version_run "With no gh recorded" 0 "" yes
+expect_version_run "With the same gh" 0 "" no
+# A package manager can give the new file the package's time, which is older than the file before.
+TEST_GH_VERSION=2.97.0
+touch -t 200001010000 "$stand_in/gh"
+expect_version_run "After an update to an older gh" 2 "$old_gh" yes
+expect_version_run "With the same old gh" 2 "$old_gh" no
+TEST_GH_VERSION=2.98.0
+cp -p "$stand_in/gh" "$base/gh-update"
+mv "$base/gh-update" "$stand_in/gh"
+expect_version_run "After an update to a new file with the old file's time" 0 "" yes
+expect_version_run "With the same updated gh" 0 "" no
+mkdir "$base/other-bin"
+ln -s "$stand_in/gh" "$base/other-bin/gh"
+PATH=$base/other-bin:$PATH
+expect_version_run "With the same file at another path" 0 "" yes
+PATH=${PATH#"$base/other-bin:"}
+expect_version_run "With the file at its first path again" 0 "" yes
+# A record that another hook is still writing lacks the end of its version.
+record=$(<"$LOOP_DIR/gh-version")
+printf '%s' "${record%8.0 *}" >"$LOOP_DIR/gh-version"
+expect_version_run "With an incomplete record" 0 "" yes
+expect_version_run "With the record complete again" 0 "" no
+export HOOK_GH_VERSION_FILE=/dev/null
 
 # Approving a workflow run
 approval="Blocked: a maintainer decides whether to approve a workflow run, because the run executes the code of a pull request from outside the project. Go on with the other work, and list the run in your report for the maintainer."
