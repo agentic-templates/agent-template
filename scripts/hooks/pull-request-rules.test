@@ -22,12 +22,13 @@ export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_
 mkdir "$base/bin"
 cat >"$base/bin/gh" <<'STAND_IN'
 #!/usr/bin/env bash
-if [[ ${1:-} == issue && ${2:-} == develop && ${3:-} == --list ]]; then
-  case ${4:-} in
-    12) ;;
-    20) printf '20-show-the-totals\thttps://github.com/owner/repo/tree/20-show-the-totals\n' ;;
+# The query for the branches of an issue gives the issue's number in its eighth argument, as number=<number>.
+if [[ ${1:-} == api && ${2:-} == graphql ]]; then
+  case ${8:-} in
+    number=12) ;;
+    number=20) echo 20-show-the-totals ;;
     *)
-      echo "GraphQL: Could not resolve to an issue or pull request with the number of ${4:-}. (repository.issue)" >&2
+      echo "gh: Could not resolve to an issue or pull request with the number of ${8#number=}." >&2
       exit 1
       ;;
   esac

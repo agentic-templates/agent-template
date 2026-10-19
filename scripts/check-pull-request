@@ -8,8 +8,9 @@
 #   which gh looks up, is open, is in this repository, and has neither the label research nor sub-issues.
 # - If the pull request's branch was created for an issue, the body closes no other issue. scripts/start-issue creates
 #   each branch with gh issue develop, which names the branch after the issue's number, as in
-#   12-skip-imported-expenses, and links it to the issue. A branch that no issue links to, such as one that a
-#   maintainer created by hand, has no issue that the body must close.
+#   12-skip-imported-expenses, and links it to the issue. Once a pull request from the branch opens, GitHub links the
+#   pull request to the issue instead. A branch that no issue links to, such as one that a maintainer created by hand,
+#   has no issue that the body must close.
 # - No word that closes an issue comes right before an issue's number in the middle of a line, as in
 #   "the pull request that fixed #12", because GitHub closes that issue too.
 # - The body has the heading of .github/pull_request_template.md, "What changed and why", at any level, with text
@@ -129,6 +130,23 @@ fi
 # Group 1 holds the number.
 issue_branch_name='^([1-9][0-9]*)-'
 
+# The query for the branches that link to an issue: those that gh issue develop linked to it, and those of the open
+# pull requests that GitHub linked to it. GitHub moves the link from a branch to the pull request from it once the
+# pull request opens, so the branch is in one list or the other.
+# shellcheck disable=SC2016 # The $ words are the query's variables, which GitHub fills in, not the shell's.
+branches_query='query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    issueOrPullRequest(number: $number) {
+      ... on Issue {
+        linkedBranches(first: 100) { nodes { ref { name } } }
+        closedByPullRequestsReferences(first: 100, userLinkedOnly: true) { nodes { headRefName } }
+      }
+    }
+  }
+}'
+# Prints the name of each branch, one to a line. A pull request's number gives no Issue, and so no branch.
+branches_filter='.data.repository.issueOrPullRequest | (.linkedBranches.nodes[]?.ref.name // empty), (.closedByPullRequestsReferences.nodes[]?.headRefName)'
+
 # Reports the issues that the body closes, other than the one that the pull request's branch was created for:
 # check_branch_issue
 check_branch_issue() {
@@ -145,16 +163,15 @@ check_branch_issue() {
   if [[ -z $other_issues ]]; then
     return 0
   fi
-  if ! answer=$(gh issue develop --list "$number" 2>&1); then
-    # gh fails with this error when no issue has the number, as when a pull request has it. Then no issue links to
-    # the branch.
-    if [[ $answer != *"Could not resolve to an "* ]]; then
+  if ! answer=$(gh api graphql -F owner='{owner}' -F repo='{repo}' -F number="$number" -f query="$branches_query" \
+    --jq "$branches_filter" 2>&1); then
+    # gh fails with this error when no issue or pull request has the number, and then no issue links to the branch.
+    if [[ $answer != *"Could not resolve to an issue or pull request"* ]]; then
       report "Can't list the branches of issue #$number, because gh failed: $answer. Try again once gh can reach GitHub."
     fi
     return 0
   fi
-  # gh prints each branch that links to the issue, a tab and the branch's URL.
-  while IFS=$'\t' read -r listed _; do
+  while IFS= read -r listed; do
     if [[ $listed == "$branch" ]]; then
       report "The body closes $other_issues, but the branch $branch was created for #$number. Edit the body to close #$number instead."
       return 0
