@@ -56,7 +56,7 @@ new_folders() {
 # Arguments such as CLAUDE_CODE_REMOTE=true set more variables: run_session_start [<name>=<value>...]
 run_session_start() {
   hook_status=0
-  hook_output=$(cd "$work" && env -u CLAUDE_CODE_REMOTE -u CLAUDE_ENV_FILE -u CLAUDE_PID HOME="$home" CLAUDECODE=1 \
+  hook_output=$(cd "$work" && env -u CLAUDE_CODE_REMOTE -u CLAUDE_ENV_FILE -u CLAUDE_PID -u LOOP_DIR HOME="$home" CLAUDECODE=1 \
     PATH="$stand_in:$PATH" "$@" "$hooks_folder/session-start" <"$input_file") || hook_status=$?
 }
 
@@ -313,6 +313,16 @@ session_input compact owner-1
 run_session_start CLAUDE_PID="$running_process"
 expect_output "After a compaction of the orchestrator, the state file follows the note about the compaction" \
   "$compacted"$'\n'"$owner_note"$'\n\n'"$(<"$state_file")"
+
+# LOOP_DIR names another loop folder, which holds the state file.
+new_state_file
+other_loop=$home/other-loop
+mkdir -p "$other_loop"
+mv "$state_file" "$other_loop/state.md"
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process" LOOP_DIR="$other_loop"
+expect_output "With LOOP_DIR, the state file in its folder follows the note" \
+  "You are this repository's orchestrator. Continue the loop from your state file, $other_loop/state.md, which follows."$'\n\n'"$(<"$other_loop/state.md")"
 
 new_state_file
 session_input clear new-2

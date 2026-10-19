@@ -6,7 +6,7 @@ set -euo pipefail
 # shellcheck source=scripts/hooks/testing.bash
 source "${BASH_SOURCE[0]%/*}/testing.bash"
 # The cases check the log that the hook finds on its own.
-unset HOOK_BLOCK_LOG
+unset HOOK_BLOCK_LOG LOOP_DIR
 
 base=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$base"' EXIT
@@ -187,6 +187,12 @@ HOOK_BLOCK_LOG=$base/other.log run_copy "$main_checkout" Bash 'cat .env'
 expect_result "With HOOK_BLOCK_LOG, the hook" 2 "$env_message"
 expect_last_line "With HOOK_BLOCK_LOG" "secret-files.check .env" "$base/other.log"
 expect_line_count "With HOOK_BLOCK_LOG" "$blocks_before"
+
+# LOOP_DIR names another loop folder, which holds the log.
+LOOP_DIR=$base/other-loop run_copy "$main_checkout" Bash 'cat .env'
+expect_result "With LOOP_DIR, the hook" 2 "$env_message"
+expect_last_line "With LOOP_DIR" "secret-files.check .env" "$base/other-loop/blocks.log"
+expect_line_count "With LOOP_DIR" "$blocks_before"
 
 # Without the token shapes, the line leaves out every word.
 mv "$main_checkout/scripts/token-shapes" "$base/token-shapes"

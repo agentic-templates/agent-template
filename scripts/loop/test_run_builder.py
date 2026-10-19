@@ -590,6 +590,7 @@ class CodexTest(RunBuilderTest):
         self.assertIn("| failed: the hooks would block codex's report as a comment on the issue: Blocked:", printed)
         self.assertIn("holds a path into a home folder", printed)
         self.assertEqual(self.calls("gh", "issue comment"), [])
+        self.assertIn("posted-text.check", (self.loop / "blocks.log").read_text())
 
     def test_fails_when_codex_writes_no_report(self) -> None:
         self.answer("codex", "", {"stdout": lines(*CODEX_TURN), "write": {"built.txt": "built\n"}})
