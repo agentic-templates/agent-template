@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Blocks opening a pull request with gh pr create, or its alias gh pr new, when the title job in
 # .github/workflows/pr-title.yml would fail on it: when scripts/check-title fails on its title, or
-# scripts/check-pull-request on its title, body and commits. The message gives the scripts' errors. It also blocks a
-# pull request that isn't a draft and changes a file that scripts/consequential-paths lists, because a reviewer reads
-# that change before it merges, and the after-tool hook turns on auto-merge for every pull request that isn't a draft.
+# scripts/check-pull-request on its title, body, branch and commits. The message gives the scripts' errors. It also
+# blocks a pull request that isn't a draft and changes a file that scripts/consequential-paths lists, because a reviewer
+# reads that change before it merges, and the after-tool hook turns on auto-merge for every pull request that isn't a
+# draft.
 # - The hook reads the title from --title, and the body as read_body in helpers.bash reads it, as the command writes
 #   them, without running $( ) or filling in variables. It blocks a command that gives no title or no body, such as
 #   one with --fill.
-# - The pull request's commits are those that find_commits in helpers.bash finds. The hook allows the command when it
-#   can't find them, such as outside a git repository, before the branch exists here, or after a cd to a folder that
-#   it can't tell.
+# - The pull request's branch and commits are those that find_commits in helpers.bash finds. The hook allows the
+#   command when it can't find the commits, such as outside a git repository, before the branch exists here, or after
+#   a cd to a folder that it can't tell.
 # - A relative path to a body file starts from the folder that gh runs in, and git finds the repository from it. That's
 #   the folder the agent works in, or the one that a cd before gh changes to, as follow_cd in helpers.bash finds it.
 # shellcheck source=scripts/hooks/helpers.bash
@@ -68,7 +69,7 @@ check_gh_pr_create() {
   if ! output=$(trap - ERR && TITLE=$pr_title "$scripts_folder/check-title" 2>&1); then
     problems+=$output$'\n'
   fi
-  if ! output=$(trap - ERR && TITLE=$pr_title BODY=$body "$scripts_folder/check-pull-request" "$base_commit" "$head_commit" 2>&1); then
+  if ! output=$(trap - ERR && TITLE=$pr_title BODY=$body BRANCH=$head_branch "$scripts_folder/check-pull-request" "$base_commit" "$head_commit" 2>&1); then
     problems+=$output$'\n'
   fi
   if [[ -z $problems ]]; then

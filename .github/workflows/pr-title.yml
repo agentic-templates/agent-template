@@ -16,10 +16,12 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 2
-    # scripts/check-pull-request reads the issues that the body closes.
+    # scripts/check-pull-request reads the issues that the body closes, and the branches and pull requests that link to
+    # the issue that the pull request's branch was created for.
     permissions:
       contents: read
       issues: read
+      pull-requests: read
     steps:
       # scripts/check-pull-request reads the pull request's commits, so the checkout fetches the whole history.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -40,6 +42,8 @@ jobs:
         env:
           TITLE: ${{ github.event.pull_request.title }}
           BODY: ${{ github.event.pull_request.body }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: scripts/check-pull-request HEAD^1 HEAD^2
