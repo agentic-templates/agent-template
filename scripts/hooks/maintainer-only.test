@@ -3,6 +3,7 @@
 # a repository whose origin is jtmpl/project, so that they can list repositories in its loop's folder. The copy is in a
 # temporary folder, where deleting is allowed anyway, so the cases of deleting in the repository run this repository's
 # own hook.
+# shellcheck disable=SC2088 # The messages give each path as the command writes it, with ~.
 set -euo pipefail
 # shellcheck source=scripts/hooks/testing.bash
 source "${BASH_SOURCE[0]%/*}/testing.bash"
