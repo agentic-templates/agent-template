@@ -55,6 +55,8 @@ plain_for_each_simple_command() {
 # alone, reading a here-document, yes when it has other expansion syntax outside single quotes, or empty.
 # A cd between ( and ) changes the folder that follow_cd keeps only until the ), because the commands between them run
 # in a shell of their own.
+# check-complexity: skip, because simple-commands.test compares the hooks' splitter with this one, which stays as it was
+# before the hooks split each command once.
 plain_split_simple_commands() {
   local function=$1 text=$2
   local length=${#text} i char next
