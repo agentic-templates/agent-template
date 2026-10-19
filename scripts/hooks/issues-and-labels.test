@@ -83,6 +83,8 @@ done
 expect_allow Bash "gh issue create --title 'Bank files' --label research --body '$research_body'"
 expect_allow Bash "gh issue new --title 'Skip imported expenses' --label feature --body '$change_body'"
 expect_allow Bash "GH_DEBUG=1 gh issue create -t 'Skip imported expenses' -l feature -b '$change_body'"
+expect_allow Bash "gh issue create -t 'Skip imported expenses' -lfeature -b'$change_body'"
+expect_allow Bash "gh issue create -l=feature -b '$change_body'"
 
 # The type labels of a new issue, which --label can list separated by commas, and which GitHub matches in any case
 expect_allow Bash "gh issue create --label needs-triage,feature --body '$change_body'"
@@ -96,6 +98,8 @@ expect_block Bash "gh issue create --label bug,feature --body '$change_body'" \
   "Blocked: the new issue would have the type labels bug and feature. $type_label_rule Keep one of them in --label."
 expect_block Bash "gh issue create -l research -l Bug -l feature --body '$research_body'" \
   "Blocked: the new issue would have the type labels bug, feature and research. $type_label_rule Keep one of them in --label."
+expect_block Bash "gh issue create -lbug -lfeature --body '$change_body'" \
+  "Blocked: the new issue would have the type labels bug and feature. $type_label_rule Keep one of them in --label."
 
 # The headings of a new issue's body, which depend on whether the issue has research
 expect_block Bash "gh issue create --label feature --body '${change_body/"## Why"/Why}'" \
@@ -104,6 +108,8 @@ expect_block Bash "gh issue create --label feature --body '${change_body/"## Don
   "$(lacking "the body of the new issue" 'heading "Done when"' "Done when")"
 expect_block Bash "gh issue create --label feature --body '${change_body/"## What should change"/## What changes}'" \
   "$(lacking "the body of the new issue" 'heading "What should change"' "What should change")"
+expect_block Bash "gh issue create -t 'Skip imported expenses' -l feature -b'Notes'" \
+  "$(lacking "the body of the new issue" 'headings "What should change", "Why" and "Done when"' "What should change")"
 expect_block Bash "gh issue create --label bug --body ''" \
   "$(lacking "the body of the new issue" 'headings "What should change", "Why" and "Done when"' "What should change")"
 expect_block Bash "gh issue create --label research --body '$change_body'" "Blocked: the body of the new issue $not_change"
@@ -253,8 +259,11 @@ expect_allow Bash "gh issue edit 12 --body-file body.md"
 expect_allow Bash "gh issue edit 7 --body-file - <<'EOF'
 $change_body
 EOF"
-expect_block Bash "gh issue edit 7 --body 'Notes'" \
-  "$(lacking "the new body of issue 7" 'headings "What should change", "Why" and "Done when"' "What should change")"
+for body_flag in "--body " "-b" "-b="; do
+  expect_block Bash "gh issue edit 7 ${body_flag}'Notes'" \
+    "$(lacking "the new body of issue 7" 'headings "What should change", "Why" and "Done when"' "What should change")"
+done
+expect_allow Bash "gh issue edit 7 -b'$change_body'"
 expect_block Bash "gh issue edit 8 --body '$change_body'" "Blocked: the new body of issue 8 $not_change"
 expect_block Bash "gh issue edit 7 --body-file research.md" "Blocked: the new body of issue 7 $not_research"
 expect_block Bash "gh issue edit 7 --body-file missing.md" \
