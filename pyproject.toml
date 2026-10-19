@@ -29,12 +29,7 @@ extend-select = [
     # blanket suppression comments
     "PGH003",
     "PGH004",
-    # the complexity of a function
-    "C901",
 ]
-
-[tool.ruff.lint.mccabe]
-max-complexity = 10
 
 [tool.mypy]
 strict = true

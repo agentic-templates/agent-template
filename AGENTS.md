@@ -49,7 +49,7 @@ When a request doesn't fit this direction, say so, and ask the maintainer whethe
 - `scripts/loop/run-heavy <command> [<argument>...]`: runs a heavy command, such as a build or tests, once the machine has room for it, so that parallel builders don't crowd the machine. `scripts/check`, `scripts/test-scripts` and `scripts/test-check` run through it by themselves. `scripts/loop/run-heavy --help` says how it decides.
 - `scripts/loop/run-heavy scripts/loop/run-tests`: runs the tests of the Python scripts, which `scripts/check` runs too.
 
-The Python scripts, `scripts/leak-scan` and those in `scripts/loop`, need [uv](https://docs.astral.sh/uv/getting-started/installation/). When uv first runs one, it installs the Python version in `.python-version` and the packages in `uv.lock`.
+The Python scripts, `scripts/leak-scan`, `scripts/check-complexity` and those in `scripts/loop`, need [uv](https://docs.astral.sh/uv/getting-started/installation/). When uv first runs one, it installs the Python version in `.python-version` and the packages in `uv.lock`.
 
 Keep the checks on a pull request within about a minute.
 

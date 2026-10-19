@@ -33,7 +33,7 @@ jobs:
 
       # scripts/install-check-tools holds each tool's version and checksum. uv installs the Python version in
       # .python-version and the packages in uv.lock when scripts/check first runs it.
-      - name: Install shellcheck, actionlint, zizmor and uv
+      - name: Install shellcheck, shfmt, actionlint, zizmor and uv
         run: |
           scripts/install-check-tools "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
@@ -109,7 +109,7 @@ jobs:
 
       # The ShellCheck cases of scripts/test-check run shellcheck.
       # scripts/draft-assets.test runs actionlint and zizmor.
-      - name: Install shellcheck, actionlint, zizmor and uv
+      - name: Install shellcheck, shfmt, actionlint, zizmor and uv
         run: |
           scripts/install-check-tools "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
@@ -219,7 +219,7 @@ jobs:
           fetch-depth: 0
 
       # uv runs the scan with the Python version in .python-version.
-      - name: Install shellcheck, actionlint, zizmor and uv
+      - name: Install shellcheck, shfmt, actionlint, zizmor and uv
         run: |
           scripts/install-check-tools "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
