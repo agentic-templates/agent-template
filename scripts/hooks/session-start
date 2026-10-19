@@ -9,7 +9,9 @@
 # - a gh older than the rules need
 # - a missing jq, which the hooks need
 # - the orchestrator's state file, which it prints for the orchestrator, and for a new session that can take over the
-#   loop once the orchestrator's process has ended. Any other session gets a line that names the orchestrator.
+#   loop once the orchestrator's process has ended. Any other session gets a line that names the orchestrator. After a
+#   compaction that Claude Code started on its own, the orchestrator also gets a line that says the file may be behind.
+#   The hook reads what started the compaction from the record that scripts/hooks/before-compact wrote, and deletes it.
 # In a Claude Code on the web session, it also installs the tools that scripts/check runs, as CI does.
 # Copilot CLI and Cursor also run the hooks in .claude/settings.json, so the hook does nothing outside Claude Code.
 # When it fails on its own error, it exits with code 0, so that a broken hook never stops work.
@@ -184,12 +186,14 @@ is_running() {
   [[ $1 =~ ^[1-9][0-9]*$ ]] && kill -0 "$1" 2>/dev/null
 }
 
-# Prints a note, and then as many whole lines of the state file as fit in output_limit, so that the hook splits no
-# character of more than one byte: print_state_file <note>
+# Prints notes, and then as many whole lines of the state file as fit in output_limit, so that the hook splits no
+# character of more than one byte: print_state_file <note>...
 print_state_file() {
   # In the C locale, ${#line} counts bytes.
   local LC_ALL=C line file_bytes=0
-  note "$1"
+  for line in "$@"; do
+    note "$line"
+  done
   while IFS= read -r line || [[ -n $line ]]; do
     file_bytes=$((file_bytes + ${#line} + 1))
   done <"$state_file"
@@ -211,7 +215,8 @@ in_main_checkout=""
 if [[ -n $repository && -n $session_id && -n ${CLAUDE_PID:-} ]] &&
   git_folder=$(git -C "$repository" rev-parse --absolute-git-dir 2>/dev/null) &&
   shared_git_folder=$(git -C "$repository" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
-  state_file=$(loop_folder "$shared_git_folder" "$repository")/state.md
+  loop=$(loop_folder "$shared_git_folder" "$repository")
+  state_file=$loop/state.md
   if [[ $git_folder == "$shared_git_folder" ]]; then
     in_main_checkout=yes
   fi
@@ -226,10 +231,26 @@ if [[ -n $state_file && -f $state_file ]]; then
   if [[ -z $agent_id && -n $in_main_checkout ]]; then
     can_run_loop=yes
   fi
+  # A compaction that Claude Code starts on its own can come in the middle of a step, such as after the orchestrator
+  # started a builder and before it wrote the builder in its state file. A compaction that the orchestrator asks for,
+  # or that the maintainer types, comes between turns. A subagent leaves the record alone, because its input can hold
+  # the orchestrator's session id.
+  behind_note=""
+  if [[ $event_source == compact && -z $agent_id ]] && record=$(compaction_record "$loop" "$session_id") &&
+    [[ -f $record ]]; then
+    trigger=""
+    IFS= read -r trigger <"$record" || true
+    rm -f "$record" || true
+    if [[ $trigger == auto ]]; then
+      behind_note="Claude Code compacted this conversation when the context filled, maybe in the middle of a step. So your state file may lack the steps you took after the time on its updated: line. Before you go on, check the file against the open pull requests, the issues assigned to you and the agents that scripts/loop/meter lists, and add to it what it lacks."
+    fi
+  fi
   if [[ -n $can_run_loop && $owner == "$session_id" && $owner_process == "$CLAUDE_PID" ]]; then
-    print_state_file "You are this repository's orchestrator. Continue the loop from your state file, $state_file, which follows."
+    print_state_file "You are this repository's orchestrator. Continue the loop from your state file, $state_file, which follows." \
+      ${behind_note:+"$behind_note"}
   elif [[ -n $can_run_loop && ($owner == "$session_id" || $owner_process == "$CLAUDE_PID") ]]; then
-    print_state_file "You are this repository's orchestrator, in a new session or process. Write $both_lines of your state file, $state_file. Then continue the loop from the file, which follows."
+    print_state_file "You are this repository's orchestrator, in a new session or process. Write $both_lines of your state file, $state_file. Then continue the loop from the file, which follows." \
+      ${behind_note:+"$behind_note"}
   # A session that started earlier has work of its own, so only a new session can take over the loop.
   elif [[ -n $can_run_loop && $event_source == startup ]] && ! is_running "$owner_process"; then
     print_state_file "The Claude Code process of this repository's orchestrator has ended. If the maintainer asks you to continue its work, take over the loop: write $both_lines of its state file, $state_file, and continue the loop from the file, which follows."
