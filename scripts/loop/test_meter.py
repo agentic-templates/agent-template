@@ -685,12 +685,17 @@ class AgentsLineTest(MeterTest):
     def test_says_when_no_agent_runs_without_a_log(self) -> None:
         self.assertEqual(self.agents(), "agents | none running")
 
-    def test_leaves_out_an_agent_whose_claude_code_process_ended_and_lists_one_whose_process_runs(self) -> None:
+    def test_leaves_out_an_agent_whose_process_ended_and_lists_one_whose_process_runs_or_is_unknown(self) -> None:
         self.log("start", "toolu_01", issue=64, pid=101)
         self.log("start", "toolu_02", issue=65, pid=102)
+        self.log("start", "64-20261018-020000", issue=64, pid=103)
+        self.log("start", "65-20261018-020000", issue=65, pid=104)
         self.log("start", "toolu_03", issue=66)
-        with mock.patch.object(meter, "process_runs", lambda pid: pid == 102):
-            self.assertEqual(self.agents(), "agents | builder #65 context unknown | builder #66 context unknown")
+        with mock.patch.object(meter, "process_runs", lambda pid: pid in (102, 104)):
+            self.assertEqual(
+                self.agents(),
+                "agents | builder #65 context unknown | builder #65 context unknown | builder #66 context unknown",
+            )
 
 
 class ProcessTest(unittest.TestCase):

@@ -4,6 +4,7 @@ to agents.jsonl, and the test builds of a retrospective."""
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 from typing import Any
 
@@ -137,7 +138,7 @@ class AgentLinesTest(RunBuilderTest):
                 "label": "bug",
                 "kind": "other",
                 "test": False,
-                "pid": None,
+                "pid": os.getpid(),
             },
         )
         self.assert_run_usage(end)
@@ -204,7 +205,7 @@ class AgentLinesTest(RunBuilderTest):
                 "label": "bug",
                 "kind": "other",
                 "test": False,
-                "pid": None,
+                "pid": os.getpid(),
             },
         )
         self.assert_run_usage(end)

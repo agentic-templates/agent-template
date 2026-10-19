@@ -14,9 +14,9 @@ Each line is a JSON object. A start line holds:
   label           the issue's type label, such as feature, or null
   kind            the kind after the number, as scripts/take-next-issue prints it, or null
   test            true for a test build of a retrospective
-  pid             the id of the Claude Code process whose session started the agent, which writes the agent's end
-                  line, or null for a run of scripts/loop/run-builder. A start line written before start lines held
-                  the id has none.
+  pid             the id of the process that writes the agent's end line: the Claude Code process whose session
+                  started the agent, or the process of scripts/loop/run-builder. It's null when Claude Code gives no
+                  id, and a start line written before start lines held the id has none.
 
 An end line holds at, "end" as its event, the start line's id, and:
 
@@ -202,7 +202,7 @@ def start_line(
     label: str | None,
     kind: str | None,
     is_test: bool,
-    pid: int | None = None,
+    pid: int | None,
 ) -> dict[str, Any]:
     return {
         "at": now(),
