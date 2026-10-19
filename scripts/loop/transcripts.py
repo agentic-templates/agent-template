@@ -18,9 +18,9 @@ PULL_REQUEST_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/([1-9][
 # such as the loop's heartbeat, a hook's output and a compaction's summary have another origin or none.
 PERSON_ORIGIN = "human"
 QUEUED_MESSAGE = "queued_command"
-# Claude Code writes a system line when Claude's safety classifier stops a response. When it goes on once without the
-# response, the line's content holds these words. When the classifier refused the request, the line's subtype starts
-# with these words, as in model_refusal_no_fallback. Claude Code 2.1.303 writes them so.
+# Claude Code writes a system line when Claude's safety classifier stops a response. When Claude Code then asks once
+# for the rest of the response, the line's content holds these words. When the classifier refused the request, the
+# line's subtype starts with these words, as in model_refusal_no_fallback. Claude Code 2.1.303 writes them so.
 STOPPED_RESPONSE = "safeguards stopped the response"
 REFUSED_REQUEST = "model_refusal"
 
@@ -130,15 +130,46 @@ def is_prompt(entry: dict[str, Any]) -> bool:
     return not isinstance(content, list) or any(block.get("type") != "tool_result" for block in content)
 
 
-def safety_stops(file: Path) -> list[dt.datetime]:
-    """The times in a transcript at which Claude's safety classifier stopped a response or refused a request."""
-    return [dt.datetime.fromisoformat(entry["timestamp"]) for entry in timed_entries(file) if is_safety_stop(entry)]
+def safety_stops(entries: list[dict[str, Any]]) -> list[dt.datetime]:
+    """The times in a transcript's entries at which Claude's safety classifier stopped a response. A stop in the
+    request that asks for the rest of a stopped response stops the same response, so it doesn't count again."""
+    by_uuid = {entry["uuid"]: entry for entry in entries if entry.get("uuid")}
+    return [
+        dt.datetime.fromisoformat(entry["timestamp"])
+        for entry in entries
+        if is_safety_stop(entry) and not asks_for_the_rest(entry, by_uuid)
+    ]
 
 
 def is_safety_stop(entry: dict[str, Any]) -> bool:
     if entry.get("type") != "system":
         return False
     return str(entry.get("subtype")).startswith(REFUSED_REQUEST) or STOPPED_RESPONSE in str(entry.get("content"))
+
+
+def asks_for_the_rest(entry: dict[str, Any], by_uuid: dict[str, dict[str, Any]]) -> bool:
+    """Whether the entry is in the request that Claude Code sends after a stop to ask for the rest of the response.
+    Each entry names the entry before it in the conversation, and that request answers the message that Claude Code
+    writes right after the stop's line."""
+    answered = entry_before(entry, by_uuid)
+    while answered is not None and answered.get("type") == "assistant":
+        answered = entry_before(answered, by_uuid)
+    return answered is not None and is_safety_stop(entry_before(answered, by_uuid) or {})
+
+
+def entry_before(entry: dict[str, Any], by_uuid: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    """The entry that the entry names as the one before it in the conversation, or None if it names none."""
+    before = entry.get("parentUuid")
+    return by_uuid.get(before) if isinstance(before, str) else None
+
+
+def claude_code_versions(entries: list[dict[str, Any]], since: dt.datetime) -> set[str]:
+    """The versions of Claude Code that wrote a transcript's entries from the time on."""
+    return {
+        str(entry["version"])
+        for entry in entries
+        if entry.get("version") and dt.datetime.fromisoformat(entry["timestamp"]) >= since
+    }
 
 
 def person_messages(file: Path) -> list[Message]:
