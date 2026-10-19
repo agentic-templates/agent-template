@@ -254,6 +254,12 @@ expect_allow Bash "gh pr create -dh"
 expect_block Bash "gh pr create --help --help=false" \
   "Blocked: the command gives no title, so this hook can't check it. Give the title with --title."
 expect_allow Bash "gh pr create -h --help=false"
+# The shell can turn the letters or the word before the h into a flag that takes the h as its value, so the hook checks
+# a command with a word that may expand.
+for help in "-d\${x}h" "\$x -h" "--help \$x"; do
+  expect_block Bash "gh pr create $help" \
+    "Blocked: the command gives no title, so this hook can't check it. Give the title with --title."
+done
 expect_allow Bash "gh pr view 7 --json title"
 expect_allow Bash "echo gh pr create --fill"
 

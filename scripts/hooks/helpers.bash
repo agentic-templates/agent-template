@@ -605,19 +605,37 @@ is_true_flag_value() {
   return 1
 }
 
+# Succeeds if a word of command_words may expand, as $text and $(cat body.md) do.
+has_word_that_may_expand() {
+  local mark
+  for mark in ${command_word_may_expand[@]+"${command_word_may_expand[@]}"}; do
+    if [[ -n $mark ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Succeeds if gh stops reading the flags at the word that split_flag_word last split, and shows the command's help, so
 # that it posts nothing. gh has no flag -h of its own, so it stops at the h of a word of short flags, whatever follows
 # the h, as in -h, -dh and -h=false. read_help_flag reads --help.
+# It fails for a command with a word that may expand, as in -d${x}h or $x -h, because the shell can turn the letters or
+# the word before the h into a flag that takes the h as its value. The hooks then check the command.
 stops_for_help() {
+  if has_word_that_may_expand; then
+    return 1
+  fi
   [[ $flag == -h || $flags_before == *h* ]]
 }
 
 # Sets asks_for_help to yes or to empty when the word that split_flag_word last split is --help, from its value as
 # is_true_flag_value reads it, and leaves asks_for_help as it is for any other word: read_help_flag
 # gh keeps the last value that the command gives --help, so it shows the help only if asks_for_help is yes after the
-# last flag. It posts the text of --help --help=false.
+# last flag. It posts the text of --help --help=false. In a command with a word that may expand, as in --help $x, the
+# function leaves asks_for_help as it is, because the shell can turn that word into --help=false, or the word before
+# --help into a flag that takes --help as its value.
 read_help_flag() {
-  if [[ $flag != --help ]]; then
+  if [[ $flag != --help ]] || has_word_that_may_expand; then
     return 0
   fi
   asks_for_help=""
