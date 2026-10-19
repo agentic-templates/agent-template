@@ -25,8 +25,8 @@ The kinds:
   as Claude Code names a project's folder, and /Users/<user>/ or /home/<user>/ for the user who runs the scan.
 - socket-path: the socket paths in KITTY_LISTEN_ON and TMUX, and each path with the shape of a kitty, tmux, cc-socks
   or agent-coord socket.
-- token and private-key: a token of a kind in TOKEN_PATTERNS, a value of 20 or more characters assigned to a name such
-  as API_KEY, SECRET, TOKEN or PASSWORD, and a private key block.
+- token and private-key: a token of a kind that scripts/token-shapes lists, a value of 20 or more characters assigned
+  to a name such as API_KEY, SECRET, TOKEN or PASSWORD, and a private key block.
 - secret-file: an added .env or .env.* file other than .env.example, or an id_rsa*, id_dsa*, id_ecdsa*,
   id_ed25519*, *.p12 or *.pfx file other than a .pub file.
 
@@ -72,20 +72,22 @@ NAME_CHARACTER = re.compile(r"[A-Za-z0-9._-]")
 SLUG_CHARACTER = re.compile(r"[A-Za-z0-9._]")
 SUBMODULE_MODE = "160000"
 
-# Each kind of token, its shape, and how many characters of a match the excerpt keeps.
-TOKEN_PATTERNS = [
-    ("GitHub token", r"(?<![A-Za-z0-9])(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}", 4),
-    ("GitHub token", r"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{30,}", 11),
-    ("GitLab token", r"(?<![A-Za-z0-9])glpat-[A-Za-z0-9_-]{20,}", 6),
-    ("Anthropic key", r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}", 7),
-    ("OpenAI key", r"(?<![A-Za-z0-9])sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}", 8),
-    ("OpenAI key", r"(?<![A-Za-z0-9])sk-[A-Za-z0-9]{20,}", 3),
-    ("Stripe key", r"(?<![A-Za-z0-9])(?:sk|rk)_live_[A-Za-z0-9]{20,}", 8),
-    ("AWS access key ID", r"(?<![A-Za-z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])", 4),
-    ("Slack token", r"(?<![A-Za-z0-9])xox[abeoprs]-[A-Za-z0-9-]{10,}", 5),
-    ("Google API key", r"(?<![A-Za-z0-9])AIza[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])", 4),
-]
-TOKENS = [(what, re.compile(pattern), keep) for what, pattern, keep in TOKEN_PATTERNS]
+
+def read_token_shapes(path: Path) -> list[tuple[str, re.Pattern[str], int]]:
+    """Returns each kind of token in a file like scripts/token-shapes, the pattern that finds it, and how many
+    characters of a match the excerpt keeps."""
+    tokens: list[tuple[str, re.Pattern[str], int]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("#"):
+            continue
+        what, keep, shape, *not_after = line.split("\t")
+        end = f"(?![{not_after[0]}])" if not_after else ""
+        tokens.append((what, re.compile(f"(?<![A-Za-z0-9])(?:{shape}){end}"), int(keep)))
+    return tokens
+
+
+# Each kind of token, from the file that the hooks read too.
+TOKENS = read_token_shapes(Path(__file__).resolve().parent / "token-shapes")
 PRIVATE_KEY = re.compile(r"-----BEGIN[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----")
 # A value of 20 or more characters assigned to a name that says it's a secret, as in API_KEY = "..." or
 # "password": "...". Group 1 is the name, and group 2 the value. A name starts only after a character that can't be in

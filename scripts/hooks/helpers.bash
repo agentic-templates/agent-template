@@ -66,17 +66,18 @@ url_password='(://[^:/@[:space:]]*:)[^[:space:]]*@'
 left_out='[left out]'
 
 # Prints the words, joined by spaces, with each value that could hold a secret left out:
+# - each word that holds a token's shape from scripts/token-shapes
 # - the word after a flag whose name holds a secret's name, such as --token or --pat, or after -p, unless that word is
 #   a flag too
 # - the password in user:password after -u or --user, and in a URL
 # - the rest of a word after a name that holds a secret's name and an = or a colon, as in GH_TOKEN= or Cookie:, or
 #   after Bearer, or the next word when nothing follows them
-# Line breaks and other control characters become spaces, so that the words take one line:
-# words_without_secrets <word>...
+# Line breaks and other control characters become spaces, so that the words take one line. Fails when it can't read
+# the token shapes: words_without_secrets <word>...
 words_without_secrets() {
-  local word original follows="" leaves_out_next
+  local word original follows="" leaves_out_next token_shape
   local -a kept=()
-  shopt -s nocasematch
+  token_shape=$(token_shapes) || return 1
   for original in "$@"; do
     word=$original
     if [[ $follows == word && $word != -* ]]; then
@@ -84,6 +85,10 @@ words_without_secrets() {
     elif [[ $follows == password && $word == *:* ]]; then
       word=${word%%:*}:$left_out
     fi
+    if [[ $word =~ $token_shape ]]; then
+      word=$left_out
+    fi
+    shopt -s nocasematch
     if [[ $word =~ $url_password ]]; then
       word=${word/"${BASH_REMATCH[0]}"/"${BASH_REMATCH[1]}$left_out@"}
     fi
@@ -103,10 +108,22 @@ words_without_secrets() {
       leaves_out_next=password
     fi
     follows=$leaves_out_next
+    shopt -u nocasematch
   done
-  shopt -u nocasematch
   # tr, because bash 3.2 takes minutes to replace the characters in a text of 60 KB with line breaks.
   printf '%s' "${kept[*]}" | tr '[:cntrl:]' ' '
+}
+
+# Prints one extended regular expression that matches each shape that scripts/token-shapes lists, or fails when it
+# can't read the file.
+token_shapes() {
+  local kind shape pattern=""
+  while IFS=$'\t' read -r kind _ shape _; do
+    if [[ $kind != '#'* ]]; then
+      pattern+="${pattern:+|}($shape)"
+    fi
+  done <"$hooks_folder/../token-shapes" || return 1
+  printf '%s\n' "$pattern"
 }
 
 # Leaves out the text in word after the first time that a part appears in it, unless nothing follows the part, because
@@ -123,7 +140,7 @@ leave_out_after() {
 # The line holds the time, the check's file name and the words, with the values that could hold a secret left out, so
 # that its reader can tell a real block from a false alarm: log_block <word>...
 log_block() {
-  local log=${HOOK_BLOCK_LOG:-} git_folders shared_git_folder checkout line
+  local log=${HOOK_BLOCK_LOG:-} git_folders shared_git_folder checkout line words
   if [[ -z $log ]]; then
     git_folders=$(git -C "$hooks_folder" rev-parse --path-format=absolute --git-common-dir --show-toplevel) || return 0
     shared_git_folder=${git_folders%%$'\n'*}
@@ -132,8 +149,8 @@ log_block() {
     mkdir -p "${log%/*}" || return 0
   fi
   line="$(date -u +%Y-%m-%dT%H:%M:%SZ) ${0##*/}"
-  if (($# > 0)); then
-    line+=" $(words_without_secrets "$@")"
+  if (($# > 0)) && words=$(words_without_secrets "$@"); then
+    line+=" $words"
   fi
   printf '%s\n' "$line" >>"$log"
 }

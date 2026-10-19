@@ -131,6 +131,26 @@ expect_line_for 'git credential fill https://someone:abc123@example.com/reposito
 expect_line_for 'git credential fill https://someone:abc/123@example.com/repository' \
   'git credential fill https://someone:[left out]@example.com/repository'
 
+# The line leaves out each word that holds a token of a shape in scripts/token-shapes. The cases join each token from
+# two parts, so that this file holds none.
+key=AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCd
+tokens=(
+  "gh""p_$key"
+  "github""_pat_11ABCDEFG0_$key"
+  "glp""at-${key:0:20}"
+  "sk-""ant-api03-$key"
+  "sk-""proj-$key"
+  "sk-""$key"
+  "sk_""live_$key"
+  "AKI""AIOSFODNN7EXAMPLE"
+  "xox""b-1234567890-abcdefghij"
+  "AIz""aSyA-${key:0:31}"
+)
+for token in "${tokens[@]}"; do
+  expect_line_for "git credential fill $token" 'git credential fill [left out]'
+done
+expect_line_for "git credential fill 'the key ${tokens[0]} works' --verbose" 'git credential fill [left out] --verbose'
+
 # The word after a flag named for a secret stays when it's a flag too, because then it's no secret.
 expect_line_for 'git credential fill --with-token --verbose' 'git credential fill --with-token --verbose'
 
@@ -164,6 +184,13 @@ HOOK_BLOCK_LOG=$base/other.log run_copy "$main_checkout" Bash 'cat .env'
 expect_result "With HOOK_BLOCK_LOG, the hook" 2 "$env_message"
 expect_last_line "With HOOK_BLOCK_LOG" "secret-files.check .env" "$base/other.log"
 expect_line_count "With HOOK_BLOCK_LOG" "$blocks_before"
+
+# Without the token shapes, the line leaves out every word.
+mv "$main_checkout/scripts/token-shapes" "$base/token-shapes"
+run_copy "$main_checkout" Bash 'cat .env'
+expect_result "Without scripts/token-shapes, the hook" 2 "$env_message"
+expect_last_line "Without scripts/token-shapes" "secret-files.check"
+mv "$base/token-shapes" "$main_checkout/scripts/token-shapes"
 
 # A log that can't be written changes neither the block nor its message.
 rm "$log"
