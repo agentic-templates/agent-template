@@ -528,60 +528,69 @@ give_the_body="Give the body with --body, or write it to a file and give the fil
 # body_word, body_file and body_may_expand, as the array words_may_expand of visit_simple_commands holds it. Run it
 # from a function that for_each_simple_command calls.
 read_body() {
-  local rest i index
   body=""
   case $body_source in
     "")
       block "Blocked: the command gives no body, so this hook can't check $1. $give_the_body"
       ;;
-    text | comment)
-      if [[ $body_may_expand == command ]]; then
-        # gh takes a comment only as text, with no flag for a file.
-        if [[ $body_source == comment ]]; then
-          block "Blocked: this hook can't run the command in \$( ) or backticks that prints the comment, so it can't check the comment. Give the comment in quotes, or from a here-document, as in --comment \"\$(cat <<'EOF' ... EOF)\"."
-        fi
-        block "Blocked: this hook can't run the command in \$( ) or backticks that prints the body, so it can't check $1. Write the body to a file in a command of its own first, and give the file with --body-file."
-      fi
-      if [[ ! $body_word =~ $heredoc_reference ]]; then
-        body=$body_word
-        return 0
-      fi
-      # The text of each here-document in the word, such as "$(cat <<'EOF' ... EOF)"
-      rest=$body_word
-      body_may_expand=""
-      while [[ $rest =~ $heredoc_reference ]]; do
-        i=${BASH_REMATCH[1]}
-        rest=${rest#*"${BASH_REMATCH[0]}"}
-        body+=${heredocs[i]}
-        if [[ ${heredoc_note_expands[i]} == yes ]] && heredoc_has_expansion "${heredocs[i]}"; then
-          body_may_expand=yes
-        fi
-      done
-      ;;
+    text | comment) read_body_word "$1" ;;
     file)
       body_may_expand=""
-      if [[ $body_file != - ]]; then
+      if [[ $body_file == - ]]; then
+        read_body_input "$1"
+      else
         read_body_file "$body_file"
-        return 0
       fi
-      # Standard input, from a here-document or a file
-      for ((i = 0; i < ${#redirections[@]}; i += 2)); do
-        if [[ ${redirections[i]} =~ ^0?\<\<-?$ && ${redirections[i + 1]} =~ $heredoc_reference ]]; then
-          index=${BASH_REMATCH[1]}
-          body=${heredocs[index]}
-          if [[ ${heredoc_note_expands[index]} == yes ]] && heredoc_has_expansion "$body"; then
-            body_may_expand=yes
-          fi
-          return 0
-        fi
-        if [[ ${redirections[i]} =~ ^0?\<$ ]]; then
-          read_body_file "${redirections[i + 1]}"
-          return 0
-        fi
-      done
-      block "Blocked: this hook can't read a body from standard input, other than from a here-document, so it can't check $1. $give_the_body"
       ;;
   esac
+}
+
+# Sets body to the text of --body or --comment, or blocks when a command in $( ) or backticks prints the text:
+# read_body_word <what the hook checks>
+# A here-document in the word, as in "$(cat <<'EOF' ... EOF)", gives its text in place of the substitution.
+read_body_word() {
+  local rest=$body_word number
+  if [[ $body_may_expand == command ]]; then
+    # gh takes a comment only as text, with no flag for a file.
+    if [[ $body_source == comment ]]; then
+      block "Blocked: this hook can't run the command in \$( ) or backticks that prints the comment, so it can't check the comment. Give the comment in quotes, or from a here-document, as in --comment \"\$(cat <<'EOF' ... EOF)\"."
+    fi
+    block "Blocked: this hook can't run the command in \$( ) or backticks that prints the body, so it can't check $1. Write the body to a file in a command of its own first, and give the file with --body-file."
+  fi
+  if [[ ! $body_word =~ $heredoc_reference ]]; then
+    body=$body_word
+    return 0
+  fi
+  body_may_expand=""
+  while [[ $rest =~ $heredoc_reference ]]; do
+    number=${BASH_REMATCH[1]}
+    rest=${rest#*"${BASH_REMATCH[0]}"}
+    add_heredoc_to_body "$number"
+  done
+}
+
+# Sets body to the text that a gh command reads from standard input, from a here-document or from a file, or blocks
+# when the hook can't read it: read_body_input <what the hook checks>
+read_body_input() {
+  local i
+  for ((i = 0; i < ${#redirections[@]}; i += 2)); do
+    if [[ ${redirections[i]} =~ ^0?\<\<-?$ && ${redirections[i + 1]} =~ $heredoc_reference ]]; then
+      add_heredoc_to_body "${BASH_REMATCH[1]}"
+      return 0
+    fi
+    if [[ ${redirections[i]} =~ ^0?\<$ ]]; then
+      read_body_file "${redirections[i + 1]}"
+      return 0
+    fi
+  done
+  block "Blocked: this hook can't read a body from standard input, other than from a here-document, so it can't check $1. $give_the_body"
+}
+
+add_heredoc_to_body() {
+  body+=${heredocs[$1]}
+  if [[ ${heredoc_note_expands[$1]} == yes ]] && heredoc_has_expansion "${heredocs[$1]}"; then
+    body_may_expand=yes
+  fi
 }
 
 # Succeeds at the start of parameter, command or arithmetic expansion syntax.
