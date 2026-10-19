@@ -52,9 +52,22 @@ PAGE
 )
 printf '%s\n' "$page_text" >"$base/project/docs/expenses.md"
 
+# Commits every file in the folder project: commit_all <message>
+commit_all() {
+  git -C "$base/project" add --all
+  git -C "$base/project" -c user.name=test -c user.email=test@example.com commit --quiet -m "$1"
+}
+
+# The project's origin/main has the page, and a branch starts from it.
+git -C "$base/project" init --quiet --initial-branch=main
+commit_all "docs: add the expenses page"
+git -C "$base/project" update-ref refs/remotes/origin/main HEAD
+git -C "$base/project" switch --quiet --create 12-change
+
 reader="a developer who wants to record what they spend"
 claude_arguments="[-p][--safe-mode][--tools][]"
-prompt="You are a developer who wants to record what they spend. Read this page once, the way that reader would. Quote each sentence you had to read twice, and say what made you stop. Then quote each sentence you didn't need, and say why. Leave out sentences that you'd only word differently."
+prompt="You are a developer who wants to record what they spend. Read this page once, the way that reader would. Quote each sentence you had to read twice, and say what made you stop. Then quote each sentence you didn't need, and say why. Then quote each sentence that says again what another sentence on the page already says, with the sentence it repeats. Leave out sentences that you'd only word differently."
+prompt_with_new_lines="$prompt After the page come the lines that a change added or rewrote. Check those lines most closely for a sentence that repeats another."
 
 # Starts a case in which claude fails its first <failures> runs: new_case <failures>
 new_case() {
@@ -105,16 +118,15 @@ expect_calls() {
   fi
 }
 
-# Checks that the last run of claude got the prompt, an empty line and the page on its input:
-# expect_input <description>
+# Checks what the last run of claude got on its input: expect_input <description> <input>
 expect_input() {
-  local description=$1 input=""
+  local description=$1 expected_input=$2 input=""
   case_count=$((case_count + 1))
   if [[ -f $records/input ]]; then
     input=$(<"$records/input")
   fi
-  if [[ $input != "$prompt"$'\n\n'"$page_text" ]]; then
-    fail_case "$description, claude must get the prompt, an empty line and the page on its input, but it got \"$input\"."
+  if [[ $input != "$expected_input" ]]; then
+    fail_case "$description, claude must get \"$expected_input\" on its input, but it got \"$input\"."
   fi
 }
 
@@ -140,14 +152,14 @@ new_case 0
 run_fresh_reader "$reader" docs/expenses.md
 expect_result "When claude answers" succeeds "The reader's answer from run 1"
 expect_calls "When claude answers" "$claude_arguments"
-expect_input "When claude answers"
+expect_input "When claude answers" "$prompt"$'\n\n'"$page_text"
 expect_empty_temporary_folder "When claude answers"
 
 new_case 1
 run_fresh_reader "$reader" docs/expenses.md
 expect_result "When claude fails once" succeeds "The reader's answer from run 2"
 expect_calls "When claude fails once" "$claude_arguments"$'\n'"$claude_arguments"
-expect_input "When claude fails once"
+expect_input "When claude fails once" "$prompt"$'\n\n'"$page_text"
 expect_empty_temporary_folder "When claude fails once"
 
 new_case 2
@@ -179,6 +191,66 @@ run_fresh_reader "$reader" docs/missing.md
 expect_result "When the page doesn't exist" fails \
   "error: docs/missing.md isn't a file. Give the page's path, such as README.md."
 expect_calls "When the page doesn't exist" ""
+
+new_case 0
+printf '%s\n' "Each expense that you add goes to the file \$HOME/expenses.csv." >>"$base/project/docs/expenses.md"
+run_fresh_reader "$reader" docs/expenses.md
+expect_result "When the page has a new sentence that repeats an older one" succeeds "The reader's answer from run 1"
+expect_input "When the page has a new sentence that repeats an older one" \
+  "$prompt_with_new_lines"$'\n\n'"$page_text"$'\n'"Each expense that you add goes to the file \$HOME/expenses.csv."$'\n\n'"The lines that the change added or rewrote:"$'\n\n'"Each expense that you add goes to the file \$HOME/expenses.csv."
+git -C "$base/project" checkout --quiet -- docs/expenses.md
+
+# The branch rewrites the page's heading and commits it. Then main rewrites the last line, which the branch still has
+# as it was, so that line isn't new.
+new_case 0
+sed 's/^# Record what you spend$/# Record your expenses/' "$base/project/docs/expenses.md" >"$base/edited.md"
+mv "$base/edited.md" "$base/project/docs/expenses.md"
+commit_all "docs: rename the expenses page"
+branch_text=$(<"$base/project/docs/expenses.md")
+git -C "$base/project" switch --quiet main
+printf '%s\n' "# Record what you spend" "" "Run \`expenses add 12.50 lunch\` to add an expense." >"$base/project/docs/expenses.md"
+commit_all "docs: shorten the expenses page"
+git -C "$base/project" update-ref refs/remotes/origin/main HEAD
+git -C "$base/project" switch --quiet 12-change
+run_fresh_reader "$reader" docs/expenses.md
+expect_input "When the branch rewrote a line and main changed another one since" \
+  "$prompt_with_new_lines"$'\n\n'"$branch_text"$'\n\n'"The lines that the change added or rewrote:"$'\n\n'"# Record your expenses"
+
+new_case 0
+printf '%s\n' "# Import a bank file" >"$base/project/docs/import.md"
+run_fresh_reader "$reader" docs/import.md
+expect_input "When main doesn't have the page and git doesn't track it" "$prompt"$'\n\n'"# Import a bank file"
+
+new_case 0
+commit_all "docs: add the import page"
+run_fresh_reader "$reader" docs/import.md
+expect_input "When main doesn't have the page and the branch added it" "$prompt"$'\n\n'"# Import a bank file"
+
+# The branch renames the page with git mv, and adds a line that it doesn't commit.
+new_case 0
+git -C "$base/project" mv docs/expenses.md docs/spending.md
+printf '%s\n' "Run \`expenses list\` to see them." >>"$base/project/docs/spending.md"
+renamed_text=$(<"$base/project/docs/spending.md")
+renamed_input="$prompt_with_new_lines"$'\n\n'"$renamed_text"$'\n\n'"The lines that the change added or rewrote:"$'\n\n'"# Record your expenses"$'\n'"Run \`expenses list\` to see them."
+run_fresh_reader "$reader" docs/spending.md
+expect_input "When the branch renamed the page and didn't commit it" "$renamed_input"
+
+new_case 0
+commit_all "docs: rename the expenses page to spending"
+run_fresh_reader "$reader" docs/spending.md
+expect_input "When the branch renamed the page and committed it" "$renamed_input"
+
+new_case 0
+printf '%s\n' "# Notes" >"$base/notes.md"
+run_fresh_reader "$reader" "$base/notes.md"
+expect_result "When the page is outside the repository" succeeds "The reader's answer from run 1"
+expect_input "When the page is outside the repository" "$prompt"$'\n\n'"# Notes"
+
+new_case 0
+git -C "$base/project" update-ref -d refs/remotes/origin/main
+run_fresh_reader "$reader" docs/spending.md
+expect_result "When the repository has no origin/main" succeeds "The reader's answer from run 1"
+expect_input "When the repository has no origin/main" "$prompt"$'\n\n'"$renamed_text"
 
 if ((failed_cases > 0)); then
   echo "error: $failed_cases of the $case_count cases in scripts/fresh-reader.test failed. The errors above say which." >&2

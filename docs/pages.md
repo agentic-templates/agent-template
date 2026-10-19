@@ -20,7 +20,7 @@ Until the example ends, explain only what the reader needs in order to use the p
 
 ## Review a changed page with a fresh reader
 
-Before you open the pull request, have a reader who has seen only the page review each README or docs page where you added or rewrote text:
+Before you open the pull request, give each README or docs page where you added or rewrote text to a reader who knows nothing else about the project:
 
-1. Run `scripts/fresh-reader "<reader>" <page>`, where `<reader>` is the page's reader and what they want to do, such as "a developer who wants to use this project". The script prints the sentences that the reader had to read twice or didn't need, each with the reader's reason. If `claude` isn't installed, start a new agent with no other context, and give it the page's text and the prompt in `scripts/fresh-reader`, with `<reader>` filled in.
-2. In the text you added or rewrote, rewrite each sentence that you agree is unclear, so that it says the same thing in clearer words, and cut each one that you agree isn't needed. Leave the other sentences on the page as they are.
+1. Run `scripts/fresh-reader "<reader>" <page>`, where `<reader>` is the page's reader and what they want to do, such as "a developer who wants to use this project". The script prints the sentences that the reader had to read twice, didn't need or found repeated elsewhere on the page, each with the reader's reason. If `claude` isn't installed, start a new agent with no other context. Give it the input that the code of `scripts/fresh-reader` builds for `claude`, with `<reader>` filled in.
+2. In the text you added or rewrote, rewrite each sentence that you agree is unclear, so that it says the same thing in clearer words, and cut each one that you agree isn't needed. Merge each pair of sentences that you agree repeat each other into one sentence, even when one of them was on the page before your change.
