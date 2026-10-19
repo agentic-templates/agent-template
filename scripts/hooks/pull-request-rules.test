@@ -372,12 +372,24 @@ expect_block Bash "gh pr create --draft --title '$title' --body-file ../body.md 
 expect_allow Bash "gh pr create --draft --title '$title' --body-file ../body.md"
 expect_allow Bash "gh pr create -d --title '$title' --body-file ../body.md"
 expect_allow Bash "gh pr new --title '$title' --body-file ../body.md --draft=true"
+# gh reads -dt'<title>' as -d -t '<title>', and the value after the = in -dd=false as the value of the last -d.
+expect_allow Bash "gh pr create -d -t '$title' --body-file ../body.md"
+expect_allow Bash "gh pr create -dt'$title' --body-file ../body.md"
+expect_allow Bash "gh pr create -d=true --title '$title' --body-file ../body.md"
+expect_block Bash "gh pr create -d=false --title '$title' --body-file ../body.md" "$rules_need_draft"
+expect_block Bash "gh pr create -dd=false --title '$title' --body-file ../body.md" "$rules_need_draft"
+# A body that the title job fails, without --draft and with it. Without it, one block names both problems.
+expect_block Bash "gh pr create --title '$title' --body-file ../no-closing-line.md" \
+  "$rules_need_draft"$'\n'"$(blocked "$no_closing_line")"
+expect_block Bash "gh pr create --draft --title '$title' --body-file ../no-closing-line.md" "$(blocked "$no_closing_line")"
 git switch --quiet -c moved main
 mkdir tools
 git mv scripts/configure-github tools/configure-github
 git commit --quiet -m "refactor: move the settings script"
 record_pass
-expect_block Bash "gh pr create --title '$title' --body-file ../body.md" "$(draft_needed scripts/configure-github)"
+# The title job also asks the body of such a pull request to say that the orchestrator runs the script after the merge.
+expect_block Bash "gh pr create --title '$title' --body-file ../body.md" "$(draft_needed scripts/configure-github)"$'\n'"$(
+  blocked "The pull request changes scripts/configure-github, and the body doesn't say that the orchestrator runs it after the merge. Add this sentence under \"What changed and why\": The orchestrator runs scripts/configure-github after the merge.")"
 
 # A branch whose paths look like listed ones but aren't, which opens without --draft
 git switch --quiet -c look-alikes main

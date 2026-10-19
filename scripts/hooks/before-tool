@@ -59,6 +59,8 @@ esac
   if [[ ! -r $helpers ]]; then
     exit 1
   fi
+  # log_block in helpers.bash logs a block only when this hook runs the check, which is for a tool's action.
+  is_run_by_hook=yes
   # shellcheck source=scripts/hooks/helpers.bash
   source "$helpers"
   # The checks find the simple commands of a shell command split already, as for_each_simple_command in

@@ -59,11 +59,14 @@ on.
 - **Reports.** When an agent ends, read its report, and act on what it asks of you. For each item that it lists for
   the maintainer, such as a command that a hook told it to leave to them, ask the maintainer in an issue with
   `needs-decision`.
-- **Hand-offs.** When a builder reports that it handed off its work, because its context grew too long, run
-  `scripts/clear-worktrees <issue>`, so that a new builder can check out the issue's branch. If the script exits with
-  a code other than 0, plan the issue again. Otherwise, start a new agent of the same type with the same prompt, and
-  put the link to the hand-off comment in that prompt. Start it in your session once your own account's advice lets
-  you, because `scripts/loop/run-builder` can't give a builder the link.
+- **Hand-offs.** When a builder or the auditor reports that it handed off its work, because its context grew too
+  long, run `scripts/clear-worktrees <issue>`, so that a new agent can check out the issue's branch. The auditor's
+  issue is the one that it opened for the retrospective. If the script exits with a code other than 0, it left the
+  worktree, and with it the issue's branch, in place. Then plan a builder's issue again, and for the auditor's issue,
+  ask the maintainer about the worktree in an issue with `needs-decision`. If the script exits with 0, start a new
+  agent of the same type with the same prompt, and put the link to the hand-off comment in that prompt. Start it in
+  your session once your own account's advice lets you, because `scripts/loop/run-builder` can't give a builder the
+  link.
 - **Builders that stopped.** A builder that ends without a pull request, and without a report that says why, stopped
   before it finished, such as at a usage limit. If its issue is still open and assigned to you, run
   `scripts/clear-worktrees <issue>`, which saves its unfinished work on the issue's branch and removes its worktree.
@@ -106,10 +109,11 @@ After each issue, go back to step 1. Start an auditor too when "Start a retrospe
 - **Drafts.** For each draft pull request that the loop opened, and that no reviewer has read yet, start a
   `reviewer` agent with the pull request's number. Give each error that the reviewer reports to the builder that
   opened the draft, and ask it to fix each one, with a test when the error is in code. If you opened the draft, fix
-  the errors yourself. Nobody reviews the fixes again. Once the errors are fixed, or if the reviewer reports none, run
-  `gh pr ready <number>` and `gh pr merge <number>`. If it's the auditor's pull request, first add the label
-  `retrospective` to it if it's missing, because the meter counts the hours that the agents worked since the newest
-  merged pull request with that label.
+  the errors yourself. If the draft changes code that the loop's safety depends on, which is the first kind in the
+  description of `builder-deep`, start a new reviewer on it after each round of fixes, until a reviewer reports no
+  error. When no error remains, run `gh pr ready <number>` and `gh pr merge <number>`.
+  If it's the auditor's pull request, first add the label `retrospective` to it if it's missing, because the meter
+  counts the hours that the agents worked since the newest merged pull request with that label.
 - **Stuck pull requests.** Run `scripts/merge-dependabot-pull-requests`, which turns on auto-merge for Dependabot's
   pull requests. Then run `scripts/stuck-pull-requests`. For each pull request that it prints:
   - If it's Dependabot's, look for an issue about it with `gh issue list --state all --search "#<number>"`. If there's

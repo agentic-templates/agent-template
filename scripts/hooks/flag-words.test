@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tests that split_flag_word in helpers.bash splits a word of a gh command into the flag and its value as gh reads them.
+# Tests that split_flag_word in helpers.bash splits a word of a gh command into the flag and its value as gh reads them,
+# and that is_true_flag_value reads the value of a flag that takes no value as gh does.
 set -euo pipefail
 # shellcheck source=scripts/hooks/testing.bash
 source "${BASH_SOURCE[0]%/*}/testing.bash"
@@ -10,38 +11,65 @@ source "$hooks_folder/helpers.bash"
 review_flags=" -b --body -F --body-file -R --repo "
 
 # Checks what split_flag_word sets for a word of gh pr review:
-# expect_split <word> <flag> <value> <value_is_next_word>
+# expect_split <word> <flag> <value> <value_is_next_word> <flags_before>
 expect_split() {
-  local flag value value_is_next_word
+  local flag value value_is_next_word flags_before
   case_count=$((case_count + 1))
   split_flag_word "$1" "$review_flags"
-  if [[ $flag != "$2" || $value != "$3" || $value_is_next_word != "$4" ]]; then
-    echo "error: split_flag_word must split [$1] into the flag [$2], the value [$3] and value_is_next_word [$4], but it gave [$flag], [$value] and [$value_is_next_word]." >&2
+  if [[ $flag != "$2" || $value != "$3" || $value_is_next_word != "$4" || $flags_before != "$5" ]]; then
+    echo "error: split_flag_word must split [$1] into the flag [$2], the value [$3], value_is_next_word [$4] and flags_before [$5], but it gave [$flag], [$value], [$value_is_next_word] and [$flags_before]." >&2
     failed_cases=$((failed_cases + 1))
   fi
 }
 
 # Long flags
-expect_split --body=Text --body Text ""
-expect_split --body= --body "" ""
-expect_split --body --body "" yes
-expect_split --comment --comment "" ""
+expect_split --body=Text --body Text "" ""
+expect_split --body= --body "" "" ""
+expect_split --body --body "" yes ""
+expect_split --comment --comment "" "" ""
 
 # One short flag, with its value in the same word or the next. gh drops the = after a short flag only when more
 # follows it.
-expect_split -bText -b Text ""
-expect_split -b=Text -b Text ""
-expect_split -b==Text -b =Text ""
-expect_split -b= -b = ""
-expect_split -b -b "" yes
-expect_split -c -c "" ""
+expect_split -bText -b Text "" ""
+expect_split -b=Text -b Text "" ""
+expect_split -b==Text -b =Text "" ""
+expect_split -b= -b = "" ""
+expect_split -b -b "" yes ""
+expect_split -c -c "" "" ""
 
 # Several short flags in one word, where each flag but the last takes no value
-expect_split -cb -b "" yes
-expect_split -cbText -b Text ""
-expect_split -cb=Text -b Text ""
-expect_split -cb= -b = ""
-# gh reads what follows the = after -c as the value of -c.
-expect_split -c=bText -c=bText "" ""
+expect_split -cb -b "" yes c
+expect_split -cbText -b Text "" c
+expect_split -cb=Text -b Text "" c
+expect_split -cb= -b = "" c
+expect_split -ccb -b "" yes cc
+expect_split -cc -c "" "" c
+# gh reads what follows the = after a flag that takes no value as that flag's value, even when it starts with a flag
+# that takes one.
+expect_split -c=bText -c bText "" ""
+expect_split -cc=false -c false "" c
+
+# Checks whether is_true_flag_value reads the value of a flag that takes no value as true:
+# expect_flag_value <value> <true or false>
+expect_flag_value() {
+  local found=false
+  case_count=$((case_count + 1))
+  if is_true_flag_value "$1"; then
+    found=true
+  fi
+  if [[ $found != "$2" ]]; then
+    echo "error: is_true_flag_value must read the value [$1] as $2, but it read it as $found." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# A flag without a value is true. gh reads a value after = as Go's strconv.ParseBool does, and fails on a value that
+# ParseBool doesn't accept, such as yes.
+for value in "" 1 t T true TRUE True; do
+  expect_flag_value "$value" true
+done
+for value in 0 f F false FALSE False yes tRUE 2; do
+  expect_flag_value "$value" false
+done
 
 finish_tests
