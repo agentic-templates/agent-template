@@ -19,8 +19,10 @@ trap 'rm -rf "$base"' EXIT
 mkdir -p "$base/bin"
 
 # A stand-in for gh, first on the PATH. It answers the GraphQL query for the branches of the issue in TEST_NUMBER with
-# the file in TEST_ANSWER, run through the --jq filter, as gh does. With TEST_ANSWER=fail, it fails, as gh does
-# without the network. It fails every other command.
+# the file in TEST_ANSWER, run through the --jq filter, as gh does. Like GitHub, it leaves out the pull requests that
+# were closed without a merge, whose state is CLOSED in the file, unless the query asks for them with
+# includeClosedPrs: true. With TEST_ANSWER=fail, it fails, as gh does without the network. It fails every other
+# command.
 cat >"$base/bin/gh" <<'STAND_IN'
 #!/usr/bin/env bash
 if [[ $1 != api || $2 != graphql || $* != *" -F number=$TEST_NUMBER "* || $* != *"issueOrPullRequest(number: \$number)"* ]]; then
@@ -31,9 +33,13 @@ if [[ $TEST_ANSWER == fail ]]; then
   echo "error connecting to api.github.com" >&2
   exit 1
 fi
+listed=.
+if [[ $* != *"includeClosedPrs: true"* ]]; then
+  listed='(.data.repository.issueOrPullRequest.closedByPullRequestsReferences.nodes // empty) |= map(select(.state != "CLOSED"))'
+fi
 while (($# > 0)); do
   if [[ $1 == --jq ]]; then
-    exec jq --raw-output "$2" "$TEST_ANSWER"
+    exec jq --raw-output "($listed) | $2" "$TEST_ANSWER"
   fi
   shift
 done
@@ -114,6 +120,63 @@ cat >"$base/pull-request.json" <<'ANSWER'
 }
 ANSWER
 expect_branches "When a pull request from the issue's branch is open" 17 "$base/pull-request.json" 0 17-export-the-totals
+
+# A builder gave the issue back, and closed its pull request without a merge, which kept the branch.
+cat >"$base/closed-pull-request.json" <<'ANSWER'
+{
+  "data": {
+    "repository": {
+      "nameWithOwner": "owner/repo",
+      "issueOrPullRequest": {
+        "linkedBranches": { "nodes": [] },
+        "closedByPullRequestsReferences": {
+          "nodes": [
+            {
+              "headRefName": "18-total-by-month",
+              "isCrossRepository": false,
+              "state": "CLOSED",
+              "repository": { "nameWithOwner": "owner/repo" }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+ANSWER
+expect_branches "When a pull request from the issue's branch was closed without a merge" 18 \
+  "$base/closed-pull-request.json" 0 18-total-by-month
+
+# Two builders gave the issue back, and each closed a pull request from the same branch without a merge.
+cat >"$base/same-branch.json" <<'ANSWER'
+{
+  "data": {
+    "repository": {
+      "nameWithOwner": "owner/repo",
+      "issueOrPullRequest": {
+        "linkedBranches": { "nodes": [] },
+        "closedByPullRequestsReferences": {
+          "nodes": [
+            {
+              "headRefName": "19-export-csv",
+              "isCrossRepository": false,
+              "state": "CLOSED",
+              "repository": { "nameWithOwner": "owner/repo" }
+            },
+            {
+              "headRefName": "19-export-csv",
+              "isCrossRepository": false,
+              "state": "CLOSED",
+              "repository": { "nameWithOwner": "owner/repo" }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+ANSWER
+expect_branches "When two pull requests came from the same branch" 19 "$base/same-branch.json" 0 19-export-csv
 
 cat >"$base/none.json" <<'ANSWER'
 {
