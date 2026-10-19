@@ -44,13 +44,13 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, NamedTuple, TypedDict
+from typing import Any, NamedTuple
 
 import paths
+from accounts import Account, AccountsError, claude_environment, load_accounts
 from github import GitHubError, gh_api
 from usage import Meter, parse_usage
 
-TOOLS = ("claude", "codex")
 WATCH_PERCENT = 80.0
 NEAR_MARGIN_PERCENT = 3.0
 # The session's stop point leaves room for the usage until the next reading, and for the minutes that the running
@@ -99,12 +99,6 @@ query($owner: String!, $name: String!, $label: String!) {
 SEARCH_COUNT_QUERY = "query($search: String!) { search(query: $search, type: ISSUE) { issueCount } }"
 
 
-class Account(TypedDict):
-    name: str
-    tool: str
-    env: dict[str, str]
-
-
 class Advice(NamedTuple):
     state: str
     # The session meter's stop point
@@ -126,10 +120,6 @@ class Release(NamedTuple):
     published: dt.datetime
 
 
-class MeterError(Exception):
-    """A problem that stops the meter, with what to do about it."""
-
-
 class NoReading(Exception):
     """Why an account gave no reading, with what to do about it."""
 
@@ -144,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     loop_folder.mkdir(parents=True, exist_ok=True)
     try:
         accounts = load_accounts(loop_folder / "accounts.json")
-    except MeterError as error:
+    except AccountsError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     log = loop_folder / "meter.jsonl"
@@ -163,35 +153,6 @@ def main(argv: list[str] | None = None) -> int:
 
 def now() -> dt.datetime:
     return dt.datetime.now().astimezone()
-
-
-def load_accounts(file: Path) -> list[Account]:
-    if not file.exists():
-        return [{"name": "claude", "tool": "claude", "env": {}}]
-    example = '{"accounts": [{"name": "claude", "tool": "claude"}]}'
-    try:
-        content = json.loads(file.read_text())
-    except ValueError as error:
-        raise MeterError(f"{file} isn't valid JSON: {error}. Fix it, as in {example}.") from error
-    entries = content.get("accounts") if isinstance(content, dict) else None
-    if not isinstance(entries, list) or not entries:
-        raise MeterError(f'{file} has no list of accounts under "accounts". Add one, as in {example}.')
-    return [account_from(entry, file) for entry in entries]
-
-
-def account_from(entry: object, file: Path) -> Account:
-    if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) or entry.get("tool") not in TOOLS:
-        raise MeterError(
-            f'{file} lists the account {json.dumps(entry)}, which needs a "name" and a "tool" that is "claude" or '
-            '"codex". Fix the account.'
-        )
-    env = entry.get("env", {})
-    if not isinstance(env, dict) or not all(isinstance(value, str) for value in env.values()):
-        raise MeterError(
-            f'{file} gives the account {entry["name"]} an "env" that isn\'t an object of strings, such as '
-            '{"CODEX_HOME": "~/.codex"}. Fix the account.'
-        )
-    return {"name": entry["name"], "tool": entry["tool"], "env": {k: os.path.expanduser(v) for k, v in env.items()}}
 
 
 def wait_for_wake(accounts: list[Account], log: Path) -> Readings:
@@ -265,18 +226,13 @@ def read_meters(account: Account, reading_time: dt.datetime) -> tuple[dict[str, 
 
 
 def read_claude(account: Account) -> str:
-    # A session's own variables would make claude think that it runs inside that session.
-    environment = {
-        key: value for key, value in os.environ.items() if not key.startswith("CLAUDE_CODE_") and key != "CLAUDECODE"
-    }
-    environment.update(account["env"])
     # An empty folder has no project settings or hooks that would run.
     with tempfile.TemporaryDirectory() as folder:
         try:
             done = subprocess.run(
                 ["claude", "-p", "/usage"],
                 cwd=folder,
-                env=environment,
+                env=claude_environment(account),
                 capture_output=True,
                 text=True,
                 timeout=CLAUDE_TIMEOUT_SECONDS,

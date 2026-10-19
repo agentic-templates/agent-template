@@ -10,6 +10,8 @@
 # ready issues" runs it this way for the issue of a helper that failed, and so has stopped.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/secret-file-names
+source scripts/secret-file-names
 
 save_subject="chore: save the unfinished work of a stopped session"
 
@@ -17,21 +19,6 @@ save_subject="chore: save the unfinished work of a stopped session"
 stop() {
   echo "error: $1" >&2
   exit 1
-}
-
-# Succeeds if a file's name suggests that the file holds a secret: has_secret_name <path>
-has_secret_name() {
-  local name=${1##*/} result=1
-  shopt -s nocasematch
-  case $name in
-    .env.example) ;;
-    .env | .env.* | *.pem | *.key | *.p12 | *.pfx | *.jks | *.keystore | id_rsa | id_dsa | id_ecdsa | id_ed25519 | \
-      .netrc | .npmrc | .pypirc | *credential* | *secret* | *password*)
-      result=0
-      ;;
-  esac
-  shopt -u nocasematch
-  return "$result"
 }
 
 # Prints a folder's path with the symbolic links resolved, or the path as it is when the folder doesn't exist:
