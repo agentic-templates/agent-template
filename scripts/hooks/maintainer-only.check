@@ -8,7 +8,8 @@
 # - making a gist public, and making a repository public or posting with gh to a repository other than this one, unless
 #   the list of allowed repositories names it. The list is .loop/allowed-repositories in the main checkout, with one
 #   owner/name to a line.
-# - pushing to a URL instead of a remote, and git push --no-verify, which skips the leak scan
+# - pushing to a URL instead of a remote, and git push --no-verify or a start of it, such as --no-veri, which skips the
+#   leak scan
 # - gh pr merge --admin, and changing the repository's rulesets or security settings with gh api, gh repo edit or
 #   gh repo deploy-key
 # - printing the whole environment with env or printenv, because it holds tokens
@@ -372,7 +373,7 @@ check_delete() {
 
 check_git_push() {
   read_push_arguments
-  if has_flag --no-verify; then
+  if has_git_flag --no-verify; then
     block "Blocked: --no-verify skips the pre-push hook, which scans the push for leaks. Push without it. If the scan finds a leak, take it out of the commits."
   fi
   # A URL, or an address such as git@github.com:owner/name.git

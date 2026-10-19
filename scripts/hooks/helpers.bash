@@ -441,6 +441,24 @@ has_flag() {
   return 1
 }
 
+# Succeeds if read_push_arguments found one of these long options of git, or the start of one, as in --tag for --tags,
+# because git takes the start of a long option as the option. git fails on a start that other options have too, such as
+# --t, so such a start may count: has_git_flag <long option>...
+has_git_flag() {
+  local flag wanted
+  for flag in ${flags[@]+"${flags[@]}"}; do
+    if [[ $flag != --?* ]]; then
+      continue
+    fi
+    for wanted in "$@"; do
+      if [[ $wanted == "$flag"* ]]; then
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
 # Sets api_method to the method of the gh api request whose flags read_arguments read, such as POST, in capitals when
 # it's GET. Without a method, gh api sends POST if the command adds a field or an input file, and GET otherwise.
 read_api_method() {

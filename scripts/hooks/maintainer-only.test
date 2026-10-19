@@ -243,6 +243,13 @@ expect_block Bash 'env -u CLAUDECODE git push --no-verify' "$no_verify"
 expect_block Bash '/usr/bin/env -C build git push --no-verify' "$no_verify"
 # env reads each word with = before the command as a variable to set.
 expect_block Bash 'env x.y=1 git push --no-verify' "$no_verify"
+# git takes the start of a long option as the option, unless another option starts the same way, as with --no-ver,
+# which could be --no-verbose too.
+expect_block Bash 'git push --no-veri origin main' "$no_verify"
+expect_block Bash 'git push origin HEAD --no-verif' "$no_verify"
+expect_allow Bash 'git push --verb origin HEAD'
+# --veri is the start of --verify, which runs the pre-push hook.
+expect_allow Bash 'git push --veri origin HEAD'
 expect_block Bash 'git push https://github.com/someone/else.git main' "$push_to_url"
 expect_block Bash 'git push git@github.com:someone/else.git HEAD' "$push_to_url"
 expect_block Bash 'git push -o ci.skip ssh://git@github.com/jtmpl/project.git HEAD' "$push_to_url"
