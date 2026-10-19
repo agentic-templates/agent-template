@@ -179,7 +179,13 @@ class AgentLinesTest(RunBuilderTest):
             {"type": "item.completed", "item": {"type": "agent_message"}},
             {
                 "type": "turn.completed",
-                "usage": {"input_tokens": 24763, "cached_input_tokens": 24448, "output_tokens": 122},
+                # Codex counts the reasoning tokens among the output tokens, and repeats them on their own.
+                "usage": {
+                    "input_tokens": 24763,
+                    "cached_input_tokens": 24448,
+                    "output_tokens": 122,
+                    "reasoning_output_tokens": 80,
+                },
             },
         ]
         self.answer("codex", "", {"stdout": lines(*events), "write": {"built.txt": "built\n"}, "report": REPORT})
