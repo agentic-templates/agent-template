@@ -65,6 +65,14 @@ if git grep -n -w -I -e "$todo" -e "$fixme" -- ':!*.md' >&2; then
   exit 1
 fi
 
+# A marker that excludes code from coverage gives the reason, as "Test behavior" in docs/code.md says.
+# coverage reads "pragma: no cover" and "pragma: no branch" as markers, in any case and with or without the colon.
+coverage_marker='pragma:?[[:space:]]*no[[:space:]]*(cover|branch)[[:space:]]*$'
+if git grep -n -I -i -E -e "$coverage_marker" -- ':!*.md' >&2; then
+  echo "error: the lines above exclude code from coverage without a reason. Write the reason after the marker, as in \"# pragma: no cover, because only Windows runs this line\"." >&2
+  exit 1
+fi
+
 # shellcheck source=scripts/text-rules
 source scripts/text-rules
 
@@ -383,6 +391,32 @@ if [[ -z "${CHECK_UNDER_TEST:-}" ]]; then
   # Add the project's formatter check, linter, type checker, tests and coverage check here.
   # The copies that scripts/test-check makes skip these checks, because the copies hold only the tracked files.
   # Keep this comment after setup, because a case in scripts/test-check finds the place by it.
+
+  # The Python files are the tracked files that is_python_file accepts. pyproject.toml holds the tools' settings.
+  # uv runs the tools with the versions in uv.lock, and --locked stops it when uv.lock doesn't match pyproject.toml.
+  if has uv https://docs.astral.sh/uv/getting-started/installation/; then
+    # shellcheck source=scripts/python-files
+    source scripts/python-files
+    python_files=()
+    while IFS= read -r -d '' file; do
+      # -f skips the deleted files that git ls-files also lists.
+      if [[ -f $file ]] && is_python_file "$file"; then
+        python_files+=("$file")
+      fi
+    done < <(git ls-files -z)
+    if ((${#python_files[@]} > 0)); then
+      uv run --locked --quiet ruff format --check --quiet -- "${python_files[@]}"
+      uv run --locked --quiet ruff check --quiet -- "${python_files[@]}"
+      uv run --locked --quiet mypy --no-error-summary -- "${python_files[@]}"
+      # Each Python process of the tests writes its own coverage data, which combine merges.
+      coverage_file=$(git rev-parse --git-path coverage)
+      COVERAGE_FILE=$coverage_file uv run --locked --quiet coverage erase
+      COVERAGE_FILE=$coverage_file uv run --locked --quiet \
+        coverage run -m unittest discover --start-directory scripts/loop --top-level-directory scripts/loop
+      COVERAGE_FILE=$coverage_file uv run --locked --quiet coverage combine --quiet
+      COVERAGE_FILE=$coverage_file uv run --locked --quiet coverage report
+    fi
+  fi
 fi
 
 # The linux job in .github/workflows/ci.yml sets SKIP_SCRIPT_TESTS, because the script-tests job runs the tests of the

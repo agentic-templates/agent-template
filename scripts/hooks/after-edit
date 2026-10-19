@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Claude Code and Codex run this hook after each action that writes files, because .claude/settings.json and
+# .codex/hooks.json list it. It formats each Python file of the repository that the action wrote, with the ruff in
+# uv.lock. It prints nothing, and does nothing when it can't format, such as when uv isn't installed.
+
+# shellcheck source=scripts/python-files
+source "${BASH_SOURCE[0]%/*}/../python-files" || exit 0
+
+input=$(cat)
+cwd=$(jq -r '.cwd // empty' 2>/dev/null <<<"$input") || exit 0
+cd -- "${cwd:-.}" 2>/dev/null || exit 0
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+root=$(cd -- "$root" && pwd -P) || exit 0
+# Codex's apply_patch names each file that it writes on a line of the patch.
+paths=$(jq -r '
+  if .tool_name == "apply_patch" then
+    .tool_input.command // "" | split("\n")[]
+    | select(startswith("*** Add File: ") or startswith("*** Update File: ") or startswith("*** Move to: "))
+    | ltrimstr("*** Add File: ") | ltrimstr("*** Update File: ") | ltrimstr("*** Move to: ")
+  else
+    .tool_input.file_path // empty
+  end' <<<"$input" 2>/dev/null) || exit 0
+
+python_files=()
+while IFS= read -r path; do
+  if [[ -z $path || ! -f $path ]]; then
+    continue
+  fi
+  folder=$(cd -- "$(dirname -- "$path")" && pwd -P) || continue
+  if [[ $folder/ == "$root"/* ]] && is_python_file "$path"; then
+    python_files+=("$path")
+  fi
+done <<<"$paths"
+if ((${#python_files[@]} > 0)); then
+  uv run --project "$root" --locked --quiet ruff format --quiet -- "${python_files[@]}" >/dev/null 2>&1
+fi
+exit 0

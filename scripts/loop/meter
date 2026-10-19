@@ -1,0 +1,559 @@
+#!/usr/bin/env -S uv run --script --quiet
+"""Prints the usage of each account that the loop builds with, and advice on whether the loop may start more work.
+
+Each account's line ends with its advice:
+
+  go      Start work freely.
+  watch   A meter is at 80% or more.
+  near    The session meter is within 3 percentage points of its stop point, or a weekly meter within 1 point of its
+          stop.
+  stop    The session meter reached its stop point, or a weekly meter reached its stop less than 10 hours before its
+          reset. Start nothing on the account until that reset. The advice stays stop until then.
+  parked  A weekly meter reached its stop more than 10 hours before its reset. Start nothing on the account until that
+          reset.
+
+The session meter's stop point is 100% minus the larger of 2 percentage points and the usage of 8 minutes at the rate
+between the last two readings. Each weekly meter, the one for all models and each model's own, stops at 99%.
+
+The last line gives the machine's free disk and load, the orchestrator's context size, and whether a retrospective is
+due. One is due after a release, and after 30 merged pull requests, since the last retrospective: the newest merged
+pull request with the label retrospective.
+
+With --wake, the meter keeps reading, and prints and ends when an account's advice changes, when an account gives no
+reading, and 50 minutes after it started while an account's advice is stop. Run it in the background, so that its
+end wakes the orchestrator.
+
+.loop/accounts.json in the main checkout lists the accounts, each with the environment variables that select it:
+
+  {"accounts": [{"name": "claude", "tool": "claude"},
+                {"name": "codex", "tool": "codex", "env": {"CODEX_HOME": "~/.codex"}}]}
+
+Without the file, the meter reads the Claude account that this machine is signed in to. It adds each reading to
+.loop/meter.jsonl, and exits with code 1 when an account gives no reading. It reads the orchestrator's context size
+from the transcript of the session that the session: line of .loop/state.md names.
+"""
+
+import argparse
+import datetime as dt
+import json
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any, NamedTuple, TypedDict
+
+import paths
+from usage import Meter, parse_usage
+
+TOOLS = ("claude", "codex")
+WATCH_PERCENT = 80.0
+NEAR_MARGIN_PERCENT = 3.0
+# The session's stop point leaves room for the usage until the next reading, and for the minutes that the running
+# agents take to finish their turns.
+STOP_FLOOR_PERCENT = 2.0
+STOP_MINUTES_OF_USAGE = 8.0
+# The rate in percent per minute until two readings in one session window give one.
+DEFAULT_RATE = 0.3
+# /usage rounds a reset time differently from one reading to the next, such as 4:30am and then 4:29am.
+SAME_WINDOW_DRIFT = dt.timedelta(minutes=10)
+# /usage gives whole percents, so two readings closer than this would give a rate far above the real one.
+SHORTEST_RATE_INTERVAL = dt.timedelta(seconds=30)
+# The stop of each meter other than the session's
+WEEK_STOP_PERCENT = 99.0
+WEEK_NEAR_MARGIN_PERCENT = 1.0
+# Waiting at a stop wakes the orchestrator every 50 minutes, and each wake spends some of the week. So a weekly stop
+# further than this from its reset parks the account instead.
+LONGEST_STOP = dt.timedelta(hours=10)
+READ_EVERY_SECONDS = {"go": 30 * 60, "watch": 10 * 60, "near": 150}
+SHORTEST_WAIT_SECONDS = 60
+# A wait for a reset ends this long after it, so that the next reading sees the new window.
+AFTER_RESET_SECONDS = 60
+UNKNOWN_RESET_WAIT_SECONDS = 10 * 60
+LATEST_TIME = dt.datetime.max.replace(tzinfo=dt.UTC)
+# Less than an hour, so that the orchestrator wakes while a prompt cache that lasts an hour still holds its context.
+WAKE_EVERY = dt.timedelta(minutes=50)
+CLAUDE_TIMEOUT_SECONDS = 120
+# A Codex snapshot from before this is from an earlier weekly window, so the meter doesn't read older session files.
+CODEX_SNAPSHOT_AGE = dt.timedelta(days=8)
+# The meter reads only the end of a transcript, where the last call is. An orchestrator's transcript of 218 MB took
+# 0.25 seconds and about 0.5 GB of memory to read whole.
+TRANSCRIPT_TAIL_BYTES = 400_000
+RETROSPECTIVE_LABEL = "retrospective"
+MERGES_PER_RETROSPECTIVE = 30
+
+# GitHub can't order pull requests by when they merged, so the meter takes the latest merge of the newest ones.
+REPOSITORY_QUERY = """
+query($owner: String!, $name: String!, $label: String!) {
+  repository(owner: $owner, name: $name) {
+    latestRelease { tagName publishedAt }
+    pullRequests(labels: [$label], states: MERGED, first: 100, orderBy: {field: CREATED_AT, direction: DESC}) {
+      nodes { mergedAt }
+    }
+  }
+}"""
+SEARCH_COUNT_QUERY = "query($search: String!) { search(query: $search, type: ISSUE) { issueCount } }"
+
+
+class Account(TypedDict):
+    name: str
+    tool: str
+    env: dict[str, str]
+
+
+class Advice(NamedTuple):
+    state: str
+    # The session meter's stop point
+    stop_at: float
+    wait_seconds: int
+    meters_at_stop: list[str]
+
+
+class Readings(NamedTuple):
+    lines: list[str]
+    advice: dict[str, str]
+    # The shortest wait that an account's advice asks for
+    wait_seconds: int
+    has_every_account: bool
+
+
+class Release(NamedTuple):
+    tag: str
+    published: dt.datetime
+
+
+class MeterError(Exception):
+    """A problem that stops the meter, with what to do about it."""
+
+
+class NoReading(Exception):
+    """Why an account gave no reading, with what to do about it."""
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="scripts/loop/meter", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("--wake", action="store_true", help="keep reading until the orchestrator needs to wake")
+    options = parser.parse_args(argv)
+    loop_folder = paths.loop_dir()
+    loop_folder.mkdir(parents=True, exist_ok=True)
+    try:
+        accounts = load_accounts(loop_folder / "accounts.json")
+    except MeterError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    log = loop_folder / "meter.jsonl"
+    readings = wait_for_wake(accounts, log) if options.wake else read_accounts(accounts, log)
+    checkout = paths.main_checkout()
+    machine = machine_line(
+        free_gigabytes=shutil.disk_usage(loop_folder).free / 1e9,
+        load=os.getloadavg()[0],
+        cores=os.cpu_count() or 1,
+        context=orchestrator_context(loop_folder / "state.md", checkout),
+        retrospective=read_retrospective(checkout),
+    )
+    print("\n".join([*readings.lines, machine]))
+    return 0 if readings.has_every_account else 1
+
+
+def now() -> dt.datetime:
+    return dt.datetime.now().astimezone()
+
+
+def load_accounts(file: Path) -> list[Account]:
+    if not file.exists():
+        return [{"name": "claude", "tool": "claude", "env": {}}]
+    example = '{"accounts": [{"name": "claude", "tool": "claude"}]}'
+    try:
+        content = json.loads(file.read_text())
+    except ValueError as error:
+        raise MeterError(f"{file} isn't valid JSON: {error}. Fix it, as in {example}.") from error
+    entries = content.get("accounts") if isinstance(content, dict) else None
+    if not isinstance(entries, list) or not entries:
+        raise MeterError(f'{file} has no list of accounts under "accounts". Add one, as in {example}.')
+    return [account_from(entry, file) for entry in entries]
+
+
+def account_from(entry: object, file: Path) -> Account:
+    if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) or entry.get("tool") not in TOOLS:
+        raise MeterError(
+            f'{file} lists the account {json.dumps(entry)}, which needs a "name" and a "tool" that is "claude" or '
+            '"codex". Fix the account.'
+        )
+    env = entry.get("env", {})
+    if not isinstance(env, dict) or not all(isinstance(value, str) for value in env.values()):
+        raise MeterError(
+            f'{file} gives the account {entry["name"]} an "env" that isn\'t an object of strings, such as '
+            '{"CODEX_HOME": "~/.codex"}. Fix the account.'
+        )
+    return {"name": entry["name"], "tool": entry["tool"], "env": {k: os.path.expanduser(v) for k, v in env.items()}}
+
+
+def wait_for_wake(accounts: list[Account], log: Path) -> Readings:
+    """Reads until an account's advice differs from its advice at the first reading, or until the orchestrator needs
+    a wake while it waits for a reset."""
+    started = now()
+    first = read_accounts(accounts, log)
+    readings = first
+    while readings.has_every_account:
+        wait = readings.wait_seconds
+        if is_waiting_for_reset(readings):
+            wait = min(wait, max(0, math.ceil((started + WAKE_EVERY - now()).total_seconds())))
+        time.sleep(wait)
+        readings = read_accounts(accounts, log)
+        if readings.advice != first.advice:
+            break
+        if is_waiting_for_reset(readings) and now() - started >= WAKE_EVERY:
+            break
+    return readings
+
+
+def is_waiting_for_reset(readings: Readings) -> bool:
+    return "stop" in readings.advice.values()
+
+
+def read_accounts(accounts: list[Account], log: Path) -> Readings:
+    lines: list[str] = []
+    advice: dict[str, str] = {}
+    waits: list[int] = []
+    has_every_account = True
+    for account in accounts:
+        reading_time = now()
+        try:
+            meters, notes = read_meters(account, reading_time)
+        except NoReading as problem:
+            lines.append(f"{account['name']} | no reading: {problem}")
+            has_every_account = False
+            continue
+        reading: dict[str, Any] = {
+            "at": reading_time.isoformat(timespec="seconds"),
+            "account": account["name"],
+            "meters": meters,
+        }
+        previous = last_reading(log, account["name"])
+        rate = rate_per_minute(previous, reading)
+        result = advise(meters, rate, reading_time, is_held_at_session_stop(previous, reading))
+        reading["meters_at_stop"] = result.meters_at_stop
+        with log.open("a") as handle:
+            handle.write(json.dumps(reading) + "\n")
+        advice[account["name"]] = result.state
+        waits.append(result.wait_seconds)
+        lines.append(account_line(account["name"], meters, rate, result, notes, reading_time))
+    return Readings(lines, advice, min(waits, default=UNKNOWN_RESET_WAIT_SECONDS), has_every_account)
+
+
+def read_meters(account: Account, reading_time: dt.datetime) -> tuple[dict[str, Meter], list[str]]:
+    """An account's meters, and notes about the reading for its line."""
+    if account["tool"] == "codex":
+        meters, snapshot_time = read_codex(account, reading_time)
+        minutes = (reading_time - snapshot_time).total_seconds() / 60
+        return meters, [f"snapshot {minutes:.0f} min old"]
+    output = read_claude(account)
+    meters = parse_usage(output, reading_time)
+    if not meters:
+        first_line = next((line.strip() for line in output.splitlines() if line.strip()), "nothing")
+        raise NoReading(
+            f'claude -p /usage printed no usage meters, and began with "{first_line}". Run it in an empty folder to '
+            "see why."
+        )
+    return meters, []
+
+
+def read_claude(account: Account) -> str:
+    # A session's own variables would make claude think that it runs inside that session.
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("CLAUDE_CODE_") and key != "CLAUDECODE"
+    }
+    environment.update(account["env"])
+    # An empty folder has no project settings or hooks that would run.
+    with tempfile.TemporaryDirectory() as folder:
+        try:
+            done = subprocess.run(
+                ["claude", "-p", "/usage"],
+                cwd=folder,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=CLAUDE_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except FileNotFoundError as error:
+            raise NoReading("claude isn't installed. Install Claude Code, or remove the account.") from error
+        except subprocess.TimeoutExpired as error:
+            raise NoReading(
+                f"claude -p /usage didn't end within {CLAUDE_TIMEOUT_SECONDS} seconds. Run it in an empty folder to "
+                "see why."
+            ) from error
+    return done.stdout + done.stderr
+
+
+def read_codex(account: Account, reading_time: dt.datetime) -> tuple[dict[str, Meter], dt.datetime]:
+    """The meters in the newest rate-limit snapshot that Codex wrote in its session files, because Codex has no command
+    that prints its usage, and the snapshot's time."""
+    sessions = Path(account["env"].get("CODEX_HOME", os.path.expanduser("~/.codex"))) / "sessions"
+    snapshot = newest_codex_snapshot(sessions, reading_time - CODEX_SNAPSHOT_AGE)
+    if snapshot is None:
+        raise NoReading(
+            f"Codex wrote no usage snapshot in {sessions} in the last {CODEX_SNAPSHOT_AGE.days} days. Run codex once, "
+            "and read again."
+        )
+    snapshot_time, limits = snapshot
+    meters: dict[str, Meter] = {}
+    for window in (limits.get("primary"), limits.get("secondary")):
+        if isinstance(window, dict):
+            name = "session" if window.get("window_minutes", 0) <= 5 * 60 else "week"
+            meters[name] = codex_meter(window, reading_time)
+    return meters, snapshot_time
+
+
+def newest_codex_snapshot(sessions: Path, oldest: dt.datetime) -> tuple[dt.datetime, dict[str, Any]] | None:
+    rollouts = [
+        rollout for rollout in sessions.glob("*/*/*/rollout-*.jsonl") if rollout.stat().st_mtime >= oldest.timestamp()
+    ]
+    snapshots = [snapshot for snapshot in map(last_codex_snapshot, rollouts) if snapshot]
+    return max(snapshots, key=lambda snapshot: snapshot[0], default=None)
+
+
+def last_codex_snapshot(rollout: Path) -> tuple[dt.datetime, dict[str, Any]] | None:
+    for line in reversed(rollout.read_text(errors="replace").splitlines()):
+        if '"used_percent"' not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        limits = entry.get("payload", {}).get("rate_limits")
+        if isinstance(limits, dict):
+            return dt.datetime.fromisoformat(entry["timestamp"]), limits
+    return None
+
+
+def codex_meter(window: dict[str, Any], reading_time: dt.datetime) -> Meter:
+    used = float(window.get("used_percent", 0))
+    reset = dt.datetime.fromtimestamp(window["resets_at"], dt.UTC) if window.get("resets_at") else None
+    # Codex writes a snapshot only while it runs, so a snapshot from before its window's reset is out of date.
+    if reset and reset < reading_time:
+        return {"used": 0.0, "resets": None}
+    return {"used": used, "resets": reset.isoformat() if reset else None}
+
+
+def last_reading(log: Path, account: str) -> dict[str, Any] | None:
+    if not log.exists():
+        return None
+    for line in reversed(log.read_text().splitlines()):
+        entry: dict[str, Any] = json.loads(line)
+        if entry["account"] == account:
+            return entry
+    return None
+
+
+def rate_per_minute(previous: dict[str, Any] | None, current: dict[str, Any]) -> float | None:
+    """How fast the session meter rose between two readings of the same window, in percent per minute, or None."""
+    if not previous or not is_same_session_window(previous, current):
+        return None
+    interval = dt.datetime.fromisoformat(current["at"]) - dt.datetime.fromisoformat(previous["at"])
+    if interval < SHORTEST_RATE_INTERVAL:
+        return None
+    used = float(current["meters"]["session"]["used"] - previous["meters"]["session"]["used"])
+    return max(0.0, used / (interval.total_seconds() / 60))
+
+
+def is_held_at_session_stop(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    """Whether the session meter reached its stop earlier in the current window. It stays at its stop until the reset,
+    because otherwise a rate that falls once the agents finish would lift the stop."""
+    if not previous or "session" not in previous.get("meters_at_stop", []):
+        return False
+    return is_same_session_window(previous, current)
+
+
+def is_same_session_window(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+    before, after = previous["meters"].get("session"), current["meters"].get("session")
+    if not before or not after or before["resets"] is None or after["resets"] is None:
+        return False
+    drift = dt.datetime.fromisoformat(after["resets"]) - dt.datetime.fromisoformat(before["resets"])
+    return abs(drift) <= SAME_WINDOW_DRIFT
+
+
+def advise(
+    meters: dict[str, Meter], rate: float | None, reading_time: dt.datetime, is_held_at_session_stop: bool
+) -> Advice:
+    stop_at = 100.0 - max(STOP_FLOOR_PERCENT, (DEFAULT_RATE if rate is None else rate) * STOP_MINUTES_OF_USAGE)
+    at_stop = [name for name, meter in meters.items() if meter["used"] >= stop_percent(name, stop_at)]
+    if is_held_at_session_stop and "session" not in at_stop:
+        at_stop.append("session")
+    if not at_stop:
+        state = state_before_the_stops(meters, stop_at)
+        wait = before_the_stop_point(READ_EVERY_SECONDS[state], meters.get("session"), rate, stop_at)
+        return Advice(state, stop_at, wait, [])
+    parking = [name for name in at_stop if name != "session" and is_far_from_reset(meters[name], reading_time)]
+    # The account waits for the last reset of the meters that hold it. An unknown reset could be the last.
+    waiting_for = max(parking or at_stop, key=lambda name: reset_time(meters[name]) or LATEST_TIME)
+    state = "parked" if parking else "stop"
+    return Advice(state, stop_at, wait_for_reset(meters[waiting_for], reading_time), at_stop)
+
+
+def is_far_from_reset(meter: Meter, reading_time: dt.datetime) -> bool:
+    reset = reset_time(meter)
+    return reset is None or reset - reading_time > LONGEST_STOP
+
+
+def stop_percent(name: str, session_stop_at: float) -> float:
+    return session_stop_at if name == "session" else WEEK_STOP_PERCENT
+
+
+def state_before_the_stops(meters: dict[str, Meter], stop_at: float) -> str:
+    for name, meter in meters.items():
+        margin = NEAR_MARGIN_PERCENT if name == "session" else WEEK_NEAR_MARGIN_PERCENT
+        if meter["used"] >= stop_percent(name, stop_at) - margin:
+            return "near"
+    if any(meter["used"] >= WATCH_PERCENT for meter in meters.values()):
+        return "watch"
+    return "go"
+
+
+def reset_time(meter: Meter) -> dt.datetime | None:
+    return dt.datetime.fromisoformat(meter["resets"]) if meter["resets"] else None
+
+
+def wait_for_reset(meter: Meter, reading_time: dt.datetime) -> int:
+    reset = reset_time(meter)
+    if reset is None:
+        return UNKNOWN_RESET_WAIT_SECONDS
+    return max(SHORTEST_WAIT_SECONDS, int((reset - reading_time).total_seconds()) + AFTER_RESET_SECONDS)
+
+
+def before_the_stop_point(wait: int, session: Meter | None, rate: float | None, stop_at: float) -> int:
+    """Shortens a wait so that the next reading comes before half the room to the stop point is used, because a
+    reading after the stop point comes too late to stop anything."""
+    if not session:
+        return wait
+    # A rate of 0 would never reach the stop point.
+    per_minute = rate or DEFAULT_RATE
+    seconds_to_stop = max(0.0, stop_at - session["used"]) / per_minute * 60
+    return int(max(SHORTEST_WAIT_SECONDS, min(wait, seconds_to_stop / 2)))
+
+
+def account_line(
+    name: str, meters: dict[str, Meter], rate: float | None, advice: Advice, notes: list[str], reading_time: dt.datetime
+) -> str:
+    parts = [f"{name} {reading_time:%H:%M}"]
+    parts += [f"{meter_name} {describe(meter, reading_time)}" for meter_name, meter in meters.items()]
+    if "session" in meters:
+        parts.append("rate unknown" if rate is None else f"rate {rate:.2f}%/min")
+        parts.append(f"stop at {advice.stop_at:.0f}%")
+    return " | ".join([*parts, *notes, advice.state])
+
+
+def describe(meter: Meter, reading_time: dt.datetime) -> str:
+    reset = reset_time(meter)
+    if reset is None:
+        return f"{meter['used']:g}%"
+    reset = reset.astimezone(reading_time.tzinfo)
+    # A reset more than 20 hours away needs its day, so that it isn't read as today's or tomorrow's.
+    shown = f"{reset:%a %H:%M}" if reset - reading_time > dt.timedelta(hours=20) else f"{reset:%H:%M}"
+    return f"{meter['used']:g}% resets {shown}"
+
+
+def machine_line(free_gigabytes: float, load: float, cores: int, context: int | None, retrospective: str) -> str:
+    context_part = "orchestrator context unknown" if context is None else f"orchestrator context {context // 1000}k"
+    return " | ".join(
+        [
+            "machine",
+            f"disk {free_gigabytes:.0f} GB free",
+            f"load {load:.1f} on {cores} cores",
+            context_part,
+            retrospective,
+        ]
+    )
+
+
+def orchestrator_context(state_file: Path, checkout: Path) -> int | None:
+    session = session_in_state_file(state_file)
+    if session is None:
+        return None
+    config = Path(os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude")))
+    # Claude Code names a project's folder after its path, with a dash for each character other than a letter or digit.
+    project = re.sub(r"[^A-Za-z0-9]", "-", str(checkout))
+    return context_tokens(config / "projects" / project / f"{session}.jsonl")
+
+
+def session_in_state_file(state_file: Path) -> str | None:
+    if not state_file.exists():
+        return None
+    for line in state_file.read_text().splitlines():
+        if line.startswith("session:"):
+            return line.removeprefix("session:").strip() or None
+    return None
+
+
+def context_tokens(transcript: Path) -> int | None:
+    """The input of the last call in a transcript, which is the session's context size, or None."""
+    if not transcript.exists():
+        return None
+    with transcript.open("rb") as handle:
+        handle.seek(max(0, transcript.stat().st_size - TRANSCRIPT_TAIL_BYTES))
+        lines = handle.read().decode(errors="replace").splitlines()
+    for line in reversed(lines):
+        if '"usage"' not in line:
+            continue
+        try:
+            usage = json.loads(line)["message"]["usage"]
+        except ValueError, KeyError, TypeError:
+            continue
+        return int(
+            usage.get("input_tokens", 0)
+            + usage.get("cache_read_input_tokens", 0)
+            + usage.get("cache_creation_input_tokens", 0)
+        )
+    return None
+
+
+def read_retrospective(checkout: Path) -> str:
+    try:
+        variables = {"owner": "{owner}", "name": "{repo}", "label": RETROSPECTIVE_LABEL}
+        repository = github(REPOSITORY_QUERY, variables, checkout)["repository"]
+        merges = [dt.datetime.fromisoformat(node["mergedAt"]) for node in repository["pullRequests"]["nodes"]]
+        last = max(merges, default=None)
+        search = "repo:{owner}/{repo} is:pr is:merged"
+        if last:
+            search += f" merged:>{last.astimezone(dt.UTC):%Y-%m-%dT%H:%M:%SZ}"
+        merged = github(SEARCH_COUNT_QUERY, {"search": search}, checkout)["search"]["issueCount"]
+    except MeterError as error:
+        return f"retrospective unknown: {error}"
+    latest = repository["latestRelease"]
+    release = Release(latest["tagName"], dt.datetime.fromisoformat(latest["publishedAt"])) if latest else None
+    return retrospective_note(last, release, merged)
+
+
+def retrospective_note(last: dt.datetime | None, release: Release | None, merged: int) -> str:
+    since = "since the last one" if last else "with no retrospective yet"
+    if release and (last is None or release.published > last):
+        return f"retrospective due: release {release.tag} {since}"
+    if merged >= MERGES_PER_RETROSPECTIVE:
+        return f"retrospective due: {merged} merged pull requests {since}"
+    return f"retrospective not due: {merged} of {MERGES_PER_RETROSPECTIVE} merged pull requests {since}, and no release"
+
+
+def github(query: str, variables: dict[str, str], checkout: Path) -> Any:
+    """The data that GitHub gives for a GraphQL query about the checkout's repository. gh fills in {owner} and {repo}
+    in the variables."""
+    command = ["gh", "api", "graphql", "-f", f"query={query}"]
+    for name, value in variables.items():
+        command += ["-F", f"{name}={value}"]
+    try:
+        done = subprocess.run(command, cwd=checkout, capture_output=True, text=True, check=False)
+    except FileNotFoundError as error:
+        raise MeterError("gh isn't installed. Install the GitHub CLI.") from error
+    if done.returncode != 0:
+        problem = " ".join(done.stderr.split())
+        raise MeterError(f"gh api graphql failed: {problem}. Check the network, and that gh auth status shows a login.")
+    return json.loads(done.stdout)["data"]
+
+
+if __name__ == "__main__":
+    sys.exit(main())

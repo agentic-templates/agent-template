@@ -1,0 +1,16 @@
+# shellcheck shell=bash
+# The function is_python_file, which scripts/check and scripts/hooks/after-edit use to find the Python files.
+
+# A first line that runs Python, such as #!/usr/bin/env python3, or #!/usr/bin/env -S uv run --script, which runs
+# the file with the Python version in .python-version.
+python_shebang='^#!.*([/[:space:]]python[0-9.]*|[[:space:]]uv[[:space:]]+run)([[:space:]]|$)'
+
+# Succeeds if a file is Python: its name ends in .py, or its first line runs Python: is_python_file <path>
+is_python_file() {
+  local first_line=""
+  if [[ $1 == *.py ]]; then
+    return 0
+  fi
+  IFS= read -r first_line <"$1" || true
+  [[ $first_line =~ $python_shebang ]]
+}

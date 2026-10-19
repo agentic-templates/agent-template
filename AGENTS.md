@@ -32,6 +32,10 @@ When a request doesn't fit this direction, say so, and ask the maintainer whethe
 ## Commands
 
 - `scripts/check`: runs the checks that CI runs on the code.
+- `scripts/loop/meter`: prints the usage of each Claude and Codex account that `.loop/accounts.json` lists, and advises whether to start more work. `scripts/loop/meter --help` says how to read it.
+- `uv run --locked python -m unittest discover -s scripts/loop -t scripts/loop`: runs the tests of the Python scripts, which `scripts/check` runs too.
+
+The Python scripts in `scripts/loop` need [uv](https://docs.astral.sh/uv/getting-started/installation/). When uv first runs one, it installs the Python version in `.python-version` and the packages in `uv.lock`.
 
 Keep the checks on a pull request within five minutes.
 
@@ -51,6 +55,8 @@ A status label says what an issue is waiting for. The status labels are:
 - `needs-decision`: waiting for a maintainer to answer a question or make a decision.
 
 The `ready` label marks the issues that a maintainer wants built, and isn't a status label.
+
+The `retrospective` label marks the pull request of a retrospective. `scripts/loop/meter` counts the merged pull requests since the newest one.
 
 Dependabot adds `dependencies` to its own pull requests.
 

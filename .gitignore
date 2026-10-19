@@ -11,3 +11,9 @@
 .loop/
 
 .DS_Store
+
+# Python
+__pycache__/
+
+# The files that the loop keeps on this machine
+.loop/
