@@ -7,13 +7,10 @@
 .claude/settings.local.json
 .claude/worktrees/
 
-# The loop's working files, such as the orchestrator's state file
+# The files that the loop keeps on this machine, such as the orchestrator's state file
 .loop/
 
 .DS_Store
 
 # Python
 __pycache__/
-
-# The files that the loop keeps on this machine
-.loop/
