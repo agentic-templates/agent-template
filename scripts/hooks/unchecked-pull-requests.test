@@ -108,6 +108,20 @@ expect_block Bash 'gh pr create --title "Add notes" --body "Closes #1"' "$not_ch
 record_pass
 expect_allow Bash 'gh pr create --title "Add notes" --body "Closes #1"'
 
+# A cd before gh pr create changes the folder whose pass counts, unless the cd runs in a subshell. After a cd to a
+# folder that a variable names, the hook has nothing to compare.
+work_in "$repository"
+forget_pass
+(cd "$worktree" && record_pass)
+expect_allow Bash "cd $worktree && gh pr create --title 'Add notes' --body 'Closes #1'"
+expect_block Bash "(cd $worktree) && gh pr create --title 'Add notes' --body 'Closes #1'" "$not_checked"
+expect_block Bash "echo \"\$(cd $worktree)\" && gh pr create --title 'Add notes' --body 'Closes #1'" "$not_checked"
+expect_allow Bash "cd \"\$folder\" && gh pr create --title 'Add notes' --body 'Closes #1'"
+record_pass
+(cd "$worktree" && forget_pass)
+expect_block Bash "cd $worktree && gh pr create --title 'Add notes' --body 'Closes #1'" "$not_checked"
+expect_allow Bash "(cd $worktree) && gh pr create --title 'Add notes' --body 'Closes #1'"
+
 # The branch that --head names, alone or after a person's name and a colon. The branch first has only the first commit.
 work_in "$repository"
 record_pass
