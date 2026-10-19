@@ -13,6 +13,11 @@ OUTPUT_KEY = "output_tokens"
 # gh pr new is another name for gh pr create, which prints the new pull request's URL. The URL ends in its number.
 PR_CREATE = re.compile(r"\bgh pr (create|new)\b")
 PULL_REQUEST_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/([1-9][0-9]*)")
+# Claude Code gives each message that a person typed this origin, on a user line, or on an attachment line of the kind
+# QUEUED_MESSAGE if the message arrived while a turn ran. A task notification, an agent's message, a scheduled prompt
+# such as the loop's heartbeat, a hook's output and a compaction's summary have another origin or none.
+PERSON_ORIGIN = "human"
+QUEUED_MESSAGE = "queued_command"
 
 
 class Call(NamedTuple):
@@ -26,6 +31,11 @@ class Call(NamedTuple):
     tool_calls: int
     # The id of the request to the API, which Claude Code's events give too, or None if the transcript has none
     request_id: str | None = None
+
+
+class Message(NamedTuple):
+    at: dt.datetime
+    text: str
 
 
 def read_transcript(file: Path) -> tuple[list[Call], list[dt.datetime]]:
@@ -68,23 +78,28 @@ def read_transcript(file: Path) -> tuple[list[Call], list[dt.datetime]]:
 
 def transcript_entries(file: Path) -> list[dict[str, Any]]:
     """The entries of a transcript that hold a message and its time."""
+    return [entry for entry in timed_entries(file) if isinstance(entry.get("message"), dict)]
+
+
+def timed_entries(file: Path) -> list[dict[str, Any]]:
+    """The entries of a transcript that hold their time."""
     entries = []
     with file.open(errors="replace") as handle:
         for line in handle:
-            entry = transcript_entry(line)
+            entry = timed_entry(line)
             if entry is not None:
                 entries.append(entry)
     return entries
 
 
-def transcript_entry(line: str) -> dict[str, Any] | None:
-    """The entry on a transcript's line if it holds a message and its time, or None."""
+def timed_entry(line: str) -> dict[str, Any] | None:
+    """The entry on a transcript's line if it holds its time, or None."""
     try:
         entry = json.loads(line)
     except ValueError:
         # Claude Code may be writing the last line of a running session's transcript.
         return None
-    if not isinstance(entry.get("message"), dict) or not entry.get("timestamp"):
+    if not entry.get("timestamp"):
         return None
     return dict(entry)
 
@@ -99,6 +114,31 @@ def is_prompt(entry: dict[str, Any]) -> bool:
         return False
     content = entry["message"].get("content")
     return not isinstance(content, list) or any(block.get("type") != "tool_result" for block in content)
+
+
+def person_messages(file: Path) -> list[Message]:
+    """The messages that a person typed in a session, in the transcript's order."""
+    messages = []
+    for entry in timed_entries(file):
+        text = person_text(entry)
+        if text is not None:
+            messages.append(Message(dt.datetime.fromisoformat(entry["timestamp"]), text))
+    return messages
+
+
+def person_text(entry: dict[str, Any]) -> str | None:
+    """The text of the message that a person typed on a transcript's line, or None if the line holds no such message."""
+    if entry.get("type") == "user" and isinstance(entry.get("message"), dict):
+        origin, content = entry.get("origin"), entry["message"].get("content")
+    elif entry.get("type") == "attachment" and (entry.get("attachment") or {}).get("type") == QUEUED_MESSAGE:
+        origin, content = entry["attachment"].get("origin"), entry["attachment"].get("prompt")
+    else:
+        return None
+    if (origin or {}).get("kind") != PERSON_ORIGIN:
+        return None
+    if isinstance(content, str):
+        return content
+    return "\n".join(block["text"] for block in content if block.get("type") == "text")
 
 
 def blocks(entry: dict[str, Any], kind: str) -> list[dict[str, Any]]:

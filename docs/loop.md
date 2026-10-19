@@ -47,9 +47,11 @@ on.
 
 ### Take in
 
-- **Messages.** Read the maintainer's messages in this session, and the issues and comments that they wrote on GitHub
-  since your last pass. Open or rewrite issues for each goal, idea or correction, without stopping the builders that
-  run. If a correction changes the issue of a running builder, give the builder the change.
+- **Messages and mistakes.** Read the maintainer's messages in this session, and the issues and comments that they
+  wrote on GitHub since your last pass. Open or rewrite issues for each goal and idea, and for the cause of each
+  correction, without stopping the builders that run. Treat each mistake of your own or of an agent that the loop could
+  make again, such as a time that you guessed, as a correction, even when you fixed the mistake itself. If a
+  correction changes the issue of a running builder, give the builder the change.
 - **Answers.** For each issue with `needs-decision` that the maintainer answered in a comment, carry out the answer,
   as "Labels" in `docs/planning.md` describes.
 - **Other people's issues.** Triage them, as "Triage issues that others open" in `docs/planning.md` describes.

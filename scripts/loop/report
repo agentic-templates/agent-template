@@ -46,6 +46,9 @@ The lines are:
 With --issues, the report also gives a line for each agent that built an issue, of the kinds other and left behind,
 with its numbers, those of its pull request, and the minutes of each part of its time.
 
+With --messages, the report also gives each message that a person typed in a session in the main checkout, such as
+the maintainer's messages to the orchestrator, with its time.
+
 The input tokens count the cached tokens too.
 
 An agent starts on the issue or pull request whose number starts its prompt, as docs/loop.md asks. A pull request
@@ -53,7 +56,8 @@ needed a fix after review when it got a commit after an agent of the type review
 builder when an agent of another type started on it or on its issue after the agent that opened it.
 
 The report counts the CI runs, the agents and the calls that started after the moment. It reads the transcripts that
-Claude Code keeps for the main checkout, and prints none of their text.
+Claude Code keeps for the main checkout, and prints none of their text other than the messages that --messages asks
+for.
 """
 
 import argparse
@@ -70,7 +74,7 @@ import paths
 import request_events
 from agent_log import AgentRun, Period, agent_output_tokens, agent_transcripts, read_runs, started, working_periods
 from github import GitHubError, gh_api
-from transcripts import Call, read_transcript
+from transcripts import Call, Message, person_messages, read_transcript
 
 CI_WORKFLOW = "ci.yml"
 ORCHESTRATOR = "orchestrator"
@@ -174,6 +178,9 @@ def main(argv: list[str] | None = None) -> int:
         "--since", required=True, type=moment, help="an ISO time with its zone, such as 2026-10-11T14:00:00Z"
     )
     parser.add_argument("--issues", action="store_true", help="also give a line for each agent that built an issue")
+    parser.add_argument(
+        "--messages", action="store_true", help="also give the messages that a person typed in the main checkout"
+    )
     options = parser.parse_args(argv)
     since: dt.datetime = options.since
     checkout = paths.main_checkout()
@@ -213,6 +220,8 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if options.issues:
         lines += issue_lines(recent, results, event_tokens, splits)
+    if options.messages:
+        lines += message_lines(read_messages(paths.claude_project_folder(checkout), since))
     print("\n".join(lines))
     return 0
 
@@ -310,6 +319,24 @@ def count_once(transcripts: list[Transcript], since: dt.datetime) -> list[Agent]
         if calls:
             agents.append(Agent(transcript.role, calls))
     return agents
+
+
+def read_messages(project_folder: Path, since: dt.datetime) -> list[Message]:
+    """The messages that a person typed in the sessions after the time, in order of time. A resumed session's
+    transcript starts with copies of the earlier transcript's messages, so each message counts once."""
+    messages: set[Message] = set()
+    for session in project_folder.glob("*.jsonl"):
+        if session.stat().st_mtime >= since.timestamp():
+            messages.update(message for message in person_messages(session) if message.at >= since)
+    return sorted(messages)
+
+
+def message_lines(messages: list[Message]) -> list[str]:
+    lines = [f"Messages that a person typed: {len(messages)}"]
+    for message in messages:
+        lines.append(f"Message at {message.at.isoformat()}:")
+        lines += [f"  {text_line}" for text_line in message.text.splitlines()]
+    return lines
 
 
 def opened(run: AgentRun) -> int | None:
