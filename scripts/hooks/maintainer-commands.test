@@ -400,8 +400,15 @@ expect_block Bash 'gh pr co 7' "Blocked: pull request 7 comes from a fork. $chec
 expect_block Bash 'gh pr checkout --branch=pr-7 7' "Blocked: pull request 7 comes from a fork. $checkout_reason"
 expect_block Bash 'gh pr checkout -R jtmpl/other 7' \
   "Blocked: pull request 7 comes from a fork. Read it with gh pr diff 7 --repo jtmpl/other instead, because a checkout brings in its hook scripts and its AGENTS.md."
+# A word can hold several short flags, and the last of them can take the next word as its value. The -f of
+# gh pr checkout and the -s of gh pr merge take no value.
+expect_block Bash 'gh pr checkout -fb pr-7 7' "Blocked: pull request 7 comes from a fork. $checkout_reason"
+expect_block Bash 'gh pr checkout -fR jtmpl/other 7' \
+  "Blocked: pull request 7 comes from a fork. Read it with gh pr diff 7 --repo jtmpl/other instead, because a checkout brings in its hook scripts and its AGENTS.md."
 expect_block Bash 'gh pr merge 7 --squash' "Blocked: pull request 7 $merge_reason"
 expect_block Bash 'gh pr merge --body "x" 7' "Blocked: pull request 7 $merge_reason"
+expect_block Bash 'gh pr merge -sb "x" 7' "Blocked: pull request 7 $merge_reason"
+expect_block Bash 'gh pr merge -sR jtmpl/other 7' "Blocked: pull request 7 $merge_reason"
 expect_block Bash 'gh pr merge --squash' "Blocked: this branch's pull request $merge_reason"
 expect_block Bash 'git fetch origin pull/7/head:pr-7' "Blocked: pull request 7 comes from a fork. $checkout_reason"
 expect_block Bash 'git fetch origin +refs/pull/7/merge' "Blocked: pull request 7 comes from a fork. $checkout_reason"
