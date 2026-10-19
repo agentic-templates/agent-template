@@ -6,9 +6,14 @@
 # under this name or another, the reader also gets the lines that the branch and its uncommitted edits added or rewrote.
 # It runs claude -p in an empty temporary folder, with --safe-mode, which keeps the login but turns off CLAUDE.md,
 # skills, plugins, hooks and MCP servers, and with no tools. If claude fails, the script runs it once more. If that run
-# fails too, it prints claude's error and exits with code 1. "Review a changed page with a fresh reader" in
-# docs/pages.md runs it.
+# fails too, it prints claude's error and exits with code 1. Once the reader answers, the script adds git's hash of the
+# page to the record of the pages read, in the git folder of the current folder's worktree, as
+# scripts/hooks/pages-read.bash describes. Outside a git repository, it records nothing. "Review a changed page with a
+# fresh reader" in docs/pages.md runs it, and a hook blocks gh pr create until the record has each page that the pull
+# request adds or rewrites text in, as the pull request has it.
 set -euo pipefail
+# shellcheck source=scripts/hooks/pages-read.bash
+source "$(dirname "$0")/hooks/pages-read.bash"
 
 # Prints an error and stops: stop <message>
 stop() {
@@ -26,9 +31,11 @@ if [[ ! -f $page ]]; then
 fi
 
 # Outside a clone with origin/main, or for a page that git doesn't track, the reader gets the whole page and no lines.
+# Until the resolution of a merge conflict in the page is staged, git lists the page once for each stage of the
+# conflict, up to three times, and --deduplicate lists it once.
 new_lines=""
 if branch_start=$(git merge-base HEAD origin/main 2>/dev/null) &&
-  path=$(git --literal-pathspecs ls-files --full-name -- "$page" 2>/dev/null) && [[ -n $path ]]; then
+  path=$(git --literal-pathspecs ls-files --full-name --deduplicate -- "$page" 2>/dev/null) && [[ -n $path ]]; then
   # git diff gets no pathspec, because with only the page's new name it can't see a rename, and the renamed page
   # would look new. --diff-filter=MR leaves out a page that the branch's start doesn't have, because all of it is new.
   if ! diff=$(git -c core.quotePath=false diff --no-ext-diff --no-color --no-relative --find-renames --unified=0 --diff-filter=MR \
@@ -51,6 +58,13 @@ else
   input="$prompt"$'\n\n'"$(<"$page")"$'\n\n'"The lines that the change added or rewrote:"$'\n\n'"$new_lines"
 fi
 
+# Outside a git repository, git has no folder for the record, and prints an error that the reader of the answer
+# doesn't need.
+record=""
+if record=$(pages_read_path 2>/dev/null); then
+  page_hash=$(git hash-object -- "$page")
+fi
+
 folder=$(mktemp -d)
 trap 'rm -rf "$folder"' EXIT
 cd "$folder"
@@ -68,3 +82,6 @@ if ((status != 0)); then
   stop "can't get the reader's answer, because claude failed twice. The second time, it exited with code $status and printed: $answer"
 fi
 printf '%s\n' "$answer"
+if [[ -n $record ]] && ! printf '%s\n' "$page_hash" >>"$record"; then
+  stop "the reader answered, but scripts/fresh-reader can't record in $record that the reader read $page, and a hook blocks opening a pull request that adds or rewrites text in the page without that record. Fix the error above, and run scripts/fresh-reader again."
+fi

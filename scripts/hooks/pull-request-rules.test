@@ -5,6 +5,8 @@ set -euo pipefail
 source "${BASH_SOURCE[0]%/*}/testing.bash"
 # shellcheck source=scripts/hooks/check-passed.bash
 source "$hooks_folder/check-passed.bash"
+# shellcheck source=scripts/hooks/pages-read.bash
+source "$hooks_folder/pages-read.bash"
 
 # The cases run in repositories in a temporary folder, and git looks for no repository above it.
 base=$(cd "$(mktemp -d)" && pwd -P)
@@ -56,6 +58,12 @@ work_in() {
 # scripts/hooks/unchecked-pull-requests.check blocks gh pr create without it.
 record_pass() {
   tree_on_disk >"$(pass_record_path)"
+}
+
+# Records that a fresh reader read README.md and docs/code.md as they are on disk, as scripts/fresh-reader does, because
+# scripts/hooks/unread-pages.check blocks gh pr create on the branch rules without it when claude is installed.
+record_reading() {
+  git hash-object README.md docs/code.md >>"$(pages_read_path)"
 }
 
 # A repository on GitHub, as a bare repository, whose main has notes.txt and scripts/configure-github,
@@ -126,6 +134,9 @@ co_authored_commit=$(git rev-parse --short co-authored)
 co_authored="Commit $co_authored_commit \"feat: export the totals\" has a Co-authored-by trailer, for Claude <noreply@anthropic.com>. Rewrite the commit without the trailer, such as with git commit --amend when it's the latest commit, and push the branch again with --force-with-lease."
 expect_block Bash "gh pr create --head co-authored --title '$title' --body-file ../body.md" "$(blocked "$co_authored")"
 expect_block Bash "gh pr create -H jtmpl:co-authored --title '$title' --body-file ../body.md" "$(blocked "$co_authored")"
+# With no branch after the colon, the commits are those of HEAD.
+expect_block Bash "gh pr create --head jtmpl: --title 'skip the expenses that were already imported' --body-file ../body.md" \
+  "$(blocked "$not_a_type")"
 
 # Bodies from here-documents and standard input, with quotes in the text, which would end a quoted word
 quoted_body=${body/"skips the expenses"/skips the \"imported\" expenses}
@@ -180,6 +191,7 @@ done
 git add --all
 git commit --quiet -m "docs: write the rules"
 record_pass
+record_reading
 rules_need_draft=$(draft_needed "AGENTS.md, docs/code.md, src/app/AGENTS.md")
 expect_block Bash "gh pr create --title '$title' --body-file ../body.md" "$rules_need_draft"
 expect_block Bash "gh pr new --title '$title' --body-file ../body.md" "$rules_need_draft"
@@ -218,12 +230,12 @@ hook_message=$(HOME=$test_home "$base/copy/hooks/before-tool" 2>&1 >/dev/null \
 expect_result "With no line break after the last pattern, the hook" 2 "$(draft_needed imports.txt)"
 
 # A cd before gh pr create changes the folder that the hook reads the body file and the commits from, unless the cd
-# runs in a subshell. The worktree holds the commit of the branch rules, a body file of its own and a pass of its own,
-# while the folder that the agent works in is on the branch work.
+# runs in a subshell. The worktree holds the commit of the branch rules, a body file of its own, and a pass and a
+# record of the pages read of its own, while the folder that the agent works in is on the branch work.
 worktree=$base/rules-worktree
 git worktree add --quiet --detach "$worktree" rules
 cp "$base/body.md" "$worktree/pr-body.md"
-(cd "$worktree" && record_pass)
+(cd "$worktree" && record_pass && record_reading)
 expect_block Bash "cd $worktree && gh pr create --title '$title' --body-file ../body.md" "$rules_need_draft"
 expect_allow Bash "cd $worktree && gh pr create --draft --title '$title' --body-file pr-body.md"
 expect_allow Bash "(cd $worktree) && gh pr create --title '$title' --body-file ../body.md"

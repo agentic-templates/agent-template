@@ -490,6 +490,46 @@ opens_pull_request() {
   done
 }
 
+# Sets head_commit to the latest commit of the pull request of opens_pull_request, in the repository of the current
+# folder, or fails when it can't find it: the latest commit of the branch that --head names, or HEAD when it names none.
+find_head_commit() {
+  local head_ref=HEAD branch
+  # --head can name the branch as <user>:<branch>.
+  branch=${pr_head#*:}
+  if [[ -n $branch ]]; then
+    head_ref=refs/heads/$branch
+  fi
+  head_commit=$(git rev-parse --verify --quiet "$head_ref^{commit}") || return 1
+}
+
+# Succeeds if the pull request's latest commit, as find_head_commit finds it, is HEAD. A commit before gh in the same
+# command, as in git commit -am ... && gh pr create, then adds the changes on disk to the pull request, because the
+# hooks run before the whole command.
+is_pull_request_at_head() {
+  local head
+  head=$(git rev-parse --verify --quiet HEAD) || return 1
+  [[ $head_commit == "$head" ]]
+}
+
+# Sets base_commit and head_commit to the commits that the pull request of opens_pull_request compares, in the
+# repository of the current folder, or fails when it can't find them. The pull request's commits are those on its
+# branch, as find_head_commit finds its latest commit, that aren't on the base branch on GitHub. The base branch is the
+# one that --base names, or the one that origin/HEAD points to, and the function fetches it from origin first.
+find_commits() {
+  local base_branch
+  base_branch=$pr_base
+  if [[ -z $base_branch ]]; then
+    # Outside a git repository, git's error says only that the check has nothing to compare.
+    base_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || return 1
+    base_branch=${base_branch#origin/}
+  fi
+  # The local copy of the base branch can be older than GitHub's. The commits that GitHub's has and the local copy
+  # doesn't would then count as the pull request's own, and so would the files that they change.
+  GIT_TERMINAL_PROMPT=0 git fetch --quiet origin "$base_branch" >/dev/null 2>&1 || true
+  base_commit=$(git rev-parse --verify --quiet "refs/remotes/origin/$base_branch^{commit}") || return 1
+  find_head_commit
+}
+
 # Adds the files that the redirections of a simple command write to the array written_files, which a check empties
 # before the first simple command of each command. The hook can't read such a file before the command runs.
 record_written_files() {

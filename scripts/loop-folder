@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 # The main checkout, the loop's folder, which holds the orchestrator's state file and the log of the hooks' blocks,
-# state_field, which reads a line of the state file, and is_orchestrators_session, which tells whether the file names a
-# session. The hooks in scripts/hooks read them from here, and scripts/loop/paths.py finds the same folders for the
-# Python scripts.
+# state_field, which reads a line of the state file, is_orchestrators_session, which tells whether the file names a
+# session, and compaction_record, which names the file that records what started a session's compaction. The hooks in
+# scripts/hooks read them from here, and scripts/loop/paths.py finds the same folders for the Python scripts.
 
 # Prints the main checkout, which holds the git folder that its worktrees share. A repository that keeps its git
 # folder elsewhere, as a submodule does, has no such checkout, so its main checkout is the checkout itself:
@@ -35,4 +35,15 @@ state_field() {
 # is_orchestrators_session <loop folder> <session id>
 is_orchestrators_session() {
   [[ -n $2 && -f $1/state.md && $(state_field "$1/state.md" session) == "$2" ]]
+}
+
+# Prints the file in which scripts/hooks/before-compact records what started a session's compaction, auto or manual,
+# for scripts/hooks/session-start: compaction_record <loop folder> <session id>
+# It fails for a session id that isn't a word of letters, digits, - and _, because an id such as ../state.md would
+# name another file, which session-start would delete.
+compaction_record() {
+  if [[ ! $2 =~ ^[A-Za-z0-9_-]+$ ]]; then
+    return 1
+  fi
+  printf '%s/compactions/%s\n' "$1" "$2"
 }

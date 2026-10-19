@@ -107,8 +107,8 @@ settings=$PWD/.claude/settings.json
 for checkout in "$repository" "$other"; do
   git init --quiet --initial-branch=main "$checkout"
   mkdir -p "$checkout/scripts/hooks" "$checkout/scripts/loop"
-  for hook in hooks/before-tool hooks/after-tool hooks/after-edit hooks/state-times hooks/hand-off hooks/session-start \
-    loop/agent-log; do
+  for hook in hooks/before-tool hooks/after-tool hooks/after-edit hooks/state-times hooks/hand-off hooks/before-compact \
+    hooks/session-start loop/agent-log; do
     # The stand-in reads its input before it prints its path. Otherwise it could exit before the command's printf
     # writes the input, and where SIGPIPE is ignored, as in CI, printf would print an I/O error.
     # shellcheck disable=SC2016 # $0 expands when the hook runs.
@@ -123,13 +123,16 @@ mkdir "$checkouts/plain"
 
 # Checks which hook the commands for an event in .claude/settings.json run from the repository's main checkout:
 # expect_hook <event> <tool> <folder the agent works in> <checkout whose hook must run> [<matcher>]
-# The tool is claude-code, copilot-cli or cursor. For SessionStart and SubagentStop, only Claude Code counts, because
-# the other tools send no such event. For PostToolUse, the matcher picks the commands: Bash, Edit|Write,
-# Edit|Write|CronCreate or *.
+# The tool is claude-code, copilot-cli or cursor. For PreCompact, SessionStart and SubagentStop, only Claude Code
+# counts, because the other tools send no such event or the hook does nothing in them. For PostToolUse, the matcher
+# picks the commands: Bash, Edit|Write, Edit|Write|CronCreate or *.
 expect_hook() {
   local event=$1 tool=$2 checkout=$4 matcher=${5:-} input expected
   test_cwd=$3
-  if [[ $event == SessionStart ]]; then
+  if [[ $event == PreCompact ]]; then
+    input=$(jq -n --arg cwd "$test_cwd" '{session_id: "abc123", cwd: $cwd, hook_event_name: "PreCompact", trigger: "auto", custom_instructions: ""}')
+    expected=$checkout/scripts/hooks/before-compact
+  elif [[ $event == SessionStart ]]; then
     input=$(jq -n --arg cwd "$test_cwd" '{session_id: "abc123", cwd: $cwd, hook_event_name: "SessionStart", source: "startup"}')
     expected=$checkout/scripts/hooks/session-start
   elif [[ $event == SubagentStop ]]; then
@@ -180,6 +183,7 @@ expect_commands() {
 expect_hook PreToolUse claude-code "$worktree" "$worktree"
 expect_hook PreToolUse copilot-cli "$worktree" "$worktree"
 expect_hook PreToolUse claude-code "$worktree/scripts" "$worktree"
+expect_hook PreCompact claude-code "$worktree" "$worktree"
 expect_hook SessionStart claude-code "$worktree" "$worktree"
 expect_hook SubagentStop claude-code "$worktree" "$worktree"
 expect_hook PostToolUse claude-code "$worktree" "$worktree" Bash
@@ -189,6 +193,7 @@ expect_hook PostToolUse claude-code "$worktree" "$worktree" '*'
 
 # The main checkout
 expect_hook PreToolUse claude-code "$repository" "$repository"
+expect_hook PreCompact claude-code "$repository" "$repository"
 expect_hook SessionStart claude-code "$repository" "$repository"
 expect_hook SubagentStop claude-code "$repository" "$repository"
 
@@ -197,6 +202,7 @@ expect_hook PreToolUse cursor "$worktree" "$repository"
 
 # A hook never runs another repository's code, so the hooks of the folder the command runs in run.
 expect_hook PreToolUse claude-code "$other" "$repository"
+expect_hook PreCompact claude-code "$other" "$repository"
 expect_hook SessionStart claude-code "$other" "$repository"
 expect_hook SubagentStop claude-code "$other" "$repository"
 expect_hook PostToolUse claude-code "$other" "$repository" Bash

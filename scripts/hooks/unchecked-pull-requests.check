@@ -2,49 +2,40 @@
 # Blocks opening a pull request with gh pr create, or its alias gh pr new, until scripts/check has passed on the
 # pull request's files, because a pull request that fails in CI costs a round trip.
 # scripts/check records the tree of the files it passed on, as check-passed.bash describes. This check compares that
-# record with the tree of HEAD, or of the branch that --head names, in the folder that gh runs in: the folder the agent
-# works in, or the one that a cd before gh changes to, as follow_cd in helpers.bash finds it. It allows the command
-# when it has nothing to compare: outside a git repository, before the first commit, when this repository has no
-# branch of that name, and after a cd to a folder that it can't tell.
+# record with the tree of the pull request's latest commit, as find_head_commit in helpers.bash finds it, in the folder
+# that gh runs in: the folder the agent works in, or the one that a cd before gh changes to, as follow_cd in
+# helpers.bash finds it. While that commit is HEAD, as is_pull_request_at_head in helpers.bash finds it, the check also
+# blocks the command when tracked files have changes that aren't committed, because a commit before gh in the same
+# command would add them to the pull request.
+# It allows the command when it has nothing to compare: outside a git repository, before the first commit, when this
+# repository has no branch that --head names, and after a cd to a folder that it can't tell.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 # shellcheck source=scripts/hooks/check-passed.bash
 source "${BASH_SOURCE[0]%/*}/check-passed.bash"
 
 not_checked="Blocked: scripts/check hasn't passed on these files. Run it, fix what it reports, and open the pull request again."
-not_committed="Blocked: scripts/check passed on the files on disk, but some of their changes aren't committed. Commit them first, and then run gh pr create in a command of its own."
+not_committed="Blocked: tracked files have changes that aren't committed, so this hook can't tell which files the pull request holds. Commit them first, and then run gh pr create in a command of its own."
 
 check_gh_pr_create() {
-  local branch head_tree pull_request_tree record passed_tree disk_tree
+  local head_tree disk_tree record
   if ! opens_pull_request; then
     return 0
   fi
-  # --head can name the branch as <user>:<branch>.
-  branch=${pr_head#*:}
-
   if [[ -z $command_folder ]] || ! cd -- "$command_folder" 2>/dev/null; then
     return 0
   fi
   head_tree=$(git rev-parse --verify --quiet 'HEAD^{tree}') || return 0
-  pull_request_tree=$head_tree
-  if [[ -n $branch ]]; then
-    pull_request_tree=$(git rev-parse --verify --quiet "refs/heads/$branch^{tree}") || return 0
-  fi
+  find_head_commit || return 0
 
-  record=$(pass_record_path)
-  if [[ ! -f $record ]]; then
-    block "$not_checked"
-  fi
-  passed_tree=$(< "$record")
-  if [[ $passed_tree == "$pull_request_tree" ]]; then
-    return 0
-  fi
-  # A pass on changes that aren't committed yet, as when one command commits and then opens the pull request.
   # git's warnings, such as about line endings, would end up in the message, so they're left out.
-  if [[ $passed_tree != "$head_tree" ]] && disk_tree=$(tree_on_disk 2>/dev/null) && [[ $passed_tree == "$disk_tree" ]]; then
+  if is_pull_request_at_head && disk_tree=$(tree_on_disk 2>/dev/null) && [[ $disk_tree != "$head_tree" ]]; then
     block "$not_committed"
   fi
-  block "$not_checked"
+  record=$(pass_record_path)
+  if [[ ! -f $record || $(< "$record") != "$(git rev-parse "$head_commit^{tree}")" ]]; then
+    block "$not_checked"
+  fi
 }
 
 check_simple_command() {

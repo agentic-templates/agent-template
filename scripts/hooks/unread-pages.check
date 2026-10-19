@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# Blocks opening a pull request with gh pr create, or its alias gh pr new, when it adds or rewrites text in README.md or
+# in a Markdown page anywhere in docs/, and no fresh reader has read that page as it is now, because "Review a changed
+# page with a fresh reader" in docs/pages.md asks for one. A pull request that only deletes a page's lines or renames
+# the page needs no reader.
+# scripts/fresh-reader records git's hash of each page that it gives a reader, as pages-read.bash describes, and this
+# check looks up the hash of each such page. The pull request's commits are those that find_commits in helpers.bash
+# finds, in the folder that gh runs in, as follow_cd in helpers.bash finds it. When the pull request's latest commit is
+# HEAD, the pages on disk count, because the check runs before the whole command, and a command such as
+# git commit -am ... && gh pr create commits them first. The check also blocks while a page has changes that aren't
+# committed, because it can't tell then which text the pull request holds.
+# The check allows the command when it can't find the pull request's commits, and when claude isn't installed, because
+# scripts/fresh-reader runs claude, and docs/pages.md has the agent give the page to another reader then.
+# shellcheck source=scripts/hooks/helpers.bash
+source "${BASH_SOURCE[0]%/*}/helpers.bash"
+# shellcheck source=scripts/hooks/pages-read.bash
+source "${BASH_SOURCE[0]%/*}/pages-read.bash"
+
+# The pages that need a reader when a pull request adds or rewrites text in them
+page_paths=(':(top)README.md' ':(top)docs/*.md')
+
+# Sets branch_start to the commit that the pull request's branch starts from, and pages_commit to the pull request's
+# latest commit, or to empty when that commit is HEAD and the pages on disk count. Changes to the repository's top
+# folder, from which git hash-object reads the pages. Run find_commits first.
+find_pages() {
+  local top
+  branch_start=$(git merge-base "$base_commit" "$head_commit") || return 1
+  pages_commit=$head_commit
+  if is_pull_request_at_head; then
+    pages_commit=""
+  fi
+  top=$(git rev-parse --show-toplevel) || return 1
+  cd -- "$top"
+}
+
+# Prints each page that has lines that the branch's start doesn't have, one to a line.
+pages_with_new_text() {
+  local entry added path
+  # With -z, git prints a renamed page's counts with an empty path, and then its old path and its new path. A binary
+  # file's counts are -. Without a second commit, git compares the branch's start with the files on disk.
+  git diff --numstat -z --find-renames --no-relative "$branch_start" ${pages_commit:+"$pages_commit"} -- \
+    "${page_paths[@]}" | while IFS= read -r -d '' entry; do
+    IFS=$'\t' read -r added _ path <<<"$entry"
+    if [[ -z $path ]]; then
+      IFS= read -r -d '' _
+      IFS= read -r -d '' path
+    fi
+    if [[ $added != 0 && $added != - ]]; then
+      printf '%s\n' "$path"
+    fi
+  done
+}
+
+# Prints git's hash of a page as the pull request has it: page_hash <path>
+page_hash() {
+  if [[ -z $pages_commit ]]; then
+    git hash-object -- "$1"
+  else
+    git rev-parse "$pages_commit:$1"
+  fi
+}
+
+# Prints each page that has lines that the branch's start doesn't have, and that no reader has read as it is now, one
+# to a line.
+unread_pages() {
+  local record path
+  record=$(pages_read_path)
+  pages_with_new_text | while IFS= read -r path; do
+    if [[ ! -f $record ]] || ! grep -qxF -- "$(page_hash "$path")" "$record"; then
+      printf '%s\n' "$path"
+    fi
+  done
+}
+
+# Prints the message that blocks a pull request with pages that no reader has read: unread_message <pages>
+# <pages> holds one page to a line.
+unread_message() {
+  local page
+  echo "Blocked: this pull request adds or rewrites text in pages that no fresh reader has read as they are now. Give each page to a reader, as \"Review a changed page with a fresh reader\" in docs/pages.md describes:"
+  while IFS= read -r page; do
+    echo "scripts/fresh-reader \"<reader>\" $page"
+  done <<<"$1"
+  echo "If you change a page after the reader read it, run its command again. Then commit the pages, and run gh pr create in a command of its own."
+}
+
+check_gh_pr_create() {
+  local unread uncommitted=""
+  if ! opens_pull_request || ! command -v claude >/dev/null; then
+    return 0
+  fi
+  if [[ -z $command_folder ]] || ! cd -- "$command_folder" 2>/dev/null; then
+    return 0
+  fi
+  if ! find_commits || ! find_pages; then
+    return 0
+  fi
+  unread=$(unread_pages)
+  if [[ -n $unread ]]; then
+    block "$(unread_message "$unread")"
+  fi
+  if [[ -z $pages_commit ]]; then
+    uncommitted=$(git -c core.quotePath=false diff --name-only --no-relative HEAD -- "${page_paths[@]}")
+  fi
+  if [[ -n $uncommitted ]]; then
+    block "Blocked: these pages have changes that aren't committed, so this hook can't tell which text the pull request holds: ${uncommitted//$'\n'/, }. Commit them first, and then run gh pr create in a command of its own."
+  fi
+}
+
+check_simple_command() {
+  drop_command_prefixes "$@"
+  move_gh_repository_flags
+  if ((${#command_words[@]} == 0)); then
+    return 0
+  fi
+  check_gh_pr_create
+  follow_cd
+}
+
+read_input
+if [[ $tool_name == Bash ]]; then
+  # The folder that gh runs in, as follow_cd in helpers.bash describes.
+  command_folder=${cwd:-$PWD}
+  for_each_simple_command check_simple_command "$shell_command"
+fi
