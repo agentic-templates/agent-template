@@ -6,7 +6,7 @@ from typing import Any
 from unittest import mock
 
 from test_report import SINCE, ReportTest, report
-from test_transcripts import at, call_line
+from test_transcripts import at, call_line, prompt_line
 
 
 def stopped_line(minute: float, **links: str) -> dict[str, Any]:
@@ -50,6 +50,22 @@ class SafetyStopTest(ReportTest):
                 refused_line(2, uuid="refused", parentUuid="b-tool"),
                 call_line("c", 3) | {"uuid": "c", "parentUuid": "result"},
                 refused_line(3, uuid="refused-later", parentUuid="c"),
+            ],
+        )
+        self.assertEqual(
+            self.line("Safety classifier"),
+            "Safety classifier stops: 2 in the sessions in the main checkout, 0 in their agents",
+        )
+
+    def test_counts_a_refusal_after_a_new_prompt_that_follows_a_refusal_as_another_stop(self) -> None:
+        self.transcript(
+            "session",
+            [
+                call_line("a", 1) | {"uuid": "a", "parentUuid": "start"},
+                refused_line(1, uuid="refused", parentUuid="a"),
+                prompt_line(2, "Go on with the next issue.") | {"uuid": "prompt", "parentUuid": "refused"},
+                call_line("b", 3) | {"uuid": "b", "parentUuid": "prompt"},
+                refused_line(3, uuid="refused-again", parentUuid="b"),
             ],
         )
         self.assertEqual(

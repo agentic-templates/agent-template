@@ -142,19 +142,27 @@ def safety_stops(entries: list[dict[str, Any]]) -> list[dt.datetime]:
 
 
 def is_safety_stop(entry: dict[str, Any]) -> bool:
-    if entry.get("type") != "system":
-        return False
-    return str(entry.get("subtype")).startswith(REFUSED_REQUEST) or STOPPED_RESPONSE in str(entry.get("content"))
+    if is_stopped_response(entry):
+        return True
+    return entry.get("type") == "system" and str(entry.get("subtype")).startswith(REFUSED_REQUEST)
+
+
+def is_stopped_response(entry: dict[str, Any]) -> bool:
+    """Whether the entry is Claude Code's note that the classifier stopped a response, after which it asks for the rest
+    of the response."""
+    return entry.get("type") == "system" and STOPPED_RESPONSE in str(entry.get("content"))
 
 
 def asks_for_the_rest(entry: dict[str, Any], by_uuid: dict[str, dict[str, Any]]) -> bool:
-    """Whether the entry is in the request that Claude Code sends after a stop to ask for the rest of the response.
-    Each entry names the entry before it in the conversation, and that request answers the message that Claude Code
-    writes right after the stop's line."""
+    """Whether the entry is in the request that Claude Code sends after a stopped response to ask for the rest of it.
+    Each entry names the entry before it in the conversation. That request answers the message that Claude Code writes
+    right after its note that the classifier stopped the response. A refused request gets no such message."""
     answered = entry_before(entry, by_uuid)
     while answered is not None and answered.get("type") == "assistant":
         answered = entry_before(answered, by_uuid)
-    return answered is not None and is_safety_stop(entry_before(answered, by_uuid) or {})
+    if answered is None or answered.get("type") != "user":
+        return False
+    return is_stopped_response(entry_before(answered, by_uuid) or {})
 
 
 def entry_before(entry: dict[str, Any], by_uuid: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
