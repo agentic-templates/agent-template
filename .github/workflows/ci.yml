@@ -3,15 +3,14 @@ name: CI
 on:
   pull_request:
   # The merge queue waits for the required check "check" on each group of pull requests that it tests.
+  # The merge group tested the commit that lands on main, so a push to main starts no run.
   merge_group:
-  push:
-    branches: [main]
 
 permissions:
   contents: read
 
 # A new push to a pull request cancels the older run.
-# Each push to main and each group in the merge queue gets its own group, so GitHub never cancels a waiting run there.
+# Each group in the merge queue gets its own group, so GitHub never cancels a waiting run there.
 concurrency:
   group: ${{ github.workflow }}-${{ case(github.event_name == 'pull_request', github.ref, github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -61,7 +60,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # GitHub's compare API lists at most 300 files, so a merge group or a push with more runs the tests.
+      # GitHub's compare API lists at most 300 files, so a merge group with more runs the tests.
       - id: decide
         name: Decide whether the tests of the scripts and hooks run
         env:
@@ -70,7 +69,6 @@ jobs:
           PULL_REQUEST: ${{ github.event.pull_request.number }}
           BASE: ${{ github.event.merge_group.base_sha }}
           HEAD: ${{ github.event.merge_group.head_sha }}
-          BEFORE: ${{ github.event.before }}
         run: |
           paths=scripts/
           case $EVENT in
@@ -78,11 +76,7 @@ jobs:
               paths=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST/files" \
                 --jq '.[] | .filename, (.previous_filename // empty)') || paths=scripts/
               ;;
-            merge_group | push)
-              if [[ $EVENT == push ]]; then
-                BASE=$BEFORE
-                HEAD=$GITHUB_SHA
-              fi
+            merge_group)
               paths=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE...$HEAD" \
                 --jq 'if (.files | length) < 300 then (.files[] | .filename, (.previous_filename // empty)) else "scripts/" end') ||
                 paths=scripts/
@@ -98,12 +92,16 @@ jobs:
           echo "script_tests=$script_tests" >>"$GITHUB_OUTPUT"
 
   # Runs the tests of the scripts and hooks while the linux job runs the other checks, because the tests took most of
-  # the linux job's time.
+  # the linux job's time. Each job of the matrix runs a part of the tests, as scripts/test-scripts --part describes.
   script-tests:
     needs: changes
     if: needs.changes.outputs.script_tests == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1/2, 2/2]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -118,18 +116,24 @@ jobs:
 
       # zizmor uses the job's read-only token, as in the linux job.
       - name: Run the tests of the scripts and hooks
-        run: scripts/test-scripts
+        run: scripts/test-scripts --part "$PART"
         env:
+          PART: ${{ matrix.part }}
           ZIZMOR_GITHUB_TOKEN: ${{ github.token }}
 
   # Runs the tests of the scripts and hooks with /bin/bash, the bash 3.2 that macOS ships. On a Mac without a newer bash,
   # the hooks and scripts/check run with it. The script-tests job's bash is newer, and shellcheck doesn't flag what
   # bash 3.2 lacks, such as declare -A.
+  # Its runner has fewer cores than the script-tests job's, so the matrix splits the tests into more parts.
   bash-3-2:
     needs: changes
     if: needs.changes.outputs.script_tests == 'true'
     runs-on: macos-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1/4, 2/4, 3/4, 4/4]
     # With this PATH, the scripts' #!/usr/bin/env bash lines find /bin/bash.
     # macOS 15 and later have jq and git in /usr/bin.
     env:
@@ -149,14 +153,14 @@ jobs:
           persist-credentials: false
 
       - name: Run tests with bash 3.2
-        run: scripts/test-scripts
+        run: scripts/test-scripts --part "$PART"
+        env:
+          PART: ${{ matrix.part }}
 
   # Fails a pull request or a merge group whose commits would publish a token, a private key, a socket path or a file
   # that holds secrets, as scripts/leak-scan finds them. CI has no private folders, and its home folder is a runner's,
-  # so --generic leaves out the kinds that depend on the machine. A push to main lands commits that the merge queue
-  # scanned already.
+  # so --generic leaves out the kinds that depend on the machine.
   leak-scan:
-    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

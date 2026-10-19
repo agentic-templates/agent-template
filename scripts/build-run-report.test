@@ -19,7 +19,7 @@ mkdir "$base/bin"
 # - It answers the command that lists the merged pull requests with TEST_MERGED_PULL_REQUESTS, the one that lists the
 #   open pull requests with TEST_OPEN_PULL_REQUESTS, the one that lists the issues with needs-decision with
 #   TEST_DECISION_ISSUES, the one that lists the ready issues with TEST_READY_ISSUES, the one that lists the open code
-#   scanning alerts with TEST_ALERTS, and the one that reads the latest CI run on main with TEST_CI_RUN.
+#   scanning alerts with TEST_ALERTS.
 # - For scripts/pull-request-state, it gives issue 12 a pull request with auto-merge on, 13 a draft, 14 two that are
 #   neither, 15 one that's neither, and the others none. It fails for issue 17.
 cat >"$base/bin/gh" <<'STAND_IN'
@@ -43,9 +43,6 @@ case $* in
     answer "$TEST_READY_ISSUES"
     ;;
   "api --paginate repos/{owner}/{repo}/code-scanning/alerts?state=open --jq "*) answer "$TEST_ALERTS" ;;
-  "run list --workflow ci.yml --branch main --event push --limit 1 --json status,conclusion --jq "*)
-    answer "$TEST_CI_RUN"
-    ;;
 esac
 if [[ $1 == api && $2 == graphql ]]; then
   issue=""
@@ -138,7 +135,7 @@ start=2026-05-04T09:00:00Z
 run_report() {
   status=0
   output=$(env TEST_MERGED_PULL_REQUESTS="" TEST_OPEN_PULL_REQUESTS="" TEST_DECISION_ISSUES="" TEST_READY_ISSUES="" \
-    TEST_ALERTS="" TEST_CI_RUN="" "$@" PATH="$base/bin:$PATH" "$repo/scripts/build-run-report" 2>"$base/errors") ||
+    TEST_ALERTS="" "$@" PATH="$base/bin:$PATH" "$repo/scripts/build-run-report" 2>"$base/errors") ||
     status=$?
   errors=$(<"$base/errors")
 }
@@ -154,7 +151,6 @@ begin_case() {
   ready_issues=none
   alerts=none
   dependabot_pull_requests=none
-  ci_run=none
 }
 
 # Prints an error for the case: report <what's wrong>
@@ -180,7 +176,6 @@ expected_facts() {
   fact "Open ready issues, and what each one waits for:" "$ready_issues"
   fact "Open code scanning alerts:" "$alerts"
   fact "Open pull requests of Dependabot's into main:" "$dependabot_pull_requests"
-  fact "The latest run of .github/workflows/ci.yml on main:" "$ci_run"
 }
 
 # Checks the script's exit code, the facts it printed and its errors: expect_result <exit code> [<errors>]
@@ -303,15 +298,6 @@ dependabot_pull_requests="#40: auto-merge is on.
 #44: auto-merge is on, the check \"title\" failed and the merge queue removed it."
 expect_result 0
 
-for run in "completed${tab}success passed" "completed${tab}failure failed" "completed${tab}cancelled failed" \
-  "completed${tab}timed_out failed" "completed${tab}skipped failed" "in_progress${tab} still running" \
-  "queued${tab} still running"; do
-  begin_case "When the latest CI run on main has the status and conclusion \"${run%% *}\""
-  run_report TEST_CI_RUN="${run%% *}"
-  ci_run=${run#* }
-  expect_result 0
-done
-
 begin_case "When git can't find the git folder of the checkout"
 mv "$repo/.git" "$base/git-folder"
 git_error=$(git -C "$repo" rev-parse --git-path build-run-start 2>&1 || true)
@@ -372,19 +358,13 @@ dependabot_pull_requests="left out"
 decision_issues="#27"
 expect_result 1 "error: can't list the open pull requests, because gh failed: error connecting to api.github.com"
 
-begin_case "When gh can't read the latest CI run on main"
-run_report TEST_CI_RUN=fail TEST_DECISION_ISSUES=27
-ci_run="left out"
-decision_issues="#27"
-expect_result 1 "error: can't read the latest run of .github/workflows/ci.yml on main, because gh failed: error connecting to api.github.com"
-
 begin_case "When gh can't get two of the facts"
-run_report TEST_ALERTS=fail TEST_CI_RUN=fail TEST_DECISION_ISSUES=27
+run_report TEST_ALERTS=fail TEST_OPEN_PULL_REQUESTS=fail TEST_DECISION_ISSUES=27
 alerts="left out"
-ci_run="left out"
+dependabot_pull_requests="left out"
 decision_issues="#27"
 expect_result 1 "error: can't list the open code scanning alerts, because gh failed: error connecting to api.github.com
-error: can't read the latest run of .github/workflows/ci.yml on main, because gh failed: error connecting to api.github.com"
+error: can't list the open pull requests, because gh failed: error connecting to api.github.com"
 
 if ((failed_cases > 0)); then
   echo "error: $failed_cases of the $case_count cases in scripts/build-run-report.test failed. The errors above say which." >&2

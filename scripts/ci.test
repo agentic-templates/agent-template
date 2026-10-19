@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Runs the bash 3.2 job's test runner on small sets of tests, and checks that the script-tests job runs it too.
+# Runs the bash 3.2 job's test runner on small sets of tests, and checks that the script-tests job runs it too, and
+# that the matrix of each job lists every part.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -41,15 +42,95 @@ done
 case_count=0
 failed_cases=0
 
-# Makes a folder for a case, with a copy of the runner and of the file it reads, stand-ins for scripts/test-hooks and
-# scripts/test-check that do nothing, and a stand-in for jq, and sets case_dir to it: new_case
+# Cases for the matrices of the script-tests and bash-3-2 jobs, which must list every part, because a part that's left
+# out leaves its test files untested.
+
+# Prints the parts that the matrix of a job lists, one to a line: matrix_parts <workflow> <job>
+matrix_parts() {
+  awk -v job="$2" '
+    $0 == "  " job ":" { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:/ { exit }
+    in_job && /^        part: \[/ {
+      sub(/^        part: \[/, "")
+      sub(/\][[:space:]]*$/, "")
+      gsub(/,[[:space:]]*/, "\n")
+      print
+      exit
+    }
+  ' "$1"
+}
+
+# Prints an error and fails unless the matrix of a job lists each part from 1/<count> to <count>/<count>, in order,
+# with the count of its first part: check_matrix <workflow> <job>
+check_matrix() {
+  local workflow=$1 job=$2 listed count number expected=""
+  listed=$(matrix_parts "$workflow" "$job")
+  if [[ -z $listed ]]; then
+    echo "error: the $job job in $workflow has no matrix of parts. Give it one, such as \"part: [1/2, 2/2]\", because its test step runs scripts/test-scripts --part." >&2
+    return 1
+  fi
+  listed=${listed//$'\n'/, }
+  count=${listed%%,*}
+  count=${count#*/}
+  if [[ ! $count =~ ^[1-9][0-9]*$ ]]; then
+    count=1
+  fi
+  for ((number = 1; number <= count; number++)); do
+    expected+=${expected:+, }$number/$count
+  done
+  if [[ $listed != "$expected" ]]; then
+    echo "error: the matrix of the $job job in $workflow lists the parts $listed, so some test files don't run. List the parts $expected." >&2
+    return 1
+  fi
+}
+
+# Checks the result of check_matrix: expect_matrix <description> <workflow> <job> <exit code> <errors>
+expect_matrix() {
+  local description=$1 matrix_status=0 errors
+  case_count=$((case_count + 1))
+  errors=$(check_matrix "$2" "$3" 2>&1) || matrix_status=$?
+  if [[ $matrix_status != "$4" || $errors != "$5" ]]; then
+    echo "error: the check of the matrix $description. Expected status $4 and errors \"$5\", got status $matrix_status and errors \"$errors\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Writes a workflow whose job tests lists the parts given: write_matrix_workflow <file> [<part list>]
+write_matrix_workflow() {
+  {
+    printf '%s\n' "jobs:" "  tests:" "    runs-on: ubuntu-latest"
+    if [[ -n ${2:-} ]]; then
+      printf '%s\n' "    strategy:" "      matrix:" "        part: [$2]"
+    fi
+    printf '%s\n' "  other:" "    strategy:" "      matrix:" "        part: [1/1]"
+  } >"$1"
+}
+
+write_matrix_workflow "$base/complete.yml" "1/3, 2/3, 3/3"
+expect_matrix "passes for every part from 1/3 to 3/3" "$base/complete.yml" tests 0 ""
+write_matrix_workflow "$base/missing.yml" "1/4, 2/4, 4/4"
+expect_matrix "fails when a part is missing" "$base/missing.yml" tests 1 \
+  "error: the matrix of the tests job in $base/missing.yml lists the parts 1/4, 2/4, 4/4, so some test files don't run. List the parts 1/4, 2/4, 3/4, 4/4."
+write_matrix_workflow "$base/extra.yml" "1/2, 2/2, 3/2"
+expect_matrix "fails when a part is above the count" "$base/extra.yml" tests 1 \
+  "error: the matrix of the tests job in $base/extra.yml lists the parts 1/2, 2/2, 3/2, so some test files don't run. List the parts 1/2, 2/2."
+write_matrix_workflow "$base/none.yml"
+expect_matrix "fails when the job has no matrix" "$base/none.yml" tests 1 \
+  "error: the tests job in $base/none.yml has no matrix of parts. Give it one, such as \"part: [1/2, 2/2]\", because its test step runs scripts/test-scripts --part."
+for job in script-tests bash-3-2; do
+  expect_matrix "of the $job job in .github/workflows/ci.yml lists every part" .github/workflows/ci.yml "$job" 0 ""
+done
+
+# Makes a folder for a case, with a copy of the runner and of the file it reads, an empty scripts/hooks/, a stand-in
+# for scripts/test-check that does nothing, a stand-in for jq and an empty temporary folder, and sets case_dir to it.
+# The step runs the whole list of test files, as part 1 of 1, unless the case sets part: new_case
 new_case() {
   case_dir=$(mktemp -d "$base/case.XXXXXX")
-  mkdir "$case_dir/scripts" "$case_dir/tools"
+  mkdir -p "$case_dir/scripts/hooks" "$case_dir/tools" "$case_dir/tmp"
   cp scripts/test-scripts scripts/missing-tools "$case_dir/scripts/"
-  printf '%s\n' '#!/usr/bin/env bash' > "$case_dir/scripts/test-hooks"
   printf '%s\n' '#!/usr/bin/env bash' > "$case_dir/scripts/test-check"
   add_tool jq
+  part=1/1
 }
 
 # Makes a tool count as installed in the case, with a stand-in that does nothing: add_tool <tool>
@@ -58,20 +139,23 @@ add_tool() {
   chmod +x "$case_dir/tools/$1"
 }
 
-# Runs the step in the case's folder, with CI set to the value given or empty, and sets status and output:
-# run_step [<CI>]
+# Runs the step in the case's folder, with CI set to the value given or empty, the matrix's part in PART and the case's
+# temporary folder in TMPDIR, and sets status and output: run_step [<CI>]
 # GitHub's bash shell exits on a failing command and sets pipefail.
 run_step() {
   status=0
-  output=$(cd "$case_dir" && CI=${1:-} PATH=$case_dir/tools:$commands "$BASH" --noprofile --norc -eo pipefail "$base/step" 2>&1) ||
-    status=$?
+  output=$(cd "$case_dir" && CI=${1:-} PART=$part TMPDIR=$case_dir/tmp PATH=$case_dir/tools:$commands \
+    "$BASH" --noprofile --norc -eo pipefail "$base/step" 2>&1) || status=$?
 }
 
+# Checks the result of run_step, and that the step left no files in the case's temporary folder:
+# expect_result <description> <exit code> <output>
 expect_result() {
-  local description=$1 expected_status=$2 expected_output=$3
+  local description=$1 expected_status=$2 expected_output=$3 left_files
   case_count=$((case_count + 1))
-  if [[ $status != "$expected_status" || $output != "$expected_output" ]]; then
-    echo "error: the script-test step $description. Expected status $expected_status and output \"$expected_output\", got status $status and output \"$output\"." >&2
+  left_files=$(ls -A "$case_dir/tmp")
+  if [[ $status != "$expected_status" || $output != "$expected_output" || -n $left_files ]]; then
+    echo "error: the script-test step $description. Expected status $expected_status, output \"$expected_output\" and no files left in TMPDIR, got status $status, output \"$output\" and these files in TMPDIR: \"$left_files\"." >&2
     failed_cases=$((failed_cases + 1))
   fi
 }
@@ -110,45 +194,140 @@ cat > "$case_dir/scripts/child" <<'CHILD'
 #!/usr/bin/env bash
 printf '%s\n' "$BASH_VERSION"
 CHILD
-cp "$case_dir/scripts/child" "$case_dir/scripts/test-hooks"
+cp "$case_dir/scripts/child" "$case_dir/scripts/hooks/version.test"
 cp "$case_dir/scripts/child" "$case_dir/scripts/test-check"
 chmod +x "$case_dir/scripts/version.test" "$case_dir/scripts/child"
 run_step
-expect_result "uses the current bash for all three groups and child scripts" 0 "$BASH_VERSION"$'\n'"$BASH_VERSION"$'\n'"$BASH_VERSION"$'\n'"$BASH_VERSION"
+expect_result "uses the current bash for every test file and child scripts" 0 "$BASH_VERSION"$'\n'"$BASH_VERSION"$'\n'"$BASH_VERSION"$'\n'"$BASH_VERSION"
 
-# Each group must start before any group finishes. Sequential execution times out.
+# Each test file must start before any of them ends. Run one after another, they time out.
 new_case
-for group in hooks check scripts; do
-  case "$group" in
-    hooks) file=test-hooks ;;
+for name in hooks check first second; do
+  case "$name" in
+    hooks) file=hooks/hooks.test ;;
     check) file=test-check ;;
-    scripts) file=meeting.test ;;
+    *) file=$name.test ;;
   esac
   cat > "$case_dir/scripts/$file" <<TEST
 #!/usr/bin/env bash
-echo "$group started"
-touch "$group.started"
+echo "$name started"
+touch "$name.started"
 for ((tries = 0; tries < 100; tries++)); do
-  if [[ -f hooks.started && -f check.started && -f scripts.started ]]; then
-    echo "$group passed"
+  if [[ -f hooks.started && -f check.started && -f first.started && -f second.started ]]; then
+    echo "$name passed"
     exit 0
   fi
   sleep 0.1
 done
-echo "error: the three groups did not start together." >&2
+echo "error: the test files did not start together." >&2
 exit 1
 TEST
 done
 run_step
-expect_result "runs all three groups at the same time and keeps their output together" 0 $'hooks started\nhooks passed\ncheck started\ncheck passed\nscripts started\nscripts passed'
+expect_result "runs every test file at the same time and keeps the output of each together" 0 \
+  $'hooks started\nhooks passed\ncheck started\ncheck passed\nfirst started\nfirst passed\nsecond started\nsecond passed'
 
-for group in test-hooks test-check; do
+for failing_test in hooks/failing.test test-check; do
   new_case
-  printf '%s\n' '#!/usr/bin/env bash' 'echo failed >&2' 'exit 7' > "$case_dir/scripts/$group"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo failed >&2' 'exit 7' > "$case_dir/scripts/$failing_test"
   printf '%s\n' '#!/usr/bin/env bash' 'echo scripts passed' > "$case_dir/scripts/pass.test"
   run_step
-  expect_result "fails when $group fails and still waits for the script tests" 7 $'failed\nscripts passed'
+  expect_result "fails when scripts/$failing_test fails and still waits for the script tests" 7 $'failed\nscripts passed'
 done
+
+# Cases for --part, which runs every so many test files of the list, as each job of the matrix does.
+
+# Writes stand-ins that print their names, for a list of five test files: hooks/alpha.test, test-check, bravo.test,
+# charlie.test and delta.test: write_named_tests
+write_named_tests() {
+  local name
+  for name in hooks/alpha bravo charlie delta; do
+    printf '%s\n' '#!/usr/bin/env bash' "echo ${name#hooks/}" > "$case_dir/scripts/$name.test"
+  done
+  printf '%s\n' '#!/usr/bin/env bash' 'echo check' > "$case_dir/scripts/test-check"
+}
+
+new_case
+write_named_tests
+part=1/2
+run_step
+expect_result "runs the first, third and fifth test files for part 1 of 2" 0 $'alpha\nbravo\ndelta'
+
+new_case
+write_named_tests
+part=2/2
+run_step
+expect_result "runs the second and fourth test files for part 2 of 2" 0 $'check\ncharlie'
+
+new_case
+write_named_tests
+part=5/5
+run_step
+expect_result "runs the fifth test file for part 5 of 5" 0 "delta"
+
+new_case
+write_named_tests
+part=3/2
+run_step
+expect_result "fails for a part above the number of parts, before it starts a test" 2 \
+  "error: --part 3/2 names part 3 of 2. Give a part from 1 to 2."
+
+for part_value in 0/2 1/0 2 "" a/b; do
+  new_case
+  write_named_tests
+  part=$part_value
+  run_step
+  expect_result "fails for the part \"$part_value\", before it starts a test" 2 \
+    "error: scripts/test-scripts takes no argument, or --part and a part such as 2/3, and it got: --part $part_value"
+done
+
+# Case for stopping the runner, which stops each test that still runs. The stand-in runs for 10 seconds, unless it's
+# stopped.
+
+# Waits up to 10 seconds for a file to exist, and fails if it doesn't: wait_for_file <path>
+wait_for_file() {
+  local tries
+  for ((tries = 0; tries < 100; tries++)); do
+    if [[ -e $1 ]]; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+# Starts the runner in the background, with a temporary folder of the case's own, and stops it once the stand-in
+# endless.test has started. Prints an error and fails if the runner leaves the stand-in running or leaves files in
+# the temporary folder: stop_runner
+stop_runner() {
+  local runner
+  # exec makes the runner the process that kill stops.
+  (cd "$case_dir" && TMPDIR=$case_dir/tmp PATH=$case_dir/tools:$commands exec scripts/test-scripts >/dev/null 2>&1) &
+  runner=$!
+  if ! wait_for_file "$case_dir/endless.started"; then
+    echo "error: scripts/test-scripts didn't start endless.test within 10 seconds." >&2
+    return 1
+  fi
+  kill "$runner"
+  # The redirection hides the shell's message that the runner was stopped.
+  wait "$runner" 2>/dev/null || true
+  if ! wait_for_file "$case_dir/endless.stopped"; then
+    echo "error: when scripts/test-scripts stops, it must stop each test that still runs, but endless.test went on running." >&2
+    return 1
+  fi
+  if [[ -n $(ls -A "$case_dir/tmp") ]]; then
+    echo "error: when scripts/test-scripts stops, it must remove its files from TMPDIR, but it left: $(ls -A "$case_dir/tmp")" >&2
+    return 1
+  fi
+}
+
+new_case
+printf '%s\n' '#!/usr/bin/env bash' "trap 'touch endless.stopped; exit 1' TERM" 'touch endless.started' \
+  'for ((tries = 0; tries < 100; tries++)); do' '  sleep 0.1' 'done' > "$case_dir/scripts/endless.test"
+case_count=$((case_count + 1))
+if ! stop_runner; then
+  failed_cases=$((failed_cases + 1))
+fi
 
 # Cases for the ShellCheck cases of scripts/test-check, which its option --shellcheck-only runs.
 
@@ -178,7 +357,7 @@ expect_result "skips the ShellCheck cases of scripts/test-check where shellcheck
 
 new_case
 rm "$case_dir/tools/jq"
-printf '%s\n' '#!/usr/bin/env bash' 'echo "the hooks tests ran"' > "$case_dir/scripts/test-hooks"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "the hooks tests ran"' > "$case_dir/scripts/hooks/hook.test"
 printf '%s\n' '#!/usr/bin/env bash' 'echo "scripts passed"' > "$case_dir/scripts/pass.test"
 run_step
 expect_result "skips the hooks' tests where jq isn't installed, and runs the other tests" 0 \
@@ -186,7 +365,7 @@ expect_result "skips the hooks' tests where jq isn't installed, and runs the oth
 
 new_case
 rm "$case_dir/tools/jq"
-printf '%s\n' '#!/usr/bin/env bash' 'echo "the hooks tests ran"' > "$case_dir/scripts/test-hooks"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "the hooks tests ran"' > "$case_dir/scripts/hooks/hook.test"
 printf '%s\n' '#!/usr/bin/env bash' 'echo "scripts passed"' > "$case_dir/scripts/pass.test"
 run_step true
 expect_result "fails in CI where jq isn't installed, before it starts a test" 1 \
