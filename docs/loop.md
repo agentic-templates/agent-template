@@ -126,7 +126,9 @@ After each issue, go back to step 1. Start an auditor too when "Start a retrospe
   Once you've gone through them all, replace the state file's list of `BLOCKED` pull requests with the ones that
   this pass found.
 - **Merges.** While pull requests are merging, keep `scripts/wait-for-pull-requests` running as a background task,
-  and start it again each time it ends.
+  and start it again each time it ends. When a pull request merges, the script fast-forwards `main` in the main
+  checkout to `origin/main`, so that you and the agents you start get the hooks, scripts and agent types that merged.
+  If the script says it can't fast-forward, fix what it names, such as by switching the main checkout back to `main`.
 
 ### Record
 

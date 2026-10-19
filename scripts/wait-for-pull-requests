@@ -4,7 +4,10 @@
 # open pull requests into main that have auto-merge on or are in the merge queue, apart from Dependabot's and those
 # from forks. It checks them every 30 seconds, and prints one line as soon as one of these is true:
 # - Nothing to wait for: none of them is open.
-# - Pull request <number> merged or closed: so an issue that it blocked may be able to start now.
+# - Pull request <number> merged or closed: so an issue that it blocked may be able to start now. Before it prints
+#   this, it fast-forwards main in the main checkout to origin/main, so that the orchestrator, which works there, runs
+#   the hooks, scripts and agent types that merged. When it can't, such as when the main checkout has another branch
+#   checked out, the line goes on to say why.
 # - Pull request <number> needs a fix: it conflicts with main, a check failed, or it left the merge queue.
 # - Still waiting for <numbers>: 9 minutes passed, which keeps the command within the time limit of an agent's tool.
 # WAIT_SECONDS and WAIT_LIMIT_SECONDS change those times, for its tests. It stops with an error when gh fails.
@@ -12,6 +15,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=scripts/open-pull-requests
 source scripts/open-pull-requests
+# shellcheck source=scripts/loop-folder
+source scripts/loop-folder
 
 interval=${WAIT_SECONDS:-30}
 limit=${WAIT_LIMIT_SECONDS:-540}
@@ -25,6 +30,27 @@ watched_pull_requests() {
       printf '%s\n' "$number"
     fi
   done <<<"$pull_requests"
+}
+
+# Fast-forwards main in the main checkout to origin/main. Prints nothing when it can, and else why it can't, in one
+# sentence: update_main_checkout
+update_main_checkout() {
+  local git_folders checkout branch output
+  git_folders=$(git rev-parse --path-format=absolute --git-common-dir --show-toplevel)
+  checkout=$(main_checkout "${git_folders%%$'\n'*}" "${git_folders#*$'\n'}")
+  if ! branch=$(git -C "$checkout" symbolic-ref --quiet --short HEAD); then
+    echo "Can't fast-forward main in $checkout to origin/main, because $checkout has no branch checked out."
+    return
+  fi
+  if [[ $branch != main ]]; then
+    echo "Can't fast-forward main in $checkout to origin/main, because $checkout has the branch $branch checked out."
+    return
+  fi
+  if ! output=$(git -C "$checkout" fetch --quiet origin main 2>&1) ||
+    ! output=$(git -C "$checkout" merge --ff-only --quiet origin/main 2>&1); then
+    # git's reason takes several lines, and the orchestrator reads one.
+    echo "Can't fast-forward main in $checkout to origin/main, because git failed: $(printf '%s' "$output" | tr -s '\n\t' ' ')"
+  fi
 }
 
 # read_open_pull_requests prints its own error.
@@ -42,7 +68,8 @@ while true; do
   for number in $watched; do
     pull_request=$(facts pull-request "$number")
     if [[ -z $pull_request ]]; then
-      echo "Pull request $number merged or closed."
+      reason=$(update_main_checkout)
+      echo "Pull request $number merged or closed.${reason:+ $reason}"
       exit 0
     fi
     IFS=$'\t' read -r _ _ is_in_queue merge_state auto_merge_since <<<"$pull_request"

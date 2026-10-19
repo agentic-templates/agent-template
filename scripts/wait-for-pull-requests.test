@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tests scripts/wait-for-pull-requests with a stand-in for gh that gives a new answer each time the script reads.
+# Tests scripts/wait-for-pull-requests on copies of it in repositories that the test makes, with a stand-in for gh that
+# gives a new answer each time the script reads.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=scripts/testing-required-checks.bash
@@ -8,8 +9,14 @@ source scripts/testing-required-checks.bash
 case_count=0
 failed_cases=0
 
-base=$(mktemp -d)
+base=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$base"' EXIT
+# git looks for no repository above the temporary folder, reads none of the person's settings,
+# and commits as a stand-in person.
+export GIT_CEILING_DIRECTORIES=$base
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com
+export GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
 mkdir -p "$base/bin" "$base/answers"
 
 # A stand-in for gh, first on the PATH. It answers the command in scripts/open-pull-requests with the files
@@ -34,6 +41,36 @@ fi
 STAND_IN
 chmod +x "$base/bin/gh"
 
+# Each case starts from a copy of this folder, because making its repositories again takes a dozen git commands. It
+# holds origin.git, the repository on GitHub, and main, the main checkout, with main checked out at the commit start.
+# Since then, a pull request merged into main on GitHub as the commit merged, which the main checkout hasn't fetched.
+starting_case=$base/starting-case
+git init --quiet --bare --initial-branch=main "$starting_case/origin.git"
+git init --quiet --initial-branch=main "$starting_case/main"
+mkdir "$starting_case/main/scripts"
+cp scripts/wait-for-pull-requests scripts/open-pull-requests scripts/required-checks scripts/configure-github \
+  scripts/loop-folder "$starting_case/main/scripts/"
+printf 'January: 120\n' >"$starting_case/main/totals.txt"
+git -C "$starting_case/main" add --all
+git -C "$starting_case/main" commit --quiet -m "feat: total the expenses"
+git -C "$starting_case/main" remote add origin "$starting_case/origin.git"
+git -C "$starting_case/main" push --quiet origin main
+start=$(git -C "$starting_case/main" rev-parse HEAD)
+git clone --quiet "$starting_case/origin.git" "$base/clone"
+printf 'February: 80\n' >>"$base/clone/totals.txt"
+git -C "$base/clone" commit --quiet -am "feat: total February"
+git -C "$base/clone" push --quiet origin main
+merged=$(git -C "$base/clone" rev-parse HEAD)
+
+# Makes a copy of the starting folder for a case, with the worktree agent-1 that the script runs in, and sets case_dir
+# to it: new_case
+new_case() {
+  case_dir=$(mktemp -d "$base/case.XXXXXX")
+  cp -R "$starting_case/." "$case_dir"
+  git -C "$case_dir/main" remote set-url origin "$case_dir/origin.git"
+  git -C "$case_dir/main" worktree add --quiet -b 12-fix-totals "$case_dir/agent-1"
+}
+
 tab=$'\t'
 auto_merge=2026-05-04T09:00:00Z
 # The lines that the --jq filter in scripts/open-pull-requests prints for an open pull request, with its checks passed:
@@ -44,7 +81,8 @@ pull_request() {
   project_check_runs "$1"
 }
 
-# Runs the script with the answers given, one to an argument, and sets status and output: run_wait <answer>...
+# Runs the copy of the script in the case's worktree with the answers given, one to an argument, and sets status and
+# output: run_wait <answer>...
 run_wait() {
   local index=0 answer
   rm -f "$base/answers/"*
@@ -54,41 +92,91 @@ run_wait() {
   done
   status=0
   output=$(TEST_ANSWERS="$base/answers" WAIT_SECONDS=0 WAIT_LIMIT_SECONDS=0 PATH="$base/bin:$PATH" \
-    scripts/wait-for-pull-requests 2>&1) || status=$?
+    "$case_dir/agent-1/scripts/wait-for-pull-requests" 2>&1) || status=$?
 }
 
-expect_result() {
-  local description=$1 expected_status=$2 expected_output=$3
+# Starts a case in a new copy of the starting folder: begin_case <description>
+begin_case() {
+  description=$1
   case_count=$((case_count + 1))
-  if [[ $status != "$expected_status" || $output != "$expected_output" ]]; then
-    echo "error: $description, scripts/wait-for-pull-requests must exit with code $expected_status and print \"$expected_output\", but it exited with code $status and printed \"$output\"." >&2
+  is_case_failed=""
+  new_case
+}
+
+# Prints an error for the case: report <what's wrong>
+report() {
+  echo "error: $description, $1" >&2
+  if [[ -z $is_case_failed ]]; then
     failed_cases=$((failed_cases + 1))
+    is_case_failed=yes
   fi
+}
+
+# Checks the script's exit code and output: expect_result <exit code> <output>
+expect_result() {
+  if [[ $status != "$1" || $output != "$2" ]]; then
+    report "scripts/wait-for-pull-requests must exit with code $1 and print \"$2\", but it exited with code $status and printed \"$output\"."
+  fi
+}
+
+# Checks the commit that main points to in the main checkout: expect_main <commit>
+expect_main() {
+  local commit
+  commit=$(git -C "$case_dir/main" rev-parse refs/heads/main)
+  if [[ $commit != "$1" ]]; then
+    report "main in the main checkout must be at $1, but it's at $commit."
+  fi
+}
+
+# Prints the line that says pull request 12 merged, but main in the main checkout stayed where it was:
+# merged_without_main <reason>
+merged_without_main() {
+  printf '%s\n' "Pull request 12 merged or closed. Can't fast-forward main in $case_dir/main to origin/main, because $1"
 }
 
 merging=$(pull_request 12 false octocat false BLOCKED $auto_merge)
 queued=$(pull_request 13 false octocat true BLOCKED)
 
+begin_case "When no pull request has auto-merge on, apart from Dependabot's and a fork's"
 run_wait "$(pull_request 12 false octocat false CLEAN)"$'\n'"$(pull_request 50 false app/dependabot false BLOCKED $auto_merge)"$'\n'"$(pull_request 51 true octocat false BLOCKED $auto_merge)"
-expect_result "When no pull request has auto-merge on, apart from Dependabot's and a fork's" 0 "Nothing to wait for."
+expect_result 0 "Nothing to wait for."
 
+begin_case "When a pull request merges"
 run_wait "$merging"$'\n'"$queued" "$queued"
-expect_result "When a pull request merges" 0 "Pull request 12 merged or closed."
+expect_result 0 "Pull request 12 merged or closed."
+expect_main "$merged"
 
+begin_case "When a pull request merges while the main checkout has another branch checked out"
+git -C "$case_dir/main" switch --quiet --create 13-export-csv
+run_wait "$merging" ""
+expect_result 0 "$(merged_without_main "$case_dir/main has the branch 13-export-csv checked out.")"
+expect_main "$start"
+
+begin_case "When a pull request merges while the main checkout has changes that the fast-forward would overwrite"
+printf 'January: 125\n' >"$case_dir/main/totals.txt"
+run_wait "$merging" ""
+expect_result 0 "$(merged_without_main "git failed: error: Your local changes to the following files would be overwritten by merge: totals.txt Please commit your changes or stash them before you merge. Aborting")"
+expect_main "$start"
+
+begin_case "When a pull request conflicts with main"
 run_wait "$merging" "$(pull_request 12 false octocat false DIRTY $auto_merge)"
-expect_result "When a pull request conflicts with main" 0 "Pull request 12 needs a fix."
+expect_result 0 "Pull request 12 needs a fix."
 
+begin_case "When a check fails"
 run_wait "$merging" "$(pull_request 12 false octocat false BLOCKED $auto_merge | sed 's/101\tcheck\tSUCCESS/101\tcheck\tFAILURE/')"
-expect_result "When a check fails" 0 "Pull request 12 needs a fix."
+expect_result 0 "Pull request 12 needs a fix."
 
+begin_case "When a pull request leaves the merge queue"
 run_wait "$queued" "$(pull_request 13 false octocat false BLOCKED)"
-expect_result "When a pull request leaves the merge queue" 0 "Pull request 13 needs a fix."
+expect_result 0 "Pull request 13 needs a fix."
 
+begin_case "When nothing changes before the time is up"
 run_wait "$merging"$'\n'"$queued" "$merging"$'\n'"$queued"
-expect_result "When nothing changes before the time is up" 0 "Still waiting for 12 13."
+expect_result 0 "Still waiting for 12 13."
 
+begin_case "When gh fails"
 run_wait fail
-expect_result "When gh fails" 1 "error: can't list the open pull requests, because gh failed: error connecting to api.github.com"
+expect_result 1 "error: can't list the open pull requests, because gh failed: error connecting to api.github.com"
 
 if ((failed_cases > 0)); then
   echo "error: $failed_cases of the $case_count cases in scripts/wait-for-pull-requests.test failed. The errors above say which." >&2
