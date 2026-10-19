@@ -94,6 +94,15 @@ expect_note_files() {
   fi
 }
 
+# Checks that the hook didn't create the file of the orchestrator's note: expect_no_compact_file <description>
+expect_no_compact_file() {
+  case_count=$((case_count + 1))
+  if [[ -e $repository/.loop/told-to-compact ]]; then
+    echo "error: $1, the hook must not create .loop/told-to-compact, but it did." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
 # A subagent of the orchestrator's session, as its context grows
 add_reply "$orchestrator" a1 120000
 run_hook "$orchestrator" a1
@@ -179,6 +188,21 @@ run_hook "$orchestrator" ""
 expect_note "When the hook can't delete the file of the orchestrator's note" \
   "scripts/hooks/hand-off couldn't delete $told, so it won't tell you again when your context passes 300k tokens. Delete the file."
 rmdir "$told"
+
+# The orchestrator after a compaction that Claude Code marks in the transcript, before and after its first reply
+compact_boundary='{"type": "system", "subtype": "compact_boundary", "content": "Conversation compacted", "compactMetadata": {"trigger": "manual", "preTokens": 301000}}'
+add_reply "$orchestrator" "" 301000
+add_lines "$orchestrator" "" "$compact_boundary"
+run_hook "$orchestrator" ""
+expect_note "For the orchestrator after a compaction from past 300k tokens, before its first reply" ""
+expect_no_compact_file "For the orchestrator after a compaction from past 300k tokens, before its first reply"
+add_reply "$orchestrator" "" 57000
+run_hook "$orchestrator" ""
+expect_note "For the orchestrator at 57k tokens after a compaction from past 300k tokens" ""
+expect_no_compact_file "For the orchestrator at 57k tokens after a compaction from past 300k tokens"
+add_reply "$orchestrator" "" 310000
+run_hook "$orchestrator" ""
+expect_note "For the orchestrator past 300k tokens after a compaction that the transcript marks" "$compact"
 
 # Agents that get no note
 rm -rf "$notes"
