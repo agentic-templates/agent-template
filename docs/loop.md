@@ -61,10 +61,12 @@ on.
   `needs-decision`.
 - **Hand-offs.** When a builder or the auditor reports that it handed off its work, because its context grew too
   long, run `scripts/clear-worktrees <issue>`, so that a new agent can check out the issue's branch. The auditor's
-  issue is the one that it opened for the retrospective. If the script exits with a code other than 0, plan the issue
-  again. Otherwise, start a new agent of the same type with the same prompt, and put the link to the hand-off comment
-  in that prompt. Start it in your session once your own account's advice lets you, because
-  `scripts/loop/run-builder` can't give a builder the link.
+  issue is the one that it opened for the retrospective. If the script exits with a code other than 0, it left the
+  worktree, and with it the issue's branch, in place. Then plan a builder's issue again, and for the auditor's issue,
+  ask the maintainer about the worktree in an issue with `needs-decision`. If the script exits with 0, start a new
+  agent of the same type with the same prompt, and put the link to the hand-off comment in that prompt. Start it in
+  your session once your own account's advice lets you, because `scripts/loop/run-builder` can't give a builder the
+  link.
 - **Builders that stopped.** A builder that ends without a pull request, and without a report that says why, stopped
   before it finished, such as at a usage limit. If its issue is still open and assigned to you, run
   `scripts/clear-worktrees <issue>`, which saves its unfinished work on the issue's branch and removes its worktree.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Claude Code runs this hook after each tool call, because .claude/settings.json lists it. It tells the orchestrator,
-# and the builders that it starts, to shrink their context once it grows past a threshold, because each call reads the
-# whole context again, so a long context costs more on every step, and the agent works worse.
+# and the builders and auditors that it starts, to shrink their context once it grows past a threshold, because each
+# call reads the whole context again, so a long context costs more on every step, and the agent works worse.
 # The orchestrator is the session that the session: line of the state file names. Once its context passes
 # compact_tokens, it asks for a compaction, as "Compact your context" in docs/loop.md describes. It gets the note once
 # each time its context passes the threshold: the hook creates .loop/told-to-compact when it gives the note, and deletes
