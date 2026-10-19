@@ -1,12 +1,16 @@
 # shellcheck shell=bash
 # The loop's folder, which holds the orchestrator's state file and the log of the hooks' blocks.
-# scripts/hooks/session-start and scripts/hooks/helpers.bash read it from here.
+# scripts/hooks/session-start and scripts/hooks/helpers.bash read it from here, and scripts/loop/paths.py finds the
+# same folder for the Python scripts.
 
-# Prints the loop's folder: .loop in the main checkout, which holds the git folder that its worktrees share, so that
-# every worktree finds the same folder. A repository that keeps its git folder elsewhere, as a submodule does, has no
-# such checkout, so its loop's folder is .loop in the checkout itself: loop_folder <shared git folder> <checkout>
+# Prints the loop's folder: the folder that LOOP_DIR names, as in the tests, or else .loop in the main checkout, which
+# holds the git folder that its worktrees share, so that every worktree finds the same folder. A repository that keeps
+# its git folder elsewhere, as a submodule does, has no such checkout, so its loop's folder is .loop in the checkout
+# itself: loop_folder <shared git folder> <checkout>
 loop_folder() {
-  if [[ $1 == */.git ]]; then
+  if [[ -n ${LOOP_DIR:-} ]]; then
+    printf '%s\n' "$LOOP_DIR"
+  elif [[ $1 == */.git ]]; then
     printf '%s\n' "${1%/.git}/.loop"
   else
     printf '%s\n' "$2/.loop"

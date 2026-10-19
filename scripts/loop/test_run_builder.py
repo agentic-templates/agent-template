@@ -156,9 +156,6 @@ class RunBuilderTest(unittest.TestCase):
                 "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
                 "STANDIN_DIR": str(self.standins),
                 "LOOP_DIR": str(self.loop),
-                # scripts/hooks/before-tool logs its blocks in the main checkout's loop folder, which LOOP_DIR doesn't
-                # change.
-                "HOOK_BLOCK_LOG": str(self.loop / "blocks.log"),
             },
         )
         environment.start()
