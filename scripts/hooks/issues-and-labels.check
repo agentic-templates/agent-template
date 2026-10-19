@@ -75,7 +75,7 @@ split_label_value() {
 # issue_arguments, added_labels, removed_labels, repository, asks_for_help, body_source (empty, text or file),
 # body_word, body_file and body_may_expand: read_issue_command <flags that take a value>
 read_issue_command() {
-  local flags_with_value=$1 i word flag value
+  local flags_with_value=$1 i word flag value value_is_next_word
   local -a split_labels
   issue_arguments=() added_labels=() removed_labels=() repository=()
   asks_for_help="" body_source="" body_word="" body_file="" body_may_expand=""
@@ -86,23 +86,16 @@ read_issue_command() {
         asks_for_help=yes
         continue
         ;;
-      --*=*)
-        flag=${word%%=*}
-        value=${word#*=}
-        ;;
-      -*)
-        if [[ $flags_with_value != *" $word "* ]]; then
-          continue
-        fi
-        flag=$word
-        value=${command_words[i + 1]:-}
-        i=$((i + 1))
-        ;;
+      -*) split_flag_word "$word" "$flags_with_value" ;;
       *)
         issue_arguments+=("$word")
         continue
         ;;
     esac
+    if [[ -n $value_is_next_word ]]; then
+      i=$((i + 1))
+      value=${command_words[i]:-}
+    fi
     split_labels=()
     case $flag in
       -b | --body) body_source=text body_word=$value body_may_expand=${command_word_may_expand[i]:-} ;;
