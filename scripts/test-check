@@ -23,6 +23,8 @@ copy=""
 case_count=0
 # A case sets this to make the copy's scripts/check skip the tests of the scripts and hooks, with SKIP_SCRIPT_TESTS.
 skip_script_tests=""
+# A case sets this to leave its files unstaged, so that the copy's untracked files stay untracked.
+leave_unstaged=""
 
 # Only --shellcheck-only runs real ShellCheck. The other cases test what scripts/check finds by itself.
 # Stand-ins for skipped tools come first on each copy's PATH and fail if a copy runs one.
@@ -105,6 +107,11 @@ run_case() {
     check_under_test=shellcheck
   elif [[ $case_function == shellcheck_* ]]; then
     return
+  elif [[ $case_function == python_* ]]; then
+    if ! command -v uv >/dev/null; then
+      return
+    fi
+    check_under_test=python
   fi
   case_count=$((case_count + 1))
   copy=$results/copy-$case_count
@@ -119,7 +126,9 @@ check_case() (
   shift 3
   cp -Rp "$starting_copy" "$copy"
   "$case_function"
-  git -C "$copy" add --all
+  if [[ -z $leave_unstaged ]]; then
+    git -C "$copy" add --all
+  fi
   # CHECK_UNDER_TEST stops the copy's scripts/check from running this script again.
   if ! output=$(cd "$copy" && CHECK_UNDER_TEST=$check_under_test SKIP_SCRIPT_TESTS=$skip_script_tests PATH=$stand_ins:$PATH \
     scripts/check 2>&1); then
@@ -646,6 +655,15 @@ run_case prose_that_breaks_each_rule fail \
   'error: docs/page.md:18 has a link whose text is "click here".'
 run_case markdown_that_follows_the_prose_rules pass
 run_case semicolons_in_generated_and_vendored_files pass
+
+# Case for the Python files that git doesn't track yet, which only the cases run with uv test.
+
+python_file_that_is_untracked() {
+  leave_unstaged=1
+  printf 'x=1\n' > "$copy/untracked_fixture.py"
+}
+
+run_case python_file_that_is_untracked fail "untracked_fixture.py"
 
 # Case for the place where setup adds the project's checks, which the copies skip.
 
