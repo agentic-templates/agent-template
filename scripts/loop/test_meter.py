@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 import paths
 from machine import Machine
+from test_transcripts import call_line, prompt_line, write_transcript
 
 METER = Path(__file__).with_name("meter")
 # The meter's file name has no .py, so the tests load it by its path.
@@ -689,6 +690,43 @@ class AgentsLineTest(MeterTest):
         self.builder_run("64-20261018-020000", [call(300_000)])
         self.log("end", "64-20261018-020000")
         self.assertEqual(self.agents(), "agents | none running")
+
+    def test_leaves_out_an_agent_that_task_stop_stopped(self) -> None:
+        self.log("start", "toolu_01", issue=64, pid=os.getpid())
+        stopped = write_transcript(self.subagents / "agent-a1.jsonl", [prompt_line(0), call_line("a", 4, tokens=10)])
+        stopped.with_suffix(".meta.json").write_text(json.dumps({"agentType": "builder", "toolUseId": "toolu_01"}))
+        self.log("start", "toolu_02", issue=65, pid=os.getpid())
+        self.subagent("a2", "toolu_02", [call(300_000)])
+        settings = json.loads((METER.parents[2] / ".claude" / "settings.json").read_text())
+        [command] = [
+            hook["command"]
+            for entry in settings["hooks"]["PostToolUse"]
+            if entry.get("matcher") == "TaskStop"
+            for hook in entry["hooks"]
+        ]
+        # What Claude Code sends the command after a TaskStop call stopped the agent a1 of the session abc123
+        hook_input = {
+            "cwd": str(METER.parents[2]),
+            "transcript_path": str(self.subagents.parent.with_suffix(".jsonl")),
+            "tool_name": "TaskStop",
+            "tool_input": {"task_id": "a1"},
+            "tool_response": {"task_id": "a1", "task_type": "local_agent"},
+        }
+        # scripts/loop/run-builder sets LOOP_RUN for a builder that runs this test, and with it the command writes
+        # nothing.
+        environment = {name: value for name, value in os.environ.items() if name != "LOOP_RUN"}
+        stop = subprocess.run(
+            ["sh", "-c", command],
+            cwd=METER.parents[2],
+            env=environment,
+            input=json.dumps(hook_input),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual((stop.returncode, stop.stderr), (0, ""))
+        self.assertEqual(self.agents(), "agents | builder #65 300k")
 
     def test_says_when_no_agent_runs_without_a_log(self) -> None:
         self.assertEqual(self.agents(), "agents | none running")

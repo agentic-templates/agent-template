@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Lists the security advisories that aren't published, closed or withdrawn, and says for each branch of their private
 # forks whether a fix waits in it: scripts/waiting-fixes [<base>]
-# Step 1 of "Publish a release" and step 2 of "Check the security advisories" in docs/releasing.md run it. <base> is
+# Step 1 of "Publish a release" and step 1 of "Check the security advisories" in docs/releasing.md run it. <base> is
 # the commit or tag to compare the branches with, origin/main unless the command gives another one.
 # It runs git fetch origin. Then it prints a line for each advisory, with its GHSA ID and its state. For an advisory
 # with a private fork, it fetches the fork's branches into refs/private-fork/<GHSA ID>/ in this clone, and prints a

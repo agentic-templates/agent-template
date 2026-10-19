@@ -6,7 +6,7 @@ The steps that list or check security advisories need admin access, which `gh re
 
 Publish a release when a maintainer asks you to, and when a goal is done, which is when its issue closes as completed. For a goal of more than one pull request, that's its parent issue. Then follow these steps. In steps 1, 5 and 6, tell the maintainer in your session, never in an issue, because issues are public and would show that a vulnerability isn't fixed yet. Send a push notification with it that doesn't describe the vulnerability or the advisory.
 
-1. Run `scripts/waiting-fixes`. It lists each security advisory that isn't published, closed or withdrawn, and prints a line for each branch of the advisory's private fork. For each line that says `holds a fix` or `can't tell`, ask the maintainer whether this release should include the fix that may wait there. If the maintainer wants the fix in this release, merge it first, as steps 2 and 3 in "Fix a security vulnerability" describe. Then go on to step 2 below, so that the SHA you release includes the fix.
+1. Run `scripts/waiting-fixes`. It lists each security advisory that isn't published, closed or withdrawn. For each branch of the advisory's private fork, it prints a line that says whether the branch holds a fix that main doesn't have. For each line that says `holds a fix` or `can't tell`, ask the maintainer whether this release should include the fix that may wait there. If the maintainer wants the fix in this release, stop here and go on from step 2 of "Fix a security vulnerability".
 2. Run `scripts/release-checks`. Its first line is the full SHA of main's latest commit, and its last line is `go`, `wait` or `stop`. While it prints `wait`, run `scripts/release-checks <sha>` with that SHA every minute, so that you keep the same SHA even if more pull requests merge. If it prints `stop`, open an issue for each failed run and each Dependabot alert that the lines before it name. A Dependabot alert's advisory is public already. For each code scanning alert, check whether it shows a vulnerability that isn't public yet, and if so record it as "Record a vulnerability privately" describes, not in an issue. Once the causes are fixed, start again from step 1, because main's latest commit will have changed.
 3. Choose the version with `scripts/next-version <sha>`. If the script prints an error instead of a version, ask the maintainer in an issue with `needs-decision`, and publish the release once they answer. If the maintainer named a version that differs from the one the script printed, ask which one to publish.
 4. Publish the release with notes built from the merged pull requests:
@@ -20,7 +20,7 @@ Publish a release when a maintainer asks you to, and when a goal is done, which 
    gh workflow run release-assets.yml --ref main -f build_sha='<sha>' -f draft_tag='<version>'
    ```
 
-   Use your project's workflow and input names. Here, `--ref main` selects the branch that holds the workflow, and `build_sha` selects the commit to build, even if main advances. The project's workflow must reject missing or invalid inputs and build that exact SHA in a read-only job. Its separate upload job must check the intended release immediately before uploading: it must still be a draft, and its existing tag must resolve to that SHA. If the tag doesn't exist, the draft's target commit must equal the full SHA. The upload job must stop if any check fails, and upload only to that draft.
+   Use your project's workflow and input names. Here, `--ref main` selects the branch that holds the workflow. The project's workflow must reject missing or invalid inputs. It must build the exact SHA in `build_sha`, even if main advances, in the jobs that "Protect the credentials that publish and deploy" describes. Immediately before it uploads, the upload job must check that the release is still a draft, and that the release's tag resolves to that SHA. If the tag doesn't exist yet, the draft's target commit must equal the full SHA. The upload job must stop if any check fails, and upload only to that draft.
 
    Have the workflow include both inputs in its run name, so you can find the run for this SHA and draft:
 
@@ -33,8 +33,6 @@ Publish a release when a maintainer asks you to, and when a goal is done, which 
    ```sh
    gh run watch <run-id> --exit-status && gh release edit <version> --draft=false
    ```
-
-   If the release starts a workflow that waits for approval, such as one that publishes a package, tell the maintainer to approve it.
 5. Tell the maintainer about each advisory that step 1 listed.
 6. If you told the maintainer about any advisories in step 5, tell the maintainer to start a new session to check whether they're fixed, because an agent performs worse when its context also holds the work of publishing the release.
 
@@ -63,7 +61,9 @@ As soon as you find a vulnerability that isn't public yet, write its summary and
 
 ## Fix a security vulnerability
 
-1. Run `scripts/create-private-fork <GHSA ID>` with the advisory's GHSA ID. The script needs admin access. If the advisory has no temporary private fork yet, the script creates one. It prints the fork's full name. The fix's commits say only what the change does, not what the vulnerability is. Build the fix in that fork.
+The fix's commits, issue and pull request say only what the change does, not what the vulnerability is.
+
+1. Run `scripts/create-private-fork <GHSA ID>` with the advisory's GHSA ID. The script needs admin access. If the advisory has no temporary private fork yet, the script creates one. It prints the fork's full name. Build the fix in that fork.
 2. When the maintainer asks for a release that includes the fix, check that main meets step 2 of "Publish a release", so that nothing stops the release once the fix is public.
-3. The fix's issue and pull request say only what the change does, not what the vulnerability is. Push the fix to the repository, and open its issue and pull request. Go on to step 4 below only once the merge queue has merged it, so that the release includes the fix.
-4. Publish the release in the same session.
+3. Push the fix to the project's repository, and open its issue and pull request. Go on to step 4 below only once the merge queue has merged it, so that the release includes the fix.
+4. In the same session, publish the release, starting from step 2 of "Publish a release". Don't reuse the SHA that `scripts/release-checks` printed in step 2 of this section, because it lacks the fix.

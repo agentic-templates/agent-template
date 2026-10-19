@@ -82,6 +82,9 @@ class AgentLogTest(unittest.TestCase):
         ):
             patched.start()
             self.addCleanup(patched.stop)
+        # scripts/loop/run-builder sets the variable for a builder that runs these tests, and with it the script
+        # writes nothing. The patch of the environment above puts it back after the test.
+        os.environ.pop(agent_log.RUN_VARIABLE, None)
         self.labels("bug\nready\n")
 
     def labels(self, text: str | None) -> None:
@@ -246,6 +249,20 @@ class EndTest(AgentLogTest):
             "last_assistant_message": "Opened pull request #57.",
         }
 
+    def task_stop(self, task_id: str, task_type: str = "local_agent") -> dict[str, Any]:
+        """What Claude Code sends the PostToolUse command after a TaskStop call stopped a task."""
+        message = f"Successfully stopped task: {task_id} (Build the issue)"
+        return {
+            "session_id": "abc123",
+            "transcript_path": str(self.root / "projects" / "p" / "abc123.jsonl"),
+            "cwd": str(self.worktree),
+            "hook_event_name": "PostToolUse",
+            "tool_name": "TaskStop",
+            "tool_input": {"task_id": task_id},
+            "tool_response": {"message": message, "task_id": task_id, "task_type": task_type, "command": "Build"},
+            "tool_use_id": "toolu_77",
+        }
+
     def write_build(self) -> None:
         write_transcript(
             self.transcript,
@@ -317,6 +334,33 @@ class EndTest(AgentLogTest):
         self.run_script("end", self.stop(agent_type=""))
         self.assertEqual(self.lines(), [])
 
+    def test_gives_the_numbers_of_an_agent_that_task_stop_stopped(self) -> None:
+        self.write_build()
+        self.assertEqual(self.run_script("stop", self.task_stop("def456")), 0)
+        [line] = self.lines()
+        self.assertEqual(
+            {name: line[name] for name in ("event", "id", "minutes", "tool_calls", "output_tokens", "pull_request")},
+            {
+                "event": "end",
+                "id": "toolu_01",
+                "minutes": 12.0,
+                "tool_calls": 3,
+                "output_tokens": 34,
+                "pull_request": 57,
+            },
+        )
+        self.assertGreaterEqual(line["worktree_mb"], 0.3)
+
+    def test_writes_no_line_for_a_task_that_task_stop_stopped_and_that_is_not_an_agent_of_the_session(self) -> None:
+        self.write_build()
+        self.run_script("stop", self.task_stop("b7c1d2", task_type="local_bash"))
+        self.run_script("stop", self.task_stop(""))
+        # An id that leads to the agent's transcript through another folder
+        (self.transcript.parent / "agent-x").mkdir()
+        self.run_script("stop", self.task_stop("x/../agent-def456"))
+        self.run_script("stop", self.task_stop("def456") | {"tool_response": "Stopped."})
+        self.assertEqual(self.lines(), [])
+
     def test_fails_when_the_agent_has_no_file_next_to_its_transcript(self) -> None:
         self.transcript.with_suffix(".meta.json").unlink()
         with self.assertRaises(FileNotFoundError):
@@ -337,9 +381,11 @@ class HookTest(AgentLogTest):
             timeout=60,
         )
 
-    def settings_commands(self, event: str) -> list[str]:
+    def settings_commands(self, event: str, matcher: str | None = None) -> list[str]:
+        """The commands for an event in .claude/settings.json, or for the event's entries with the matcher."""
         settings = json.loads((CHECKOUT / ".claude" / "settings.json").read_text())
-        return [hook["command"] for entry in settings["hooks"][event] for hook in entry["hooks"]]
+        entries = [entry for entry in settings["hooks"][event] if matcher is None or entry.get("matcher") == matcher]
+        return [hook["command"] for entry in entries for hook in entry["hooks"]]
 
     def test_the_before_tool_hook_adds_the_start_line_of_an_agent_call_and_lets_it_go_ahead(self) -> None:
         [command] = self.settings_commands("PreToolUse")
@@ -376,6 +422,24 @@ class HookTest(AgentLogTest):
         self.assertEqual((done.returncode, done.stderr), (0, ""))
         [line] = self.lines()
         self.assertEqual((line["id"], line["minutes"], line["input_tokens"]), ("toolu_01", 4.0, 10))
+
+    def test_the_task_stop_command_adds_the_end_line(self) -> None:
+        [command] = self.settings_commands("PostToolUse", "TaskStop")
+        session = self.root / "abc123.jsonl"
+        transcript = write_transcript(
+            session.with_suffix("") / "subagents" / "agent-def456.jsonl", [prompt_line(0), call_line("a", 4, tokens=10)]
+        )
+        transcript.with_suffix(".meta.json").write_text(json.dumps({"agentType": "builder", "toolUseId": "toolu_01"}))
+        hook_input = {
+            "cwd": str(CHECKOUT),
+            "transcript_path": str(session),
+            "tool_name": "TaskStop",
+            "tool_response": {"task_id": "def456", "task_type": "local_agent"},
+        }
+        done = self.run_command(command, hook_input)
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        [line] = self.lines()
+        self.assertEqual((line["event"], line["id"], line["minutes"]), ("end", "toolu_01", 4.0))
 
     def test_the_subagent_stop_command_lets_the_agent_end_when_the_script_fails(self) -> None:
         [command] = self.settings_commands("SubagentStop")

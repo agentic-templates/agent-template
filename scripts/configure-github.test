@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tests that scripts/configure-github checks who owns the repository before it changes anything, with a stand-in for gh.
+# Tests scripts/configure-github with a stand-in for gh: that it checks who owns the repository before it changes
+# anything, and how it sets up the release environment.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -10,10 +11,13 @@ base=$(mktemp -d)
 trap 'rm -rf "$base"' EXIT
 mkdir -p "$base/bin"
 
-# A stand-in for gh, first on the PATH, that answers the commands that read the repository: its name, the access
-# of whoever runs the script, its visibility and its owner's type. It answers that TEST_REPOSITORY is public, that
-# the person has admin access, and that TEST_OWNER_TYPE owns it. It writes every other command to TEST_GH_CALLS,
-# one to a line, and fails, so the script stops at its first change.
+# A stand-in for gh, first on the PATH. It answers the commands that read the repository, as the script's --jq filters
+# print the answers: that TEST_REPOSITORY is public, that the person has admin access, that TEST_OWNER_TYPE owns it,
+# that code scanning is set up, that it has no labels and no ruleset, and that the release environment's policy for
+# tags that match v* has the ID TEST_TAG_POLICY, or that the environment has no such policy when TEST_TAG_POLICY is
+# empty. It writes each command that changes something to TEST_GH_CALLS, one to a line, and succeeds. When the command
+# reads a request's body from standard input, the line ends with the body without its whitespace. The stand-in fails
+# on every other command.
 cat >"$base/bin/gh" <<'STAND_IN'
 #!/usr/bin/env bash
 case "$*" in
@@ -21,8 +25,22 @@ case "$*" in
   "repo view --json viewerPermission --jq .viewerPermission") echo ADMIN ;;
   "repo view --json visibility --jq .visibility | ascii_downcase") echo public ;;
   "api repos/$TEST_REPOSITORY --jq .owner.type") echo "$TEST_OWNER_TYPE" ;;
+  "api repos/$TEST_REPOSITORY/code-scanning/default-setup --jq .state") echo configured ;;
+  "label list --repo $TEST_REPOSITORY --limit 200 --json name --jq .[].name") ;;
+  "api repos/$TEST_REPOSITORY/rulesets?includes_parents=false --jq "*) ;;
+  "api repos/$TEST_REPOSITORY/environments/release/deployment-branch-policies --jq "*)
+    if [[ -n $TEST_TAG_POLICY ]]; then
+      echo "$TEST_TAG_POLICY"
+    fi
+    ;;
+  "api --method "* | "label create "* | "label edit "* | "label delete "*)
+    if [[ " $* " == *" --input - "* ]]; then
+      echo "$* $(tr -d ' \n')" >>"$TEST_GH_CALLS"
+    else
+      echo "$*" >>"$TEST_GH_CALLS"
+    fi
+    ;;
   *)
-    echo "$*" >>"$TEST_GH_CALLS"
     echo "The stand-in for gh doesn't answer: gh $*" >&2
     exit 1
     ;;
@@ -31,20 +49,21 @@ STAND_IN
 chmod +x "$base/bin/gh"
 
 # Runs scripts/configure-github, and sets status, output and changes, the commands that would change something:
-# run_configure_github <repository> <owner's type: User or Organization>
+# run_configure_github <repository> <owner's type: User or Organization> [<ID of the release environment's tag policy>]
 run_configure_github() {
   status=0
   : >"$base/calls"
-  output=$(TEST_REPOSITORY=$1 TEST_OWNER_TYPE=$2 TEST_GH_CALLS=$base/calls PATH=$base/bin:$PATH \
+  output=$(TEST_REPOSITORY=$1 TEST_OWNER_TYPE=$2 TEST_TAG_POLICY=${3:-} TEST_GH_CALLS=$base/calls PATH=$base/bin:$PATH \
     scripts/configure-github 2>&1) || status=$?
   changes=$(<"$base/calls")
 }
 
-# Counts a case, and prints an error if it failed: expect <description> <what it expects> <whether it held: yes or no>
+# Counts a case, and prints an error if it failed:
+# expect <description> <what it expects> <whether it held: yes or no> [<what it did instead>]
 expect() {
   case_count=$((case_count + 1))
   if [[ $3 != yes ]]; then
-    echo "error: $1, scripts/configure-github must $2. It exited with code $status and printed \"$output\"." >&2
+    echo "error: $1, scripts/configure-github must $2. It exited with code $status and printed \"$output\".${4:+ $4}" >&2
     failed_cases=$((failed_cases + 1))
   fi
 }
@@ -58,12 +77,41 @@ fi
 expect "On a repository that a personal account owns" \
   "exit with code 1 before it changes anything, and report \"$personal_account_error\"" "$held"
 
+release_environment=repos/agentic-templates/expense-tracker/environments/release
+# GitHub removes every reviewer of an environment when a request's reviewers are null, and keeps them when a request
+# leaves reviewers out. So the same request is right whatever reviewers the environment had.
+set_up_release_environment="api --method PUT $release_environment --silent --input - {\"reviewers\":null,\"deployment_branch_policy\":{\"protected_branches\":false,\"custom_branch_policies\":true}}"
+add_tag_policy="api --method POST $release_environment/deployment-branch-policies --silent -f name=v* -f type=tag"
+
+# Sets release_changes to the commands that would change the release environment, one to a line.
+find_release_changes() {
+  release_changes=$(grep -F "$release_environment" <<<"$changes" || true)
+}
+
 run_configure_github agentic-templates/expense-tracker Organization
 held=no
 if [[ $changes == "api --method PATCH repos/agentic-templates/expense-tracker "* ]]; then
   held=yes
 fi
 expect "On a repository that an organization owns" "go on to change the repository's settings" "$held"
+find_release_changes
+held=no
+if [[ $status == 0 && $release_changes == "$set_up_release_environment"$'\n'"$add_tag_policy" ]]; then
+  held=yes
+fi
+expect "On a repository without the release environment" \
+  "create the environment with no reviewers, and with a policy that lets only tags that match v* use it, by sending \"$set_up_release_environment\" and then \"$add_tag_policy\"" \
+  "$held" "It sent these changes to the environment: \"$release_changes\"."
+
+run_configure_github agentic-templates/expense-tracker Organization 31
+find_release_changes
+held=no
+if [[ $status == 0 && $release_changes == "$set_up_release_environment" ]]; then
+  held=yes
+fi
+expect "On a release environment that has reviewers and the policy for tags that match v*" \
+  "remove every reviewer and keep the policy, by sending only \"$set_up_release_environment\"" \
+  "$held" "It sent these changes to the environment: \"$release_changes\"."
 
 if ((failed_cases > 0)); then
   echo "error: $failed_cases of the $case_count cases in scripts/configure-github.test failed. The errors above say which." >&2

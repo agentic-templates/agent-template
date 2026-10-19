@@ -18,10 +18,25 @@ export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_
 
 # A stand-in for gh, first on the PATH, that answers the commands that look up an issue and list the branches that
 # link to it: #12 and #20 are open issues, the branch 20-show-the-totals links to #20, and no other number exists.
-# scripts/check-pull-request.test checks the commands that the script runs.
-mkdir "$base/bin"
+# scripts/check-pull-request.test checks the commands that the script runs. The stand-in also answers gh pr view, with
+# the file in the folder pull-requests named for the word after view, such as 5.json, or for the current branch when
+# that word is a flag. The cases write those files with pull_request.
+mkdir "$base/bin" "$base/pull-requests"
 cat >"$base/bin/gh" <<'STAND_IN'
 #!/usr/bin/env bash
+if [[ ${1:-} == pr && ${2:-} == view ]]; then
+  name=${3:-}
+  if [[ $name == -* ]]; then
+    name=$(git symbolic-ref --quiet --short HEAD) || name=""
+  fi
+  file=${0%/*}/../pull-requests/$name.json
+  if [[ -z $name || ! -f $file ]]; then
+    echo "no pull requests found for \"$name\"" >&2
+    exit 1
+  fi
+  cat "$file"
+  exit 0
+fi
 # The query for the branches of an issue gives the issue's number in its eighth argument, as number=<number>.
 if [[ ${1:-} == api && ${2:-} == graphql ]]; then
   case ${8:-} in
@@ -52,6 +67,35 @@ export PATH=$base/bin:$PATH
 # Prints the message that blocks a pull request with these errors: blocked <error>...
 blocked() {
   printf '%s\n' "Blocked: the checks on pull requests in CI would fail on this one:" "$@" "Fix each problem, and run gh pr create again."
+}
+
+# Prints the message that blocks gh pr edit when the pull request would have these errors: edit_blocked <error>...
+edit_blocked() {
+  printf '%s\n' "Blocked: the checks on pull requests in CI would fail on this one:" "$@" "Fix each problem, and run gh pr edit again."
+}
+
+# Prints the message that blocks gh pr edit when the hook checks only the text that it gives, and the text has these
+# problems: text_blocked <problem>...
+text_blocked() {
+  printf '%s\n' "Blocked: the text that this command would post has these problems:" "$@" "Fix each problem, and run gh pr edit again."
+}
+
+# The name of a person's home folder. scripts/check doesn't take $person for a name, so this file holds no path into
+# a home folder.
+person=ana
+home_path_line="The app reads /Users/$person/bank.csv."
+home_path_problem="The line \"$home_path_line\" holds a path into a home folder, /Users/$person/. Use a path relative to the repository, or ~ or \$HOME."
+semicolon_line="The app skips the expenses; it keeps the total."
+semicolon_problem="The line \"$semicolon_line\" has a semicolon in prose. Replace it with a period or a word such as \"and\", as \"Write clear sentences\" in docs/writing.md says."
+
+# Writes what the stand-in for gh prints for gh pr view <name>: an open pull request from the branch work into main,
+# with the title and body that the scripts pass, and with the changes that a jq program makes to it:
+# pull_request <name> [<jq program>]
+pull_request() {
+  # shellcheck disable=SC2016 # The $ words are jq's variables.
+  jq -n --arg title "$title" --arg body "$body" --arg commit "$(git -C "$clone" rev-parse work)" \
+    '{title: $title, body: $body, state: "OPEN", baseRefName: "main", headRefName: "work", headRefOid: $commit,
+      isCrossRepository: false, author: {login: "ana"}} | '"${2:-.}" >"$base/pull-requests/$1.json"
 }
 
 # Prints the message that blocks a pull request that changes files that scripts/consequential-paths lists, and isn't a
@@ -205,6 +249,100 @@ expect_allow Bash "gh pr create --fill --dry-run"
 expect_allow Bash "gh pr create --help"
 expect_allow Bash "gh pr view 7 --json title"
 expect_allow Bash "echo gh pr create --fill"
+
+# gh pr edit on pull requests from the branch work: #5 has a title and body that the scripts pass, as has the branch's
+# own pull request, and #7 has a title and body that they fail. The hook checks the title and body that the command
+# gives, with the one that it keeps as GitHub has it.
+pull_request 5
+pull_request work
+pull_request 7 '.title = "skip the expenses that were already imported" | .body |= sub("Closes #12"; "See #12")'
+expect_allow Bash "gh pr edit 5 --body-file ../body.md"
+expect_allow Bash "gh pr edit 5 -t '$title' --body '$body'"
+expect_allow Bash "gh pr edit --title='$title' --add-label feature"
+expect_allow Bash "gh pr edit 7 --title '$title' -F ../body.md"
+expect_block Bash "gh pr edit 5 --body-file ../no-closing-line.md" "$(edit_blocked "$no_closing_line")"
+expect_block Bash "gh pr edit 5 --title 'skip the expenses that were already imported'" "$(edit_blocked "$not_a_type")"
+expect_block Bash "git push && gh pr edit -F ../no-closing-line.md" "$(edit_blocked "$no_closing_line")"
+expect_block Bash "gh pr edit 7 --title '$title'" "$(edit_blocked "$no_closing_line")"
+expect_block Bash "gh pr edit 7 --body-file ../body.md" "$(edit_blocked "$not_a_type")"
+expect_block Bash "gh pr edit 5 --title \"\$type: skip the expenses\"" \
+  "$(edit_blocked "The title \"\$type: skip the expenses\" doesn't follow the format \"<type>: <what changed>\". Edit the title to match. The types are feat, fix, docs, test, refactor, perf, build, ci, revert, chore.") $may_expand"
+expect_block Bash "gh pr edit 5 --body-file ../missing.md" \
+  "Blocked: this hook checks the body file before the command runs, and ../missing.md doesn't exist yet or the command writes it. Write the file in a command of its own first, and give its path without variables."
+expect_block Bash "gh pr edit 5 --body \"\$(cat ../body.md)\"" "$from_command"
+expect_repository_flags 2 "$(edit_blocked "$no_closing_line")" pr edit "5 --body-file ../no-closing-line.md"
+
+# A short flag's value right after the flag, with or without =
+expect_block Bash "gh pr edit 5 -t'skip the expenses that were already imported'" "$(edit_blocked "$not_a_type")"
+expect_block Bash "gh pr edit 5 -b'${body/Closes #12/See #12}'" "$(edit_blocked "$no_closing_line")"
+expect_block Bash "gh pr edit 5 -F../no-closing-line.md" "$(edit_blocked "$no_closing_line")"
+expect_block Bash "gh pr edit 5 -F=../no-closing-line.md" "$(edit_blocked "$no_closing_line")"
+expect_block Bash "gh pr create -t'skip the expenses that were already imported' --body-file ../body.md" \
+  "$(blocked "$not_a_type")"
+
+# gh pr edit commands that change no title and no body, or that change nothing
+expect_allow Bash "gh pr edit 7 --add-label feature"
+expect_allow Bash "gh pr edit 7 --base main --remove-label bug"
+expect_allow Bash "gh pr edit 7 --title '$title' --help"
+expect_allow Bash "echo gh pr edit 7 --title '$title'"
+
+# gh pr edit on a pull request that gh can't find, or on a merged one, whose checks no longer decide anything. The hook
+# checks only the format of the title that the command gives, and the prose of the title and body, as
+# scripts/hooks/posted-text.check checks the text of other commands.
+pull_request 9 '.state = "MERGED"'
+expect_allow Bash "gh pr edit 404 --body-file ../no-closing-line.md"
+expect_allow Bash "gh pr edit 9 --body-file ../no-closing-line.md"
+expect_block Bash "gh pr edit 404 --body '$semicolon_line'" "$(text_blocked "$semicolon_problem")"
+expect_block Bash "gh pr edit 9 --body '$body
+$home_path_line'" "$(text_blocked "$home_path_problem")"
+expect_block Bash "gh pr edit 9 --title 'skip the expenses; keep the total'" "$(text_blocked \
+  "The title \"skip the expenses; keep the total\" doesn't follow the format \"<type>: <what changed>\". Edit the title to match. The types are feat, fix, docs, test, refactor, perf, build, ci, revert, chore." \
+  "The title \"skip the expenses; keep the total\" has a semicolon in prose. Replace it with a period or a word such as \"and\", as \"Write clear sentences\" in docs/writing.md says.")"
+
+# A body that closes #12 for a pull request from the branch 20-show-the-totals, which was created for #20. From a
+# fork, the branch can have that name though no issue here links to it.
+pull_request 20 '.headRefName = "20-show-the-totals" | .body |= sub("#12"; "#20")'
+pull_request 21 '.headRefName = "20-show-the-totals" | .body |= sub("#12"; "#20") | .isCrossRepository = true'
+expect_block Bash "gh pr edit 20 --body-file ../body.md" "$(edit_blocked "$not_the_branch_issue")"
+expect_allow Bash "gh pr edit 21 --body-file ../body.md"
+
+# A pull request whose latest commit on GitHub, which the clone hasn't fetched, has a Co-authored-by trailer. With
+# --base, the pull request would merge into a branch that has that commit.
+git -C "$base/seed" switch --quiet -c shared
+git -C "$base/seed" commit --quiet --allow-empty -m "feat: share the totals" -m "Co-authored-by: Ana <ana@example.com>"
+git -C "$base/seed" push --quiet "$origin" shared
+git -C "$base/seed" switch --quiet main
+pull_request 8 ".headRefName = \"shared\" | .headRefOid = \"$(git -C "$base/seed" rev-parse shared)\""
+shared_commit=$(git -C "$base/seed" rev-parse --short shared)
+expect_block Bash "gh pr edit 8 --body-file ../body.md" \
+  "$(edit_blocked "Commit $shared_commit \"feat: share the totals\" has a Co-authored-by trailer, for Ana <ana@example.com>. Rewrite the commit without the trailer, such as with git commit --amend when it's the latest commit, and push the branch again with --force-with-lease.")"
+expect_allow Bash "gh pr edit 8 --base shared --body-file ../body.md"
+expect_allow Bash "gh pr edit 8 -Bshared --body-file ../body.md"
+
+# A pull request whose latest commit origin doesn't have either. The hook checks only the text that the command gives.
+pull_request 10 '.headRefOid = "0123456789abcdef0123456789abcdef01234567"'
+expect_allow Bash "gh pr edit 10 --body-file ../no-closing-line.md"
+expect_block Bash "gh pr edit 10 --body '$semicolon_line'" "$(text_blocked "$semicolon_problem")"
+
+# git reads a --base that starts with a dash as a branch, and not as its option --upload-pack, which would run the
+# command in it, because origin is a folder on this machine.
+ran_marker=$base/upload-pack-ran
+expect_allow Bash "gh pr create --base '--upload-pack=touch $ran_marker' --title '$title' --body-file ../body.md"
+expect_allow Bash "gh pr edit 5 --base '--upload-pack=touch $ran_marker' --body-file ../body.md"
+case_count=$((case_count + 1))
+if [[ -e $ran_marker ]]; then
+  echo "error: the hook let git fetch read a --base that starts with a dash as the option --upload-pack, and run its command." >&2
+  failed_cases=$((failed_cases + 1))
+fi
+
+# As in the title job, the hook checks only the title of a pull request from Dependabot, and the prose of the text that
+# the command gives.
+pull_request 30 '.title = "build: bump jq" | .body = "Bumps jq." | .author.login = "app/dependabot"'
+expect_allow Bash "gh pr edit 30 --title 'build: bump jq from 1.7 to 1.8'"
+expect_allow Bash "gh pr edit 30 --body 'Bumps jq from 1.7 to 1.8.'"
+expect_block Bash "gh pr edit 30 --title 'bump jq'" \
+  "$(text_blocked "The title \"bump jq\" doesn't follow the format \"<type>: <what changed>\". Edit the title to match. The types are feat, fix, docs, test, refactor, perf, build, ci, revert, chore.")"
+expect_block Bash "gh pr edit 30 --body '$semicolon_line'" "$(text_blocked "$semicolon_problem")"
 
 # Branches that change files that scripts/consequential-paths lists, which open only as drafts: rules changes some
 # of the rules and README.md, and moved moves scripts/configure-github away. A renamed file counts by its old path.

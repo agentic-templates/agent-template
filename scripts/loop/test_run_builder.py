@@ -103,9 +103,9 @@ def lines(*events: object) -> str:
     return "".join((event if isinstance(event, str) else json.dumps(event)) + "\n" for event in events)
 
 
-def linked(*branches: str, repository: str = "owner/repo") -> str:
-    """What gh issue develop --list prints for branches of the repository."""
-    return "".join(f"{branch}\thttps://github.com/{repository}/tree/{branch}\n" for branch in branches)
+def branch_lines(*branches: str) -> str:
+    """What gh prints for the GraphQL query for an issue's branches in scripts/issue-branches, through its --jq filter."""
+    return "".join(f"{branch}\n" for branch in branches)
 
 
 def git(*arguments: str, folder: Path) -> str:
@@ -147,7 +147,7 @@ def uv_lock(pyproject: str, member: str = "") -> str:
 def starting_repositories() -> tempfile.TemporaryDirectory[str]:
     """A folder that holds origin.git, a bare repository with one commit on main and on the issue's branch, and repo,
     a clone of it whose origin has a GitHub URL, whose git hooks record that they ran, and which has copies of
-    scripts/clear-worktrees and the script it reads. Each test copies them, because making them took 0.1 seconds of
+    scripts/clear-worktrees and the scripts it reads. Each test copies them, because making them took 0.1 seconds of
     the 0.13 seconds of a test that stops before the run starts."""
     folder = tempfile.TemporaryDirectory()
     root = Path(folder.name)
@@ -161,7 +161,7 @@ def starting_repositories() -> tempfile.TemporaryDirectory[str]:
         path.write_text(f'#!/bin/sh\ntouch "$STANDIN_DIR/{hook}-ran"\n')
         path.chmod(0o755)
     (repo / "scripts").mkdir()
-    for script in ("clear-worktrees", "secret-file-names"):
+    for script in ("clear-worktrees", "secret-file-names", "issue-branches"):
         shutil.copy2(SCRIPTS / script, repo / "scripts" / script)
     git("add", ".", folder=repo)
     git("commit", "--quiet", "-m", "chore: start", folder=repo)
@@ -223,7 +223,8 @@ class RunBuilderTest(unittest.TestCase):
             "gh": {
                 "repo view": [{"stdout": "owner/repo\n"}],
                 "issue view": [{"stdout": json.dumps(ISSUE)}],
-                "issue develop --list": [{"stdout": linked(BRANCH)}],
+                # The GraphQL query for the issue's branches in scripts/issue-branches
+                "api graphql": [{"stdout": branch_lines(BRANCH)}],
                 "issue comment": [{}],
                 "pr list": [{"stdout": "[]"}],
                 # scripts/clear-worktrees asks how many open pull requests the branch has.
@@ -375,27 +376,45 @@ class StartTest(RunBuilderTest):
 
 class WorktreeTest(RunBuilderTest):
     def test_creates_the_branch_of_an_issue_that_has_none(self) -> None:
-        self.answer("gh", "issue develop --list", {"stdout": ""}, {"stdout": linked("12-new")})
+        self.answer("gh", "api graphql", {"stdout": ""}, {"stdout": branch_lines("12-new")})
         self.answer("gh", "issue develop", {"push": "12-new"})
         status, printed, _ = self.run_builder("--tool", "claude")
         self.assertEqual(status, 0, printed)
         self.assertEqual(self.arguments("gh", "issue develop"), [["issue", "develop", "12"]])
         self.assertEqual(self.calls("claude")[0]["head"], "ref: refs/heads/12-new")
 
-    def test_builds_on_the_newest_branch_of_the_issue_in_this_repository(self) -> None:
-        for branch, date in (("12-older", "2026-10-01"), ("12-newer", "2026-10-02"), ("12-elsewhere", "2026-10-03")):
+    def test_builds_on_the_newest_branch_of_the_issue_that_origin_has(self) -> None:
+        for branch, date in (("12-older", "2026-10-01"), ("12-newer", "2026-10-02")):
             with mock.patch.dict(os.environ, {"GIT_COMMITTER_DATE": f"{date}T12:00:00Z"}):
                 commit = self.git("commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", branch)
             self.git("push", "--quiet", "origin", f"{commit}:refs/heads/{branch}")
-        listing = linked("12-gone", "12-older", "12-newer") + linked("12-elsewhere", repository="other/project")
-        self.answer("gh", "issue develop --list", {"stdout": listing})
+        self.answer("gh", "api graphql", {"stdout": branch_lines("12-gone", "12-older", "12-newer")})
         status, printed, _ = self.run_builder("--tool", "claude")
         self.assertEqual(status, 0, printed)
         self.assertEqual(self.calls("claude")[0]["head"], "ref: refs/heads/12-newer")
         self.assertEqual(self.calls("gh", "issue develop"), [])
 
-    def test_fails_when_gh_creates_no_branch(self) -> None:
+    def test_builds_on_the_branch_of_the_open_pull_request_of_the_issue(self) -> None:
+        # GitHub links the pull request to the issue in place of the branch, and gh issue develop --list lists no
+        # branch. The stand-in for gh answers no other gh issue develop command.
         self.answer("gh", "issue develop --list", {"stdout": ""})
+        status, printed, _ = self.run_builder("--tool", "claude")
+        self.assertEqual(status, 0, printed)
+        self.assertEqual(self.calls("claude")[0]["head"], f"ref: refs/heads/{BRANCH}")
+        self.assertEqual(self.calls("gh", "issue develop"), [])
+
+    def test_fails_when_gh_cannot_list_the_branches_of_the_issue(self) -> None:
+        self.answer("gh", "api graphql", {"stderr": "error connecting to api.github.com\n", "status": 1})
+        status, printed, _ = self.run_builder("--tool", "claude")
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "| failed: can't list the branches of issue #12, because gh failed: error connecting to api.github.com |",
+            printed,
+        )
+        self.assertEqual(self.calls("claude"), [])
+
+    def test_fails_when_gh_creates_no_branch(self) -> None:
+        self.answer("gh", "api graphql", {"stdout": ""})
         self.answer("gh", "issue develop", {})
         status, printed, _ = self.run_builder("--tool", "claude")
         self.assertEqual(status, 1)

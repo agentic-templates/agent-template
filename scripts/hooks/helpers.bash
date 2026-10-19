@@ -87,6 +87,18 @@ hook_main_checkout() {
   main_checkout "${git_folders%%$'\n'*}" "${git_folders#*$'\n'}"
 }
 
+# Succeeds if the action comes from the orchestrator's session, the one that the state file in the loop's folder names,
+# and not from a subagent of it, such as a builder, whose input has the session's id too. No hook protects the state
+# file, so a builder could write its own session's id there and count as the orchestrator.
+is_orchestrator() {
+  local loop
+  if [[ -n $agent_id ]]; then
+    return 1
+  fi
+  loop=$(hook_loop_folder 2>/dev/null) || return 1
+  is_orchestrators_session "$loop" "$session_id"
+}
+
 # Adds a line to blocks.log in the loop's folder of this hook's repository, when scripts/hooks/before-tool runs the
 # check for a tool's action. A check that runs on its own, as when an agent runs it by hand to compare two versions of
 # it, adds no line, because it blocked no action. HOOK_BLOCK_LOG names another file, as in the hooks' tests. The line
@@ -330,7 +342,7 @@ move_gh_repository_flags() {
     return 0
   fi
   case ${command_words[1]} in
-    pr | issue | label) ;;
+    pr | issue | label | release) ;;
     *) return 0 ;;
   esac
   while ((index < ${#command_words[@]})); do
@@ -396,6 +408,31 @@ read_arguments() {
   target+=(${repository[@]+"${repository[@]}"})
 }
 
+# Succeeds if the gh command in command_words has the flag --help, so that it only prints its help. -h doesn't count,
+# because gh repo create and gh repo edit read it as --homepage. gh reads a word after -- as an argument, and the word
+# after a flag that takes a value as that value, as in --description --help. The hook doesn't know which flags take a
+# value, so --help counts only after a word that isn't a flag, or after a flag that gives its value after =. It counts
+# only before the first word with an expansion, such as $text, because that word can become --, or nothing, as in
+# --body $text --help.
+prints_help() {
+  local i previous
+  for ((i = 2; i < ${#command_words[@]}; i++)); do
+    if [[ -n ${command_word_may_expand[i - 1]:-} ]]; then
+      return 1
+    fi
+    previous=${command_words[i - 1]}
+    case ${command_words[i]} in
+      --) return 1 ;;
+      --help)
+        if [[ $previous != -* || $previous == *=* ]]; then
+          return 0
+        fi
+        ;;
+    esac
+  done
+  return 1
+}
+
 # Succeeds if read_arguments or read_push_arguments found one of these flags: has_flag <flag>...
 has_flag() {
   local flag wanted
@@ -445,39 +482,58 @@ merge_flags_with_value=" -A --author-email -b --body -F --body-file --match-head
 pr_create_flags_with_value=" -a --assignee --attach -B --base -b --body -F --body-file -H --head -l --label -m --milestone -p --project --recover -r --reviewer -T --template -t --title -R --repo "
 
 # Succeeds if command_words opens a pull request with gh pr create, or its alias gh pr new, rather than show the
-# command's help or do a dry run. It sets pr_base, pr_head and pr_title to the values of --base, --head and --title,
-# or to empty when the command doesn't give the flag, and pr_has_title to yes when it gives --title, whose value can
-# be empty. It sets pr_is_draft to yes when the command opens a draft. It also records expansion syntax in the title
-# and body, and sets the body source for read_body.
-# The word after a flag that takes a value is that value, even if it starts with a dash.
+# command's help or do a dry run. It reads the command's flags with read_pull_request_flags.
 opens_pull_request() {
-  local i word flag value
   if [[ ${command_words[0]##*/} != gh || ${command_words[1]:-} != pr ]]; then
     return 1
   fi
   if [[ ${command_words[2]:-} != create && ${command_words[2]:-} != new ]]; then
     return 1
   fi
+  read_pull_request_flags "$pr_create_flags_with_value"
+}
+
+# Splits a word of a gh command that starts with a dash into the flag and the value that the word gives, as gh reads
+# them: split_flag_word <word> <flags that take a value>
+# It sets flag, and sets value to the value in the same word, as in --title=Title, or to empty when the word gives
+# none. A short flag that takes a value can also have it in the same word, as in -tTitle or -t=Title, which gh reads as
+# the title Title. It sets value_is_next_word to yes when the flag takes a value that the word doesn't give, because
+# the next word is then the value, even if it starts with a dash.
+split_flag_word() {
+  flag=$1 value="" value_is_next_word=""
+  if [[ $1 == --*=* ]]; then
+    flag=${1%%=*}
+    value=${1#*=}
+  elif [[ $2 == *" $1 "* ]]; then
+    value_is_next_word=yes
+  elif [[ $1 == -[!-]?* && $2 == *" ${1:0:2} "* ]]; then
+    flag=${1:0:2}
+    value=${1:2}
+    value=${value#=}
+  fi
+}
+
+# Reads the flags of a gh pr command from command_words, from its fourth word on, and fails when the command shows its
+# help or does a dry run: read_pull_request_flags <flags that take a value>
+# It sets pr_base, pr_head and pr_title to the values of --base, --head and --title, or to empty when the command
+# doesn't give the flag, and pr_has_title to yes when it gives --title, whose value can be empty. It sets pr_is_draft
+# to yes when the command opens a draft. It also records expansion syntax in the title and body, and sets the body
+# source for read_body.
+read_pull_request_flags() {
+  local flags_with_value=$1 i word flag value value_is_next_word
   pr_base="" pr_head="" pr_title="" pr_has_title="" pr_title_may_expand="" pr_is_draft=""
   body_source="" body_word="" body_file="" body_may_expand=""
   for ((i = 3; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
     case $word in
       -h | --help | --dry-run) return 1 ;;
-      --*=*)
-        flag=${word%%=*}
-        value=${word#*=}
-        ;;
-      -*)
-        flag=$word
-        value=""
-        if [[ $pr_create_flags_with_value == *" $word "* ]]; then
-          value=${command_words[i + 1]:-}
-          i=$((i + 1))
-        fi
-        ;;
+      -*) split_flag_word "$word" "$flags_with_value" ;;
       *) continue ;;
     esac
+    if [[ -n $value_is_next_word ]]; then
+      i=$((i + 1))
+      value=${command_words[i]:-}
+    fi
     case $flag in
       -B | --base) pr_base=$value ;;
       -H | --head) pr_head=$value ;;
@@ -536,11 +592,19 @@ find_commits() {
     base_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || return 1
     base_branch=${base_branch#origin/}
   fi
+  find_base_commit "$base_branch" || return 1
+  find_head_commit
+}
+
+# Sets base_commit to the latest commit of a branch on GitHub, which it fetches from origin first, in the repository of
+# the current folder, or fails when it can't find it: find_base_commit <branch>
+find_base_commit() {
   # The local copy of the base branch can be older than GitHub's. The commits that GitHub's has and the local copy
   # doesn't would then count as the pull request's own, and so would the files that they change.
-  GIT_TERMINAL_PROMPT=0 git fetch --quiet origin "$base_branch" >/dev/null 2>&1 || true
-  base_commit=$(git rev-parse --verify --quiet "refs/remotes/origin/$base_branch^{commit}") || return 1
-  find_head_commit
+  # The -- makes git read the branch as a branch, not as an option, even when it starts with a dash, because the
+  # command's --base can give any word.
+  GIT_TERMINAL_PROMPT=0 git fetch --quiet origin -- "$1" >/dev/null 2>&1 || true
+  base_commit=$(git rev-parse --verify --quiet "refs/remotes/origin/$1^{commit}") || return 1
 }
 
 # Adds the files that the redirections of a simple command write to the array written_files, which a check empties

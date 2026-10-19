@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# Tests issue_branches in scripts/issue-branches on sample answers of GitHub's GraphQL API, with a stand-in for gh that
+# runs the function's --jq filter with jq. The tests of the scripts that call the function give them the filter's
+# lines instead.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# shellcheck source=scripts/missing-tools
+source scripts/missing-tools
+if ! has jq https://jqlang.org/download/ "scripts/issue-branches.test"; then
+  exit 0
+fi
+
+case_count=0
+failed_cases=0
+
+base=$(mktemp -d)
+trap 'rm -rf "$base"' EXIT
+mkdir -p "$base/bin"
+
+# A stand-in for gh, first on the PATH. It answers the GraphQL query for the branches of the issue in TEST_NUMBER with
+# the file in TEST_ANSWER, run through the --jq filter, as gh does. With TEST_ANSWER=fail, it fails, as gh does
+# without the network. It fails every other command.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+if [[ $1 != api || $2 != graphql || $* != *" -F number=$TEST_NUMBER "* || $* != *"issueOrPullRequest(number: \$number)"* ]]; then
+  echo "The stand-in for gh doesn't answer: gh $*" >&2
+  exit 1
+fi
+if [[ $TEST_ANSWER == fail ]]; then
+  echo "error connecting to api.github.com" >&2
+  exit 1
+fi
+while (($# > 0)); do
+  if [[ $1 == --jq ]]; then
+    exec jq --raw-output "$2" "$TEST_ANSWER"
+  fi
+  shift
+done
+echo "The stand-in for gh got no --jq filter." >&2
+exit 1
+STAND_IN
+chmod +x "$base/bin/gh"
+
+# shellcheck source=scripts/issue-branches
+source scripts/issue-branches
+
+# Runs issue_branches for an issue with GitHub's answer in a file, or fail, and checks its exit code and output:
+# expect_branches <description> <issue> <answer file, or fail> <exit code> <output>
+expect_branches() {
+  local status=0 output
+  case_count=$((case_count + 1))
+  output=$(TEST_NUMBER=$2 TEST_ANSWER=$3 PATH=$base/bin:$PATH issue_branches "$2" 2>&1) || status=$?
+  if [[ $status != "$4" || $output != "$5" ]]; then
+    echo "error: $1, issue_branches must exit with code $4 and print \"$5\", but it exited with code $status and printed \"$output\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# The issue has a branch in this repository, one that was deleted, whose ref is null, and one in a fork. It has an open
+# pull request from a branch of this repository, one from a fork, and one in another repository, whose base is there.
+cat >"$base/linked.json" <<'ANSWER'
+{
+  "data": {
+    "repository": {
+      "nameWithOwner": "owner/repo",
+      "issueOrPullRequest": {
+        "linkedBranches": {
+          "nodes": [
+            { "ref": { "name": "12-skip-imported-rows", "repository": { "nameWithOwner": "owner/repo" } } },
+            { "ref": null },
+            { "ref": { "name": "12-in-a-fork", "repository": { "nameWithOwner": "someone/repo" } } }
+          ]
+        },
+        "closedByPullRequestsReferences": {
+          "nodes": [
+            {
+              "headRefName": "12-skip-the-imported-expenses",
+              "isCrossRepository": false,
+              "repository": { "nameWithOwner": "owner/repo" }
+            },
+            { "headRefName": "12-from-a-fork", "isCrossRepository": true, "repository": { "nameWithOwner": "owner/repo" } },
+            {
+              "headRefName": "12-elsewhere",
+              "isCrossRepository": false,
+              "repository": { "nameWithOwner": "owner/other" }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+ANSWER
+expect_branches "When the issue has branches and pull requests in this repository and in others" 12 "$base/linked.json" \
+  0 $'12-skip-imported-rows\n12-skip-the-imported-expenses'
+
+# GitHub moved the link from the branch to the pull request from it, so the issue links to no branch.
+cat >"$base/pull-request.json" <<'ANSWER'
+{
+  "data": {
+    "repository": {
+      "nameWithOwner": "owner/repo",
+      "issueOrPullRequest": {
+        "linkedBranches": { "nodes": [] },
+        "closedByPullRequestsReferences": {
+          "nodes": [
+            { "headRefName": "17-export-the-totals", "isCrossRepository": false, "repository": { "nameWithOwner": "owner/repo" } }
+          ]
+        }
+      }
+    }
+  }
+}
+ANSWER
+expect_branches "When a pull request from the issue's branch is open" 17 "$base/pull-request.json" 0 17-export-the-totals
+
+cat >"$base/none.json" <<'ANSWER'
+{
+  "data": {
+    "repository": {
+      "nameWithOwner": "owner/repo",
+      "issueOrPullRequest": { "linkedBranches": { "nodes": [] }, "closedByPullRequestsReferences": { "nodes": [] } }
+    }
+  }
+}
+ANSWER
+expect_branches "When the issue has no branch and no pull request" 13 "$base/none.json" 0 ""
+
+echo '{"data":{"repository":{"nameWithOwner":"owner/repo","issueOrPullRequest":{}}}}' >"$base/pull-request-number.json"
+expect_branches "When the number is a pull request's" 14 "$base/pull-request-number.json" 0 ""
+
+expect_branches "When gh fails" 12 fail 1 "error connecting to api.github.com"
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/issue-branches.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/issue-branches.test passed. Cases: $case_count."

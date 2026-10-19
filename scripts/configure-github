@@ -86,18 +86,13 @@ echo "Releases: a published release can't be changed"
 gh api --method PUT "repos/$repo/immutable-releases" --silent
 
 # A job that publishes a package or deploys the project runs in this environment, as docs/releasing.md describes.
-# Its secrets reach only jobs that a release tag starts. An agent publishes releases under the maintainer's
-# account, so "Prevent self-reviews" stays off, or the maintainer couldn't approve the run.
-echo "Release environment: only release tags can use it, and each run waits for approval"
-# Keep the reviewers that are already there, and add whoever runs this script. GitHub allows 6.
-me=$(gh api user --jq .id)
-reviewers=$(gh api "repos/$repo/environments?per_page=100" --jq "[.environments[] | select(.name == \"release\")
-  | .protection_rules[] | select(.type == \"required_reviewers\") | .reviewers[] | {type, id: .reviewer.id}]
-  | if any(.[]; .type == \"User\" and .id == $me) or length >= 6 then . else . + [{type: \"User\", id: $me}] end")
-gh api --method PUT "repos/$repo/environments/release" --silent --input - <<JSON
+# Its secrets reach only jobs that a release tag starts. The loop publishes a release when a goal is done, often while
+# the maintainer is away, so a job starts without waiting for anyone to approve it. A request that leaves reviewers out
+# keeps the environment's reviewers, so the request sets them to null, which removes them all.
+echo "Release environment: only release tags can use it, and its jobs start without waiting for approval"
+gh api --method PUT "repos/$repo/environments/release" --silent --input - <<'JSON'
 {
-  "prevent_self_review": false,
-  "reviewers": $reviewers,
+  "reviewers": null,
   "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}
 }
 JSON

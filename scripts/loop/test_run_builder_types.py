@@ -211,7 +211,8 @@ class AgentLinesTest(RunBuilderTest):
         self.assert_run_usage(end)
         [[began, ended]] = end.pop("periods")
         minutes = (dt.datetime.fromisoformat(ended) - dt.datetime.fromisoformat(began)).total_seconds() / 60
-        self.assertEqual(end.pop("minutes"), round(minutes, 1))
+        # The minutes are exact to a tenth, and the periods are to the second, so the two can round apart.
+        self.assertAlmostEqual(end.pop("minutes"), minutes, delta=0.05 + 1 / 60)
         self.assertGreaterEqual(end.pop("worktree_mb"), 0)
         self.assertEqual(
             end,
@@ -234,7 +235,7 @@ class AgentLinesTest(RunBuilderTest):
         self.assertIsNone(self.agent_lines()[1]["pull_request"])
 
     def test_ends_a_run_that_failed_before_it_had_a_worktree(self) -> None:
-        self.answer("gh", "issue develop --list", {"stdout": ""})
+        self.answer("gh", "api graphql", {"stdout": ""})
         self.answer("gh", "issue develop", {})
         status, _, _ = self.run_builder("--tool", "claude")
         self.assertEqual(status, 1)

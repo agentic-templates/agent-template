@@ -153,17 +153,6 @@ runs_configure_github() {
   is_configure_github "$script_word"
 }
 
-# Succeeds if the action comes from the orchestrator's session, and not from a subagent of it, such as a builder,
-# whose input has the session's id too.
-is_orchestrator() {
-  local loop
-  if [[ -n $agent_id ]]; then
-    return 1
-  fi
-  loop=$(hook_loop_folder 2>/dev/null) || return 1
-  is_orchestrators_session "$loop" "$session_id"
-}
-
 # Adds 1 to other_commands for a simple command other than a cd without redirections, because a redirection can write
 # a file, also on a cd: count_other_command <word>...
 count_other_command() {
@@ -202,6 +191,14 @@ scripts_and_gitignore_on_github() {
     (first(.tree[] | select(.path == ".gitignore") | "\(.mode) \(.sha)") // "")' <<<"$answer" 2>/dev/null
 }
 
+# Runs git on the files of a checkout, with paths relative to it: git_in_checkout <checkout> <argument>...
+# GIT_DIR and GIT_WORK_TREE name the checkout, because they override core.worktree, which the shared git folder's
+# config, or the checkout's config.worktree, can set to another folder, whose untracked files git would list instead.
+# GIT_DIR can name a .git file, as in the checkout of a submodule.
+git_in_checkout() {
+  GIT_DIR=$1/.git GIT_WORK_TREE=$1 git -C "$1" "${@:2}"
+}
+
 # Prints an entry for git update-index -z --index-info for each path that standard input lists, separated by NUL
 # characters, as the path is on disk in a checkout: disk_entries <checkout>
 # It hashes the bytes on disk and takes the mode from the disk, because git add would follow settings in the shared git
@@ -215,7 +212,7 @@ disk_entries() {
   while IFS= read -r -d '' path; do
     if [[ -L $1/$path ]]; then
       target=$(readlink "$1/$path") || return 1
-      blob=$(printf '%s' "$target" | git -C "$1" hash-object -w --stdin 2>/dev/null) || return 1
+      blob=$(printf '%s' "$target" | git_in_checkout "$1" hash-object -w --stdin 2>/dev/null) || return 1
       printf '120000 %s\t%s\0' "$blob" "$path"
     elif [[ -f $1/$path ]]; then
       files+=("$path")
@@ -232,7 +229,7 @@ disk_entries() {
     return 0
   fi
   # One git hash-object for all the files takes 0.01 seconds for the 165 files in scripts, and one for each file 0.8.
-  blobs=$(git -C "$1" hash-object -w --no-filters -- "${files[@]}" 2>/dev/null) || return 1
+  blobs=$(git_in_checkout "$1" hash-object -w --no-filters -- "${files[@]}" 2>/dev/null) || return 1
   while IFS= read -r blob; do
     printf '%s %s\t%s\0' "${modes[i]}" "$blob" "${files[i]}"
     i=$((i + 1))
@@ -248,14 +245,15 @@ disk_entries() {
 scripts_tree_on_disk() {
   local folder status=0
   folder=$(mktemp -d) || return 1
-  if ! GIT_INDEX_FILE=$folder/head-index git -C "$1" read-tree HEAD 2>/dev/null ||
-    ! GIT_INDEX_FILE=$folder/head-index git -C "$1" ls-files -z --cached --others --exclude-per-directory=.gitignore \
-      -- scripts >"$folder/paths" 2>/dev/null ||
-    ! GIT_INDEX_FILE=$folder/head-index git -C "$1" ls-files -z --others -- ':(glob)scripts/**/.gitignore' \
+  if ! GIT_INDEX_FILE=$folder/head-index git_in_checkout "$1" read-tree HEAD 2>/dev/null ||
+    ! GIT_INDEX_FILE=$folder/head-index git_in_checkout "$1" ls-files -z --cached --others \
+      --exclude-per-directory=.gitignore -- scripts >"$folder/paths" 2>/dev/null ||
+    ! GIT_INDEX_FILE=$folder/head-index git_in_checkout "$1" ls-files -z --others -- ':(glob)scripts/**/.gitignore' \
       >>"$folder/paths" 2>/dev/null ||
     ! disk_entries "$1" <"$folder/paths" >"$folder/entries" ||
-    ! GIT_INDEX_FILE=$folder/disk-index git -C "$1" update-index -z --index-info <"$folder/entries" 2>/dev/null ||
-    ! GIT_INDEX_FILE=$folder/disk-index git -C "$1" write-tree --prefix=scripts/ 2>/dev/null; then
+    ! GIT_INDEX_FILE=$folder/disk-index git_in_checkout "$1" update-index -z --index-info \
+      <"$folder/entries" 2>/dev/null ||
+    ! GIT_INDEX_FILE=$folder/disk-index git_in_checkout "$1" write-tree --prefix=scripts/ 2>/dev/null; then
     status=1
   fi
   rm -rf "$folder"

@@ -150,6 +150,20 @@ expect_block Bash "gh pr close -R jtmpl/other 5 -c '$semicolon_line'" \
 # The -c of gh pr review takes no value.
 expect_block Bash "gh pr review 5 -c -b '$semicolon_line'" "$(blocked "gh pr review" "$(semicolon "The line \"$semicolon_line\"")")"
 
+# Text written right after a short flag, with or without =, as gh reads it, gives the same message as after the long
+# flag.
+home_path_message=$(blocked "gh issue comment" "$(home_path "The line \"$home_path_line\"" "/Users/$person/")")
+for template in "gh issue comment 7 --body TEXT" "gh issue comment 7 -bTEXT" "gh issue comment 7 -b=TEXT"; do
+  expect_block Bash "$(with_text "$template" "$change_body"$'\n'"$home_path_line")" "$home_path_message"
+done
+printf '%s\n' "$change_body" "$home_path_line" >"$test_cwd/comment.md"
+for command in "gh issue comment 7 --body-file comment.md" "gh issue comment 7 -Fcomment.md" "gh issue comment 7 -F=comment.md"; do
+  expect_block Bash "$command" "$home_path_message"
+done
+expect_block Bash "gh issue edit 7 -t'Read /Users/$person/bank.csv'" \
+  "$(blocked "gh issue edit" "$(home_path "The title \"Read /Users/$person/bank.csv\"" "/Users/$person/")")"
+expect_block Bash "gh pr reopen 5 -c'$semicolon_line'" "$(blocked "gh pr reopen" "$(semicolon "The line \"$semicolon_line\"")")"
+
 # Text that the hook reads as the command writes it, without filling in variables
 may_expand="This hook reads the text as the command writes it, without running \$( ) or filling in variables."
 # shellcheck disable=SC2016 # The commands are the text that the agent sends, so $ stays as written.

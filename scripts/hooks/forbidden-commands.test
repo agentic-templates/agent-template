@@ -221,6 +221,85 @@ git -C "$other" symbolic-ref HEAD "refs/heads/$dependabot_branch"
 expect_block Bash 'git -C ../other push' "$to_dependabot"
 expect_allow Bash 'git push'
 
+# Publishing a release or putting a version tag on GitHub. The orchestrator's session is the one that the state file
+# names. A builder runs as a subagent of that session, with an agent id of its own, or in a session of its own. The
+# project has the version tag v1.0.0, another tag, and a branch whose name starts with v.
+orchestrator=11111111-aaaa-4bbb-8ccc-000000000001
+mkdir -p "$LOOP_DIR"
+printf '%s\n' "session: $orchestrator" "goal: the release" >"$LOOP_DIR/state.md"
+git -C "$test_cwd" -c user.name=Tester -c user.email=tester@example.com commit --quiet --allow-empty -m "chore: start"
+git -C "$test_cwd" tag v1.0.0
+git -C "$test_cwd" tag notes-draft
+git -C "$test_cwd" branch validate-input
+publishes_release="Blocked: only the orchestrator publishes a release or a version tag, because it releases a commit that it checked on main, as \"Publish a release\" in docs/releasing.md describes. Go on with the other work, and list the command in your report."
+releases=(
+  'gh release create v1.0.0'
+  'gh release create v1.0.0 --target 0123abc --generate-notes'
+  'gh release new v1.0.0'
+  'gh release create v1.0.0 --draft'
+  'gh release edit v1.0.0 --draft=false'
+  'gh release edit --draft=0 v1.0.0'
+  'gh release edit v1.0.0 --notes Fixed --draft=False'
+  'git push origin v1.0.0'
+  'git push origin tag v1.0.0'
+  'git push origin refs/tags/v1.0.0'
+  'git push --force origin +v1.0.0'
+  'git push origin v1.0.0:v1.0.0'
+  'git push origin HEAD:refs/tags/v1.0.0'
+  'git push --force origin HEAD:v1.0.0'
+  'git push origin +validate-input:v1.0.0'
+  'git push origin --delete v1.0.0'
+  'git push origin :refs/tags/v1.0.0'
+  'git tag v2.0.0 && git push origin v2.0.0'
+  'git -C ../other push origin v1.0.0'
+  "git push origin 'refs/tags/*'"
+  "git push origin 'refs/*:refs/*'"
+  'git push --tags'
+  'git push origin --tag'
+  'git push --follow-tags origin HEAD'
+  'git push --mirror origin'
+  'gh api -X POST repos/{owner}/{repo}/releases -f tag_name=v1.0.0'
+  'gh api repos/{owner}/{repo}/releases --input release.json'
+  'gh api --method PATCH repos/{owner}/{repo}/releases/123 -F draft=false'
+  'gh api repos/{owner}/{repo}/git/refs -f ref=refs/tags/v1.0.0 -f sha=0123abc'
+  'gh api -X PATCH repos/{owner}/{repo}/git/refs/tags/v1.0.0 -f sha=0123abc -F force=true'
+  'gh api graphql -f query="mutation { createRef(input: {repositoryId: \"R_1\", name: \"refs/tags/v1.0.0\", oid: \"0123abc\"}) { clientMutationId } }"'
+)
+for command in "${releases[@]}"; do
+  expect_from abc123 "" "$command" 2 "$publishes_release"
+  expect_from "$orchestrator" agent-7 "$command" 2 "$publishes_release"
+  expect_from "$orchestrator" "" "$command" 0 ""
+done
+expect_repository_flags 2 "$publishes_release" release create 'v1.0.0'
+expect_repository_flags 2 "$publishes_release" release edit 'v1.0.0 --draft=false'
+not_releases=(
+  'git push'
+  'git push -u origin HEAD'
+  'git push origin 383-block-commands'
+  'git push origin validate-input'
+  'git push origin HEAD:v2-notes'
+  'git push origin notes-draft'
+  'git push origin refs/tags/notes-draft'
+  "git push origin 'refs/heads/*'"
+  'git push --no-tags --all origin'
+  'git tag v2.0.0'
+  'gh release list'
+  'gh release view v1.0.0'
+  'gh release create --help'
+  'gh release edit v1.0.0 --notes "Fixed the date"'
+  'gh release edit v1.0.0 --draft'
+  'gh release edit v1.0.0 --draft=true'
+  'gh release upload v1.0.0 app.tar'
+  'gh api repos/{owner}/{repo}/releases'
+  'gh api -X POST repos/{owner}/{repo}/releases/generate-notes -f tag_name=v1.0.0'
+  'gh api repos/{owner}/{repo}/git/refs/tags/v1.0.0'
+  'gh api repos/{owner}/{repo}/git/refs -f ref=refs/heads/fix-12 -f sha=0123abc'
+  'gh api graphql -f query="{ repository(owner: \"jtmpl\", name: \"project\") { ref(qualifiedName: \"refs/tags/v1.0.0\") { name } } }"'
+)
+for command in "${not_releases[@]}"; do
+  expect_from abc123 "" "$command" 0 ""
+done
+
 # Deleting a pull request's branch with gh pr close
 TEST_AUTHOR=person
 delete_branch="Blocked: gh pr close with --delete-branch or -d deletes the pull request's branch, and the next agent that works on its issue starts from that branch. Close the pull request without that flag."
@@ -346,7 +425,8 @@ for command in 'echo "$(' 'echo "$(printf ok' 'echo "`printf ok' $'cat <<EOF\n$(
 done
 
 # Incomplete commands start no subcommand check, and each check itself exits cleanly.
-for command in '' 'gh' 'gh pr' 'gh pr --repo' 'gh pr --repo create' 'gh pr -R create' 'gh pr --repo=jtmpl/other'; do
+for command in '' 'gh' 'gh pr' 'gh pr --repo' 'gh pr --repo create' 'gh pr -R create' 'gh pr --repo=jtmpl/other' \
+  'gh release' 'gh release edit' 'gh release -R edit' 'git push origin tag'; do
   expect_allow Bash "$command"
   for check in forbidden-commands maintainer-commands maintainer-only issues-and-labels posted-text pull-request-rules \
     unchecked-pull-requests unread-pages; do

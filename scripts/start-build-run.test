@@ -22,7 +22,8 @@ mkdir "$base/bin"
 #   TEST_READY_ISSUES.
 # - For scripts/pull-request-state, it gives issue 12 a pull request with auto-merge on, 13 a draft, 14 one that's
 #   neither, 15 none and 16 two that are neither. It fails for issue 17.
-# - It lists each issue's branches from the lines of TEST_ISSUE_BRANCHES, which hold an issue and a branch, and says
+# - For the GraphQL query for an issue's branches in scripts/issue-branches, it prints the issue's branches from the
+#   lines of TEST_ISSUE_BRANCHES, which hold an issue and a branch, as the query's --jq filter prints them. It says
 #   that each branch has an open pull request, so that scripts/clear-worktrees pushes nothing.
 # - It writes each gh issue edit command to TEST_GH_CALLS, one to a line, and fails the one that
 #   matches TEST_FAILING_CALL.
@@ -54,10 +55,15 @@ case $* in
     ;;
   "pr list --head "*" --state open --json number --jq length") answer 1 ;;
 esac
-if [[ $1 == issue && $2 == develop && $3 == --list && $# == 4 ]]; then
+if [[ $1 == api && $2 == graphql && $* == *"linkedBranches("* ]]; then
+  for argument in "$@"; do
+    if [[ $argument == number=* ]]; then
+      number=${argument#number=}
+    fi
+  done
   while read -r issue branch; do
-    if [[ $issue == "$4" ]]; then
-      printf '%s\thttps://github.com/owner/repo/tree/%s\n' "$branch" "$branch"
+    if [[ $issue == "$number" ]]; then
+      echo "$branch"
     fi
   done <<<"$TEST_ISSUE_BRANCHES"
   exit 0
@@ -94,7 +100,7 @@ new_repository() {
   repo=$(mktemp -d "$base/repo.XXXXXX")
   git init --quiet --initial-branch=main "$repo"
   mkdir "$repo/scripts"
-  for script in start-build-run pull-request-state clear-worktrees secret-file-names; do
+  for script in start-build-run pull-request-state clear-worktrees secret-file-names issue-branches; do
     cp "scripts/$script" "$repo/scripts/$script"
   done
   git -C "$repo" add --all
