@@ -26,10 +26,10 @@ prints_token="Blocked: this command prints the token that gh uses, and AGENTS.md
 
 # gh --version takes about 54 ms of CPU, the largest part of the hook's call for a gh command, as issue #116 measured.
 # So the check records the gh that it found and the first line of what its gh --version printed, and runs
-# gh --version again only when it finds another gh, such as after an update. The record is gh-version in the loop's
-# folder, or the file that HOOK_GH_VERSION_FILE names, as in the hooks' tests.
+# gh --version again only when it finds another gh, such as after an update.
 
-# Prints the record's path, or fails when the check can't find the loop's folder.
+# Prints the record's path, or fails when the check can't find the loop's folder. HOOK_GH_VERSION_FILE names another
+# file, as in the hooks' tests.
 gh_version_record() {
   local loop
   if [[ -n ${HOOK_GH_VERSION_FILE:-} ]]; then
@@ -40,14 +40,33 @@ gh_version_record() {
   printf '%s\n' "$loop/gh-version"
 }
 
-# Prints what tells one gh apart from another: the inode and the modification time of the file that the shell finds
-# for gh, and its path. An update either writes a new file, which has another inode, or rewrites the old one, which
-# changes its time.
+# Succeeds if the file that the shell finds for gh is the gh program, and not a version manager's shim. A shim runs
+# the gh that the project's settings pick, so its version can change while the shim stays the same. A shim is a link
+# to the version manager, as mise's are, a script, as asdf's are, or a program in a folder named shims:
+# is_gh_program <path where the shell finds gh> <the file that the path resolves to>
+is_gh_program() {
+  local start
+  if [[ ${1%/*} == */shims || ${2##*/} != gh ]]; then
+    return 1
+  fi
+  { IFS= read -r -n 2 start; } 2>/dev/null <"$2" || return 1
+  [[ $start != "#!" ]]
+}
+
+# Prints what tells one gh program apart from another: the inode and the modification time of its file, and the path
+# where the shell finds it. An update either writes a new file, which has another inode, or rewrites the old one, which
+# changes its time. Fails for a version manager's shim.
 gh_identity() {
-  local path file
+  local path program file
   path=$(command -v gh) || return 1
+  program=$path
+  if [[ -L $path ]]; then
+    # On macOS before 12.3, readlink has no -f, and the check runs gh --version for each gh command.
+    program=$(readlink -f "$path") || return 1
+  fi
+  is_gh_program "$path" "$program" || return 1
   # GNU stat takes -c, and the stat of macOS and BSD takes -f.
-  file=$(stat -L -c '%i %Y' "$path" 2>/dev/null || stat -L -f '%i %m' "$path" 2>/dev/null) || return 1
+  file=$(stat -c '%i %Y' "$program" 2>/dev/null || stat -f '%i %m' "$program" 2>/dev/null) || return 1
   printf '%s %s\n' "$file" "$path"
 }
 
@@ -66,7 +85,7 @@ recorded_gh_version() {
 # Prints the first line of what gh --version prints, such as "gh version 2.98.0 (2026-08-20)", or fails when
 # gh --version fails.
 gh_version() {
-  local record identity output version
+  local record identity identity_after output version
   record=$(gh_version_record) || record=""
   identity=$(gh_identity) || identity=""
   if [[ -n $record && -n $identity ]] && recorded_gh_version "$record" "$identity"; then
@@ -74,8 +93,11 @@ gh_version() {
   fi
   output=$(gh --version 2>/dev/null) || return 1
   version=${output%%$'\n'*}
-  # A record that can't be written only makes the next gh command run gh --version again.
-  if [[ -n $record && -n $identity ]]; then
+  # When gh changes while gh --version runs, as when an update ends, the version can be either gh's, so the check
+  # records it only when gh stayed the same. A record that can't be written only makes the next gh command run
+  # gh --version again.
+  identity_after=$(gh_identity) || identity_after=""
+  if [[ -n $record && -n $identity && $identity_after == "$identity" ]]; then
     { mkdir -p "${record%/*}" && printf '%s\n%s\n' "$identity" "$version" >"$record"; } 2>/dev/null || true
   fi
   printf '%s\n' "$version"

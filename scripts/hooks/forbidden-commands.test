@@ -17,7 +17,10 @@ git init --quiet "$other"
 cd "$test_cwd"
 
 # A stand-in for gh, first on the PATH, so that the cases ask nothing of GitHub. It records each call in TEST_GH_CALLS.
-# - gh --version reports the version in TEST_GH_VERSION, or fails if that says fail.
+# It has no #! line, so that the check takes it for the gh program rather than for a script that runs another gh. bash
+# runs a file without one as a bash script.
+# - gh --version reports the version in TEST_GH_VERSION, or fails if that says fail. If TEST_GH_UPDATE_TO names a
+#   file, it first points the link that it ran from at that file, as an update that ends while gh --version runs.
 # - gh pr view about pull request 7, or the current branch's, reports the author in TEST_AUTHOR: dependabot, person
 #   or fail.
 # - gh issue view about issue 12 reports the labels in TEST_LABELS, separated by spaces, or fails if that says fail.
@@ -25,8 +28,10 @@ cd "$test_cwd"
 stand_in=$base/bin
 mkdir -p "$stand_in"
 cat >"$stand_in/gh" <<'STAND_IN'
-#!/usr/bin/env bash
 printf '%s\n' "$*" >>"$TEST_GH_CALLS"
+if [[ $1 == --version && -n ${TEST_GH_UPDATE_TO:-} ]]; then
+  ln -sf "$TEST_GH_UPDATE_TO" "$0"
+fi
 if [[ $1 == --version && $TEST_GH_VERSION != fail ]]; then
   echo "gh version $TEST_GH_VERSION (2026-08-20)"
   echo "https://github.com/cli/cli/releases/tag/v$TEST_GH_VERSION"
@@ -114,7 +119,42 @@ record=$(<"$LOOP_DIR/gh-version")
 printf '%s' "${record%8.0 *}" >"$LOOP_DIR/gh-version"
 expect_version_run "With an incomplete record" 0 "" yes
 expect_version_run "With the record complete again" 0 "" no
+# A version manager's shim runs the gh that the project's settings pick, so the version changes while the shim stays
+# the same. Such a shim is a link to the version manager, as mise's are, a script, as asdf's are, or a program in a
+# folder named shims.
+mkdir -p "$base/mise/bin" "$base/linked-shim" "$base/script-shim" "$base/manager/shims"
+cp "$stand_in/gh" "$base/mise/bin/mise"
+ln -s "$base/mise/bin/mise" "$base/linked-shim/gh"
+{
+  echo '#!/usr/bin/env bash'
+  cat "$stand_in/gh"
+} >"$base/script-shim/gh"
+chmod +x "$base/script-shim/gh"
+cp "$stand_in/gh" "$base/manager/shims/gh"
+for shim in linked-shim script-shim manager/shims; do
+  PATH=$base/$shim:$PATH
+  TEST_GH_VERSION=2.98.0
+  expect_version_run "With the gh in $shim" 0 "" yes
+  TEST_GH_VERSION=2.90.0
+  expect_version_run "After the gh in $shim picks an older gh" 2 "${old_gh/2.97.0/2.90.0}" yes
+  PATH=${PATH#"$base/$shim:"}
+done
+# After an update that ends while gh --version runs, the version can be either gh's.
+mkdir -p "$base/cellar/2.97.0" "$base/cellar/2.98.0" "$base/linked-bin"
+cp "$stand_in/gh" "$base/cellar/2.97.0/gh"
+cp "$stand_in/gh" "$base/cellar/2.98.0/gh"
+ln -s "$base/cellar/2.97.0/gh" "$base/linked-bin/gh"
+PATH=$base/linked-bin:$PATH
+export TEST_GH_UPDATE_TO=$base/cellar/2.98.0/gh
+TEST_GH_VERSION=2.98.0
+expect_version_run "With an update that ends while gh --version runs" 0 "" yes
+unset TEST_GH_UPDATE_TO
+ln -sf "$base/cellar/2.97.0/gh" "$base/linked-bin/gh"
+TEST_GH_VERSION=2.97.0
+expect_version_run "With the gh from before that update again" 2 "$old_gh" yes
+PATH=${PATH#"$base/linked-bin:"}
 export HOOK_GH_VERSION_FILE=/dev/null
+TEST_GH_VERSION=2.98.0
 
 # Approving a workflow run
 approval="Blocked: a maintainer decides whether to approve a workflow run, because the run executes the code of a pull request from outside the project. Go on with the other work, and list the run in your report for the maintainer."
