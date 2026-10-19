@@ -41,6 +41,8 @@ strict = true
 warn_unreachable = true
 enable_error_code = ["ignore-without-code", "unused-awaitable"]
 mypy_path = "scripts/loop"
+# Without this, mypy gives each script without .py the module name __main__, and fails when one run checks two of them.
+scripts_are_modules = true
 
 [tool.coverage.run]
 branch = true
