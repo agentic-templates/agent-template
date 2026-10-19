@@ -67,13 +67,14 @@ env_option() {
 environment="Blocked: this command prints the whole environment, which holds tokens. Print only the variables you need, by name, as in printenv PATH. To list the variables' names without their values, run $list_names."
 no_verify="Blocked: --no-verify skips the pre-push hook, which scans the push for leaks. Push without it. If the scan finds a leak, take it out of the commits."
 # The messages that block a push whose git hooks aren't the repository's: other_hooks <folder that git names>,
-# unknown_hooks <git's error>, and unknown_push_folder
+# unknown_hooks <git's error> [<what to do, when git can't change to a folder>], and unknown_push_folder
 other_hooks() {
   echo "Blocked: this push would run the git hooks in $1, not the ones in scripts/git-hooks of the repository's main checkout or of one of its worktrees, so the pre-push hook wouldn't scan the push for leaks. If the repository's core.hooksPath names another folder, or none, run scripts/install-git-hooks. Push from the main checkout or a worktree, without setting core.hooksPath for the push."
 }
 unknown_hooks() {
-  echo "Blocked: the hook can't tell which git hooks this push would run, so it can't check that the pre-push hook scans the push for leaks. git fails with the push's options and the variables before git, as the command writes them: $1. Fix what git says. The hook doesn't fill in variables or run \$( ), so write those words out in full."
+  echo "Blocked: the hook can't tell which git hooks this push would run, so it can't check that the pre-push hook scans the push for leaks. git fails with the push's options and the variables before git, as the command writes them: $1. ${2:-Fix what git says.} The hook fills in only HOME, in folders and in the variables before git, and runs no \$( ), so write any other variable or \$( ) in those words out in full."
 }
+new_folder="The hook asks git before any part of the command runs, so if the command creates that folder, push in a command of its own after it."
 unknown_push_folder="Blocked: the hook can't tell which folder this push runs in, so it can't check that the pre-push hook scans the push for leaks. Push in a folder that exists, and name it without variables or \$( ), as in git -C <folder> push."
 # Prints git's error, on one line, when it reads the project with options before its subcommand, because its words
 # differ between versions of git: git_error <option>...
@@ -335,9 +336,13 @@ test_cwd=$project
 expect_allow Bash "git -C $builder_worktree push"
 # When git fails, the hook can't tell which hooks the push would run. It gives git the words as the command writes
 # them, and passes on only the variables that say where the repository and its settings are.
-expect_block Bash 'git -C missing push' "$(unknown_hooks "fatal: cannot change to 'missing': No such file or directory")"
+expect_block Bash 'git -C missing push' \
+  "$(unknown_hooks "fatal: cannot change to 'missing': No such file or directory" "$new_folder")"
+expect_block Bash 'git worktree add ../wt && git -C ../wt push' \
+  "$(unknown_hooks "fatal: cannot change to '../wt': No such file or directory" "$new_folder")"
 # shellcheck disable=SC2016 # The commands are the text that the agent sends, so the variables stay as written.
-expect_block Bash 'git -C "$folder" push' "$(unknown_hooks "fatal: cannot change to '\$folder': No such file or directory")"
+expect_block Bash 'git -C "$folder" push' \
+  "$(unknown_hooks "fatal: cannot change to '\$folder': No such file or directory" "$new_folder")"
 expect_block Bash "cd $elsewhere && git push" "$(unknown_hooks "$(git_error -C "$elsewhere")")"
 expect_block Bash 'git -c core.hookspath push' "$(unknown_hooks "$(git_error -c core.hookspath)")"
 expect_block Bash 'git --config-env core.hooksPath=HOOKS push' \
@@ -348,6 +353,35 @@ expect_block Bash "HOOKS=$hooks_elsewhere git --config-env=core.hooksPath=HOOKS 
 expect_block Bash 'git -c core.hooksPath=$HOOKS push' "$(other_hooks "$project/\$HOOKS")"
 # shellcheck disable=SC2016
 expect_block Bash 'cd "$folder" && git push' "$unknown_push_folder"
+# The hook fills in HOME in the folders and the variables before git, as the shell does: ~ at the start of a word or
+# after NAME=, and $HOME and ${HOME}. The shell leaves ~ after the = of an option as it is.
+test_home=$base
+expect_allow Bash 'git -C ~/project push'
+# shellcheck disable=SC2016
+expect_allow Bash 'git -C "$HOME/project" push'
+# shellcheck disable=SC2016
+expect_allow Bash 'git --work-tree ~/project --git-dir "${HOME}/project/.git" push'
+# shellcheck disable=SC2016
+expect_allow Bash 'git --git-dir=$HOME/project/.git push'
+expect_allow Bash 'GIT_DIR=~/project/.git git push'
+expect_allow Bash 'env GIT_DIR=~/project/.git git push'
+# shellcheck disable=SC2016
+expect_block Bash 'git -C ~/elsewhere --git-dir=$HOME/project/.git push' "$(other_hooks "$elsewhere/scripts/git-hooks")"
+# shellcheck disable=SC2088
+expect_block Bash 'git --git-dir=~/project/.git push' "$(unknown_hooks "$(git_error '--git-dir=~/project/.git')")"
+test_home=/home-for-tests/someone
+# A config file that the command names can't make the hook's git write trace output, to a file that the config chooses.
+trace=$base/trace
+printf '[trace2]\n\tnormalTarget = %s\n\teventTarget = %s\n\tperfTarget = %s\n' "$trace-normal" "$trace-event" \
+  "$trace-perf" >"$base/trace.gitconfig"
+expect_allow Bash "GIT_CONFIG_GLOBAL=$base/trace.gitconfig git push"
+for file in "$trace-normal" "$trace-event" "$trace-perf"; do
+  case_count=$((case_count + 1))
+  if [[ -e $file ]]; then
+    echo "error: For a push with GIT_CONFIG_GLOBAL=$base/trace.gitconfig, the hook's git must write no trace output, but it wrote $file." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+done
 
 # Merging without the checks, and changing the rules or the security settings
 expect_block Bash 'gh pr merge 5 --admin' "$admin_merge"

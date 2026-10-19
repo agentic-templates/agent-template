@@ -14,7 +14,8 @@
 #   gh repo deploy-key
 # - printing the whole environment with env or printenv, because it holds tokens
 # A path or a repository that a variable other than HOME decides goes ahead, because the hook can't tell it before the
-# command runs. A push goes ahead only when the hook can tell which git hooks it runs.
+# command runs. A push is blocked, though, when the hook can't tell the folder that it runs in, or when git fails on the
+# push's own words, because the hook can't ask git then which hooks the push would run.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 
@@ -377,15 +378,63 @@ check_delete() {
   done
 }
 
+# Sets filled_in to a word with HOME filled in, as expand_home reads it, or to the word as the command writes it when
+# expand_home can't read it: fill_in_home <word>
+fill_in_home() {
+  filled_in=$1
+  if expand_home "$1"; then
+    filled_in=$expanded_path
+  fi
+}
+
+# Adds one of git's options before the subcommand to the array git_options, with its value when that's the next word,
+# and sets option_words to the number of words that it took: add_git_option <option> <next word, or empty>
+# It fills in HOME in the folder of -C, --git-dir and --work-tree, where the shell would: ~ at the start of a word, and
+# $HOME and ${HOME}.
+add_git_option() {
+  local option=$1
+  option_words=1
+  case $option in
+    -C | --git-dir | --work-tree)
+      fill_in_home "$2"
+      git_options+=("$option" "$filled_in")
+      option_words=2
+      return 0
+      ;;
+    --git-dir=* | --work-tree=*)
+      # The shell fills in ~ only at the start of a word, so it leaves --git-dir=~/x as it is.
+      if [[ ${option#*=} != "~"* ]]; then
+        fill_in_home "${option#*=}"
+        option=${option%%=*}=$filled_in
+      fi
+      ;;
+  esac
+  git_options+=("$option")
+  if [[ $git_options_with_value == *" $option "* ]]; then
+    git_options+=("$2")
+    option_words=2
+  fi
+}
+
 # Runs git as the git command in command_words runs, in command_folder, with its options before the subcommand and the
-# variables in git_variables, but with other arguments. Run it in a subshell, because it exports the variables:
-# run_git_as_command <argument>...
+# variables in git_variables, but with other arguments. It fills in HOME where the shell would, in the folders, as
+# add_git_option does, and in the variables' values, where ~ after NAME= counts too. Run it in a subshell, because it
+# exports the variables: run_git_as_command <argument>...
 run_git_as_command() {
-  local assignment
+  local assignment i=1
   for assignment in ${git_variables[@]+"${git_variables[@]}"}; do
-    export "${assignment?}"
+    fill_in_home "${assignment#*=}"
+    export "${assignment%%=*}=$filled_in"
   done
-  git -C "$command_folder" "${command_words[@]:1:git_subcommand-1}" "$@"
+  git_options=()
+  while ((i < git_subcommand)); do
+    add_git_option "${command_words[i]}" "${command_words[i + 1]:-}"
+    i=$((i + option_words))
+  done
+  # A config file that the command names, such as one in GIT_CONFIG_GLOBAL, could otherwise turn on git's trace2 output,
+  # which git would write to a file that the config file chooses, even when the hook blocks the push.
+  export GIT_TRACE2=0 GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0
+  git -C "$command_folder" ${git_options[@]+"${git_options[@]}"} "$@"
 }
 
 # Prints what run_git_as_command prints with the arguments, or fails and prints git's error on one line:
@@ -403,16 +452,21 @@ ask_git_as_command() {
 
 # Blocks a push when git fails with its options and variables: block_unknown_hooks <git's error>
 block_unknown_hooks() {
-  block "Blocked: the hook can't tell which git hooks this push would run, so it can't check that the pre-push hook scans the push for leaks. git fails with the push's options and the variables before git, as the command writes them: $1. Fix what git says. The hook doesn't fill in variables or run \$( ), so write those words out in full."
+  local advice="Fix what git says."
+  if [[ $1 == "fatal: cannot change to "* ]]; then
+    advice="The hook asks git before any part of the command runs, so if the command creates that folder, push in a command of its own after it."
+  fi
+  block "Blocked: the hook can't tell which git hooks this push would run, so it can't check that the pre-push hook scans the push for leaks. git fails with the push's options and the variables before git, as the command writes them: $1. $advice The hook fills in only HOME, in folders and in the variables before git, and runs no \$( ), so write any other variable or \$( ) in those words out in full."
 }
 
 # Blocks a push that would run git hooks other than the ones in scripts/git-hooks of the main checkout or another
 # worktree of its repository, because only those scan the push for leaks. git takes the folder from core.hooksPath,
 # which the repository's config, an included file, -c, --config-env and the variables before git can set, or else uses
 # .git/hooks. A relative core.hooksPath starts from the folder that the push runs in, which -C, --git-dir and
-# --work-tree can move. So the hook asks git, with the push's options and variables as the command writes them. env's
-# -i and -u don't count, because they only take variables away, and of these variables the agent's environment usually
-# holds only HOME: check_push_hooks <the words before the command's name>...
+# --work-tree can move. So the hook asks git, with the push's options and variables as the command writes them, but
+# with HOME filled in, as run_git_as_command describes. It doesn't see the variables that an earlier part of the command
+# exports. env's -i and -u don't count either, because they only take variables away, and of these variables the
+# agent's environment usually holds only HOME: check_push_hooks <the words before the command's name>...
 check_push_hooks() {
   local word hooks worktrees physical_hooks line
   git_variables=()
