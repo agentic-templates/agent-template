@@ -79,7 +79,7 @@ block_if_main_lacks_checks() {
 #   and doesn't run it. -i doesn't turn it off for a script, although the manual of bash says that interactive shells
 #   ignore -n.
 read_shell_arguments() {
-  local i position word sign noexec_sign=""
+  local i word noexec_sign=""
   shell_operand="" shell_rcfile=""
   for ((i = 1; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
@@ -89,22 +89,7 @@ read_shell_arguments() {
         shell_rcfile=${command_words[i]:-}
         ;;
       --*) ;;
-      [-+]*)
-        sign=${word:0:1}
-        # In a word such as -xo, each o and O takes the next word as its value.
-        for ((position = 1; position < ${#word}; position++)); do
-          case ${word:position:1} in
-            n) noexec_sign=$sign ;;
-            o)
-              i=$((i + 1))
-              if [[ ${command_words[i]:-} == noexec ]]; then
-                noexec_sign=$sign
-              fi
-              ;;
-            O) i=$((i + 1)) ;;
-          esac
-        done
-        ;;
+      [-+]*) read_shell_flag_letters "$word" ;;
       *)
         shell_operand=$word
         break
@@ -117,29 +102,54 @@ read_shell_arguments() {
   fi
 }
 
+# Reads the word at index i of command_words for read_shell_arguments, when the word holds one-letter flags, such as
+# -xo or +n. It sets noexec_sign to the word's sign if the word turns -n or -o noexec on or off, and moves i past the
+# values of the flags: read_shell_flag_letters <word>
+read_shell_flag_letters() {
+  local sign=${1:0:1} position
+  # In a word such as -xo, each o and O takes the next word as its value.
+  for ((position = 1; position < ${#1}; position++)); do
+    case ${1:position:1} in
+      n) noexec_sign=$sign ;;
+      o)
+        i=$((i + 1))
+        if [[ ${command_words[i]:-} == noexec ]]; then
+          noexec_sign=$sign
+        fi
+        ;;
+      O) i=$((i + 1)) ;;
+    esac
+  done
+}
+
 # Succeeds if a word names scripts/configure-github: is_configure_github <word>
 is_configure_github() {
   [[ $1 == scripts/configure-github || $1 == */scripts/configure-github ]]
 }
 
-# Blocks a run of scripts/configure-github on a repository whose settings were applied before:
-# check_configure_github [<word that drop_command_prefixes dropped, such as GH_REPO=owner/name>]...
-check_configure_github() {
-  local word repository sets_gh_repo=false gh_repo="" program=${command_words[0]}
+# Succeeds if the command in command_words runs scripts/configure-github.
+runs_configure_github() {
+  local program=${command_words[0]}
   # bash or sh can run the script too.
   if [[ ${program##*/} == bash || ${program##*/} == sh ]]; then
     read_shell_arguments
     # An interactive shell runs the file that --rcfile or --init-file names, and the hook can't tell whether the
     # shell is interactive, such as when it reads a terminal. So that file counts as a run, whatever the other flags are.
     if is_configure_github "$shell_rcfile"; then
-      program=$shell_rcfile
-    elif $shell_only_reads; then
       return 0
-    else
-      program=$shell_operand
+    elif $shell_only_reads; then
+      return 1
     fi
+    program=$shell_operand
   fi
-  if ! is_configure_github "$program"; then
+  is_configure_github "$program"
+}
+
+# Blocks a run of scripts/configure-github on a repository whose settings were applied before:
+# check_configure_github [<word that drop_command_prefixes dropped, such as GH_REPO=owner/name>]...
+check_configure_github() {
+  local word repository sets_gh_repo=false gh_repo=""
+  if ! runs_configure_github; then
     return 0
   fi
   for word in "$@"; do
@@ -162,54 +172,23 @@ check_configure_github() {
 }
 
 check_gh_pr() {
-  local subcommand flags_with_value argument="" i word disables_auto_merge=""
-  local -a repository=() view=()
+  local subcommand
   if [[ ${command_words[0]##*/} != gh || ${command_words[1]:-} != pr ]]; then
     return 0
   fi
   subcommand=${command_words[2]:-}
   case $subcommand in
-    checkout | co) flags_with_value=$checkout_flags_with_value ;;
-    merge) flags_with_value=$merge_flags_with_value ;;
+    checkout | co) read_arguments 3 "$checkout_flags_with_value" ;;
+    merge) read_arguments 3 "$merge_flags_with_value" ;;
     *) return 0 ;;
   esac
-
-  # The pull request is the first word that isn't a flag or a flag's value.
-  for ((i = 3; i < ${#command_words[@]}; i++)); do
-    word=${command_words[i]}
-    case $word in
-      -R | --repo)
-        repository=(--repo "${command_words[i + 1]:-}")
-        i=$((i + 1))
-        ;;
-      --repo=*) repository=(--repo "${word#--repo=}") ;;
-      --disable-auto) disables_auto_merge=yes ;;
-      -*=*) ;;
-      -*)
-        if [[ $flags_with_value == *" $word "* ]]; then
-          i=$((i + 1))
-        fi
-        ;;
-      *)
-        if [[ -z $argument ]]; then
-          argument=$word
-        fi
-        ;;
-    esac
-  done
-
-  if [[ -n $argument ]]; then
-    view=("$argument")
-  elif [[ $subcommand != merge ]]; then
-    # Without a pull request, gh pr checkout asks the person to pick one.
+  # Without a pull request, gh pr checkout asks the person to pick one.
+  if [[ -z $argument && $subcommand != merge ]]; then
     return 0
   fi
-  if ((${#repository[@]} > 0)); then
-    view+=("${repository[@]}")
-  fi
-  if is_from_fork ${view[@]+"${view[@]}"}; then
+  if is_from_fork ${target[@]+"${target[@]}"}; then
     if [[ $subcommand != merge ]]; then
-      block_checkout "${view[@]}"
+      block_checkout "${target[@]}"
     elif [[ -n $argument ]]; then
       block "Blocked: pull request $argument comes from a fork, so a maintainer merges it. $report"
     else
@@ -217,7 +196,7 @@ check_gh_pr() {
     fi
   fi
   # Turning auto-merge off merges nothing.
-  if [[ $subcommand == merge && -z $disables_auto_merge ]]; then
+  if [[ $subcommand == merge ]] && ! has_flag --disable-auto; then
     block_if_main_lacks_checks ${repository[@]+"${repository[@]}"}
   fi
 }

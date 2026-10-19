@@ -344,14 +344,14 @@ pr_close_flags_with_value=" -c --comment -R --repo "
 
 # Reads the words of a gh command from an index on, and sets these variables:
 # - argument: the first word that isn't a flag or a flag's value, or empty
-# - target: the words that name the argument to other gh commands: the argument, and -R or --repo with its value
+# - repository: --repo and the value of -R or --repo, or empty
+# - target: the words that name the argument to other gh commands: the argument, and the words in repository
 # - flags: the flags, without their values
 # - flag_values: the value of each flag in flags that takes the next word as its value, or empty
 # read_arguments <index> <flags that take a value>
 read_arguments() {
   local i word
-  local -a repository=()
-  argument="" target=() flags=() flag_values=()
+  argument="" repository=() target=() flags=() flag_values=()
   for ((i = $1; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
     case $word in

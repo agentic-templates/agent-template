@@ -330,26 +330,34 @@ find_deletes() {
   return 1
 }
 
-# Blocks a command that deletes outside the repository's worktrees and the temporary folders.
-check_delete() {
-  local name=${command_words[0]##*/} i word path what
-  local -a targets=()
-  if is_deleting_command "$name"; then
+# Sets delete_targets to the words of the command in command_words that name what it deletes: the words other than
+# flags after rm and the like, and the folders that find starts from when it deletes what it finds:
+# read_delete_targets <the command's name>
+read_delete_targets() {
+  local i
+  delete_targets=()
+  if is_deleting_command "$1"; then
     for ((i = 1; i < ${#command_words[@]}; i++)); do
       if [[ ${command_words[i]} != -* ]]; then
-        targets+=("${command_words[i]}")
+        delete_targets+=("${command_words[i]}")
       fi
     done
-  elif [[ $name == find ]] && find_deletes; then
+  elif [[ $1 == find ]] && find_deletes; then
     # The folders that find starts from come before its first expression, which starts with -, ( or !.
     for ((i = 1; i < ${#command_words[@]}; i++)); do
       if [[ ${command_words[i]} == [-\(\!]* ]]; then
         break
       fi
-      targets+=("${command_words[i]}")
+      delete_targets+=("${command_words[i]}")
     done
   fi
-  for word in ${targets[@]+"${targets[@]}"}; do
+}
+
+# Blocks a command that deletes outside the repository's worktrees and the temporary folders.
+check_delete() {
+  local name=${command_words[0]##*/} word path what
+  read_delete_targets "$name"
+  for word in ${delete_targets[@]+"${delete_targets[@]}"}; do
     path=$(resolved_path "$word" "$command_folder") || continue
     if may_delete "$path" "$name"; then
       continue
