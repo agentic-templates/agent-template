@@ -2,7 +2,8 @@
 # Tests that .claude/settings.json and .codex/hooks.json run the hooks. Each file must be one JSON object, and one of
 # its PreToolUse commands, run as written, must block a command that reads .env. The hooks let an action through
 # when they fail on their own, so a broken file or command turns them off in every agent without an error.
-# Also tests that the commands in .claude/settings.json run the hooks of the git worktree that the agent works in.
+# Also tests that the commands in .claude/settings.json run the hooks of the git worktree that the agent works in,
+# and that the PreToolUse commands in both files run the main checkout's before-tool when the worktree's can't run.
 set -euo pipefail
 # shellcheck source=scripts/hooks/testing.bash
 source "${BASH_SOURCE[0]%/*}/testing.bash"
@@ -157,5 +158,94 @@ expect_hook PostToolUse claude-code "$other" "$repository"
 # A folder outside any repository, and a folder that doesn't exist
 expect_hook PreToolUse claude-code "$checkouts/plain" "$repository"
 expect_hook PreToolUse claude-code "$checkouts/missing" "$repository"
+
+# A before-tool that can't run. bash exits with code 2 when it can't parse a file, such as one with a conflict marker
+# that a merge left, and the tools read code 2 as a block. The stand-ins run stand-in checks in order, as before-tool
+# runs its checks, and the first check that blocks ends the hook.
+
+# Writes a stand-in before-tool into a checkout: write_hook <checkout> <check>...
+# The check env blocks cat .env with a reason that names the checkout, and the check conflict is a conflict marker.
+# The stand-in reads its input first, for the reason that the stand-ins above do.
+write_hook() {
+  local checkout=$1 hook=$1/scripts/hooks/before-tool check
+  shift
+  # shellcheck disable=SC2016 # $(cat) expands when the hook runs.
+  printf '%s\n' '#!/usr/bin/env bash' 'input=$(cat)' >"$hook"
+  for check in "$@"; do
+    case $check in
+      env) printf '%s\n' "case \$input in *'cat .env'*) echo \"Blocked by the hook in $checkout.\" >&2; exit 2 ;; esac" ;;
+      conflict) printf '%s\n' '<<<<<<< HEAD' 'exit 0' '=======' 'exit 2' '>>>>>>> other' ;;
+    esac
+  done >>"$hook"
+}
+
+# Prints the error that the stand-in before-tool of a checkout gives on an empty input: hook_error <checkout>
+hook_error() {
+  "$1/scripts/hooks/before-tool" </dev/null 2>&1 || true
+}
+
+# Checks what the PreToolUse command of a settings file tells the agent about a command:
+# expect_pre_tool_result <file> <tool> <checkout the agent works in> <command> <exit code> <message>
+# The message is the additional context that the command prints when it exits with code 0, or what it prints on
+# stderr when it exits with code 2. Claude Code runs the command in the main checkout and sends the folder the agent
+# works in, while Codex runs the command in that folder.
+expect_pre_tool_result() {
+  local file=$1 tool=$2 command_text=$4 expected_status=$5 expected_message=$6 folder=$repository command input
+  local status=0 output message
+  test_cwd=$3
+  if [[ $tool == codex ]]; then
+    folder=$test_cwd
+  fi
+  command=$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$file")
+  input=$(sample_input "$tool" Bash "$command_text")
+  case_count=$((case_count + 1))
+  output=$(cd "$folder" && HOME=$test_home sh -c "$command" <<<"$input" 2>"$copies/errors") || status=$?
+  message=$(<"$copies/errors")
+  if ((status == 0)); then
+    message=""
+    if [[ -n $output ]]; then
+      message=$(jq -r '.hookSpecificOutput | select(.hookEventName == "PreToolUse") | .additionalContext' \
+        <<<"$output" 2>/dev/null) || message=$output
+    fi
+  fi
+  if [[ $status != "$expected_status" || $message != "$expected_message" ]]; then
+    echo "error: In $tool, with the agent in $test_cwd, for \"$command_text\", the PreToolUse command in $file must exit with code $expected_status and tell \"$expected_message\", but it exited with code $status and told \"$message\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks the PreToolUse command of a settings file with each hook that can't run: check_broken_hooks <file> <tool>
+check_broken_hooks() {
+  local file=$1 tool=$2 error
+  local note="$worktree/scripts/hooks/before-tool can't run, so the main checkout's copy checked this action instead."
+
+  # A worktree whose hook has a syntax error. The main checkout's copy allows ls and blocks cat .env.
+  write_hook "$repository" env
+  write_hook "$worktree" conflict
+  error=$(hook_error "$worktree")
+  expect_pre_tool_result "$file" "$tool" "$worktree" ls 0 "$note Fix the file that this error names: $error"
+  expect_pre_tool_result "$file" "$tool" "$worktree" 'cat .env' 2 \
+    "$error"$'\n'"$note Fix the file that the error above names."$'\n'"Blocked by the hook in $repository."
+
+  # From here on, the main checkout's copy allows every action, so only the worktree's hook can block one.
+  # In a worktree whose hook has a working check before a check with a syntax error, a block from the working check
+  # stands.
+  write_hook "$repository"
+  write_hook "$worktree" env conflict
+  error=$(hook_error "$worktree")
+  expect_pre_tool_result "$file" "$tool" "$worktree" 'cat .env' 2 "Blocked by the hook in $worktree."
+  expect_pre_tool_result "$file" "$tool" "$worktree" ls 0 "$note Fix the file that this error names: $error"
+
+  # A worktree whose hook works
+  write_hook "$worktree" env
+  expect_pre_tool_result "$file" "$tool" "$worktree" 'cat .env' 2 "Blocked by the hook in $worktree."
+
+  # In the main checkout, no other copy can check the action, so the command blocks it.
+  write_hook "$repository" conflict
+  expect_pre_tool_result "$file" "$tool" "$repository" ls 2 "$(hook_error "$repository")"
+}
+
+check_broken_hooks "$settings" claude-code
+check_broken_hooks "$PWD/.codex/hooks.json" codex
 
 finish_tests
