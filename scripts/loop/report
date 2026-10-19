@@ -1,0 +1,289 @@
+#!/usr/bin/env -S uv run --script --quiet
+"""Prints the numbers that a retrospective reads, for the time since a moment, such as the last retrospective:
+
+  scripts/loop/report --since 2026-10-11T14:00:00Z
+
+The lines are:
+
+  CI runs that passed       How many runs of .github/workflows/ci.yml passed, and the median time from a run's start
+                            to its end.
+  CI jobs                   Each job's median time in those runs, leaving out the runs that skipped it. The jobs that
+                            run the tests give the tests' time.
+  Builders                  How many agents of the types builder-small, builder and builder-deep ran, and the median
+                            of their minutes and of their tool calls. An agent's minutes run from its first call to its
+                            last.
+  Orchestrator's share      The share of the tokens that the sessions in the main checkout used themselves, out of all
+                            that they and their agents used. Cached tokens count too.
+  Hook blocks               How many actions the before-tool hook blocked, from .loop/blocks.log, and how many each
+                            rule blocked.
+
+The report counts the CI runs and the calls that started after the moment. It reads the transcripts that Claude Code
+keeps for the main checkout, and prints none of their text.
+"""
+
+import argparse
+import datetime as dt
+import json
+import statistics
+import sys
+from collections import Counter
+from pathlib import Path
+from typing import Any, NamedTuple
+
+import paths
+from github import GitHubError, gh_api
+
+CI_WORKFLOW = "ci.yml"
+# The agent types in .claude/agents that build an issue
+BUILDER_TYPES = ("builder-small", "builder", "builder-deep")
+ORCHESTRATOR = "orchestrator"
+BUILDER = "builder"
+OTHER_AGENT = "other agent"
+USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+# One query asks for the jobs of 100 runs, the most that GitHub takes, because a query for each run took 0.7 seconds,
+# so a week of 200 runs would take more than 2 minutes.
+RUNS_PER_QUERY = 100
+JOBS_QUERY = """
+query($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on WorkflowRun {
+      checkSuite { checkRuns(first: 50) { nodes { name startedAt completedAt conclusion } } }
+    }
+  }
+}"""
+
+
+class CiRun(NamedTuple):
+    minutes: float
+    # The minutes of each job that passed
+    job_minutes: dict[str, float]
+
+
+class Call(NamedTuple):
+    id: str
+    start: dt.datetime
+    end: dt.datetime
+    tokens: int
+    tool_calls: int
+
+
+class Transcript(NamedTuple):
+    role: str
+    modified: float
+    calls: list[Call]
+
+
+class Agent(NamedTuple):
+    role: str
+    calls: list[Call]
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="scripts/loop/report", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--since", required=True, type=moment, help="an ISO time with its zone, such as 2026-10-11T14:00:00Z"
+    )
+    since: dt.datetime = parser.parse_args(argv).since
+    checkout = paths.main_checkout()
+    try:
+        ci_runs = read_ci_runs(since, checkout)
+    except GitHubError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    agents = count_once(read_transcripts(paths.claude_project_folder(checkout), since), since)
+    block_log = paths.loop_dir() / "blocks.log"
+    blocks = count_blocks(block_log.read_text() if block_log.exists() else "", since)
+    lines = [
+        f"Since {since.isoformat()}",
+        *ci_lines(ci_runs),
+        builder_line(agents),
+        orchestrator_line(agents),
+        block_line(blocks),
+    ]
+    print("\n".join(lines))
+    return 0
+
+
+def moment(text: str) -> dt.datetime:
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"{text!r} isn't an ISO time, such as 2026-10-11T14:00:00Z") from error
+    if parsed.tzinfo is None:
+        raise argparse.ArgumentTypeError(f"{text!r} has no zone. Add one, as in 2026-10-11T14:00:00Z.")
+    return parsed
+
+
+def read_ci_runs(since: dt.datetime, checkout: Path) -> list[CiRun]:
+    """The runs of the CI workflow that started after the time and passed."""
+    listed = gh_api(
+        f"repos/{{owner}}/{{repo}}/actions/workflows/{CI_WORKFLOW}/runs",
+        [
+            "--paginate",
+            "-X",
+            "GET",
+            "-f",
+            "status=success",
+            "-f",
+            f"created=>={since.astimezone(dt.UTC):%Y-%m-%dT%H:%M:%SZ}",
+            "--jq",
+            ".workflow_runs[] | {node_id, run_started_at, updated_at}",
+        ],
+        checkout,
+    )
+    runs = [json.loads(line) for line in listed.splitlines()]
+    ci_runs = []
+    for start in range(0, len(runs), RUNS_PER_QUERY):
+        batch = runs[start : start + RUNS_PER_QUERY]
+        options = ["-f", f"query={JOBS_QUERY}"]
+        for run in batch:
+            options += ["-f", f"ids[]={run['node_id']}"]
+        nodes = json.loads(gh_api("graphql", options, checkout))["data"]["nodes"]
+        for run, node in zip(batch, nodes, strict=True):
+            jobs = node["checkSuite"]["checkRuns"]["nodes"]
+            ci_runs.append(ci_run(run, jobs))
+    return ci_runs
+
+
+def ci_run(run: dict[str, str], jobs: list[dict[str, str]]) -> CiRun:
+    job_minutes = {
+        job["name"]: minutes_between(job["startedAt"], job["completedAt"])
+        for job in jobs
+        if job["conclusion"] == "SUCCESS"
+    }
+    return CiRun(minutes_between(run["run_started_at"], run["updated_at"]), job_minutes)
+
+
+def minutes_between(start: str, end: str) -> float:
+    return (dt.datetime.fromisoformat(end) - dt.datetime.fromisoformat(start)).total_seconds() / 60
+
+
+def read_transcripts(project_folder: Path, since: dt.datetime) -> list[Transcript]:
+    """The transcripts that changed after the time: each session's, and those of its agents."""
+    found: list[tuple[Path, str]] = []
+    for session in project_folder.glob("*.jsonl"):
+        found.append((session, ORCHESTRATOR))
+        for agent in (project_folder / session.stem / "subagents").glob("*.jsonl"):
+            found.append((agent, agent_role(agent.with_suffix(".meta.json"))))
+    transcripts = []
+    for file, role in found:
+        modified = file.stat().st_mtime
+        if modified >= since.timestamp():
+            transcripts.append(Transcript(role, modified, read_calls(file)))
+    return transcripts
+
+
+def agent_role(meta_file: Path) -> str:
+    if not meta_file.exists():
+        return OTHER_AGENT
+    agent_type = json.loads(meta_file.read_text()).get("agentType")
+    return BUILDER if agent_type in BUILDER_TYPES else OTHER_AGENT
+
+
+def read_calls(transcript: Path) -> list[Call]:
+    """The calls in a transcript. A response that spans several lines repeats its message's id and usage on each line,
+    so its tokens count once. Each line holds other blocks of the response, so its tool calls add up."""
+    times: dict[str, list[dt.datetime]] = {}
+    usage: dict[str, dict[str, int]] = {}
+    tool_calls: Counter[str] = Counter()
+    with transcript.open(errors="replace") as handle:
+        for line in handle:
+            entry = assistant_entry(line)
+            if entry is None:
+                continue
+            message = entry["message"]
+            call = message["id"]
+            times.setdefault(call, []).append(dt.datetime.fromisoformat(entry["timestamp"]))
+            most = usage.setdefault(call, dict.fromkeys(USAGE_KEYS, 0))
+            for key in USAGE_KEYS:
+                most[key] = max(most[key], message.get("usage", {}).get(key) or 0)
+            content = message.get("content")
+            if isinstance(content, list):
+                tool_calls[call] += sum(1 for block in content if block.get("type") == "tool_use")
+    return [
+        Call(call, min(moments), max(moments), sum(usage[call].values()), tool_calls[call])
+        for call, moments in times.items()
+    ]
+
+
+def assistant_entry(line: str) -> dict[str, Any] | None:
+    """The entry on a transcript's line if it holds a call, or None."""
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        # Claude Code may be writing the last line of a running session's transcript.
+        return None
+    message = entry.get("message")
+    if entry.get("type") != "assistant" or not isinstance(message, dict) or not message.get("id"):
+        return None
+    return dict(entry)
+
+
+def count_once(transcripts: list[Transcript], since: dt.datetime) -> list[Agent]:
+    """The calls of each session and agent that started after the time, each in only one of them. Resuming a session
+    makes a transcript that starts with copies of the earlier transcripts' calls, so a call counts in the oldest
+    transcript that holds it."""
+    seen: set[str] = set()
+    agents = []
+    for transcript in sorted(transcripts, key=lambda transcript: transcript.modified):
+        calls = [call for call in transcript.calls if call.id not in seen and call.start >= since]
+        seen.update(call.id for call in transcript.calls)
+        if calls:
+            agents.append(Agent(transcript.role, calls))
+    return agents
+
+
+def count_blocks(log: str, since: dt.datetime) -> Counter[str]:
+    """The blocks after the time per rule, from the block log's lines: the time, the rule, and the matched text,
+    separated by tabs."""
+    blocks: Counter[str] = Counter()
+    for line in log.splitlines():
+        time, rule = line.split("\t")[:2]
+        if dt.datetime.fromisoformat(time) >= since:
+            blocks[rule] += 1
+    return blocks
+
+
+def ci_lines(runs: list[CiRun]) -> list[str]:
+    if not runs:
+        return ["CI runs that passed: 0"]
+    median_minutes = statistics.median(run.minutes for run in runs)
+    jobs = sorted({job for run in runs for job in run.job_minutes})
+    job_parts = [
+        f"{job} {statistics.median(run.job_minutes[job] for run in runs if job in run.job_minutes):.1f}" for job in jobs
+    ]
+    return [
+        f"CI runs that passed: {len(runs)}, median {median_minutes:.1f} min",
+        "CI jobs, median minutes: " + " | ".join(job_parts),
+    ]
+
+
+def builder_line(agents: list[Agent]) -> str:
+    builders = [agent for agent in agents if agent.role == BUILDER]
+    if not builders:
+        return "Builders: 0"
+    minutes = statistics.median(
+        (max(call.end for call in builder.calls) - min(call.start for call in builder.calls)).total_seconds() / 60
+        for builder in builders
+    )
+    tool_calls = statistics.median(sum(call.tool_calls for call in builder.calls) for builder in builders)
+    return f"Builders: {len(builders)}, median {minutes:.1f} min and {tool_calls:g} tool calls"
+
+
+def orchestrator_line(agents: list[Agent]) -> str:
+    total = sum(call.tokens for agent in agents for call in agent.calls)
+    if total == 0:
+        return "Orchestrator's share of the tokens: none used"
+    own = sum(call.tokens for agent in agents if agent.role == ORCHESTRATOR for call in agent.calls)
+    return f"Orchestrator's share of the tokens: {own / total:.0%}"
+
+
+def block_line(blocks: Counter[str]) -> str:
+    parts = [f"{rule} {count}" for rule, count in sorted(blocks.items(), key=lambda item: (-item[1], item[0]))]
+    return " | ".join([f"Hook blocks: {blocks.total()}", *parts])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

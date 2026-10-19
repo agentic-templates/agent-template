@@ -38,7 +38,6 @@ import datetime as dt
 import json
 import math
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -48,6 +47,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, TypedDict
 
 import paths
+from github import GitHubError, gh_api
 from usage import Meter, parse_usage
 
 TOOLS = ("claude", "codex")
@@ -476,10 +476,7 @@ def orchestrator_context(state_file: Path, checkout: Path) -> int | None:
     session = session_in_state_file(state_file)
     if session is None:
         return None
-    config = Path(os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude")))
-    # Claude Code names a project's folder after its path, with a dash for each character other than a letter or digit.
-    project = re.sub(r"[^A-Za-z0-9]", "-", str(checkout))
-    return context_tokens(config / "projects" / project / f"{session}.jsonl")
+    return context_tokens(paths.claude_project_folder(checkout) / f"{session}.jsonl")
 
 
 def session_in_state_file(state_file: Path) -> str | None:
@@ -523,7 +520,7 @@ def read_retrospective(checkout: Path) -> str:
         if last:
             search += f" merged:>{last.astimezone(dt.UTC):%Y-%m-%dT%H:%M:%SZ}"
         merged = github(SEARCH_COUNT_QUERY, {"search": search}, checkout)["search"]["issueCount"]
-    except MeterError as error:
+    except GitHubError as error:
         return f"retrospective unknown: {error}"
     latest = repository["latestRelease"]
     release = Release(latest["tagName"], dt.datetime.fromisoformat(latest["publishedAt"])) if latest else None
@@ -542,17 +539,10 @@ def retrospective_note(last: dt.datetime | None, release: Release | None, merged
 def github(query: str, variables: dict[str, str], checkout: Path) -> Any:
     """The data that GitHub gives for a GraphQL query about the checkout's repository. gh fills in {owner} and {repo}
     in the variables."""
-    command = ["gh", "api", "graphql", "-f", f"query={query}"]
+    options = ["-f", f"query={query}"]
     for name, value in variables.items():
-        command += ["-F", f"{name}={value}"]
-    try:
-        done = subprocess.run(command, cwd=checkout, capture_output=True, text=True, check=False)
-    except FileNotFoundError as error:
-        raise MeterError("gh isn't installed. Install the GitHub CLI.") from error
-    if done.returncode != 0:
-        problem = " ".join(done.stderr.split())
-        raise MeterError(f"gh api graphql failed: {problem}. Check the network, and that gh auth status shows a login.")
-    return json.loads(done.stdout)["data"]
+        options += ["-F", f"{name}={value}"]
+    return json.loads(gh_api("graphql", options, checkout))["data"]
 
 
 if __name__ == "__main__":

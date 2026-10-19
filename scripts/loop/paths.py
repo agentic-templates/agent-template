@@ -2,6 +2,7 @@
 checkout, which every worktree shares. The environment variable LOOP_DIR names another folder."""
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -23,6 +24,13 @@ def loop_dir() -> Path:
     if override:
         return Path(override)
     return main_checkout() / ".loop"
+
+
+def claude_project_folder(checkout: Path) -> Path:
+    """The folder where Claude Code keeps the transcripts of the sessions that run in a checkout."""
+    config = Path(os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude")))
+    # Claude Code names a project's folder after its path, with a dash for each character other than a letter or digit.
+    return config / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(checkout))
 
 
 def git(arguments: list[str], folder: Path) -> str:
