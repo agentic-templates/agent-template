@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs the step of .github/workflows/ci.yml that runs the tests of the scripts and hooks on small sets of tests, and
-# checks that each job that runs those tests has that step, and a matrix that lists every part.
+# checks that each job that runs those tests has that step, and a matrix that lists every part. It also checks that the
+# bash-3-2 job runs the tests as a user other than root.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
