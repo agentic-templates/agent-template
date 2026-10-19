@@ -4,8 +4,10 @@
 # Claude Code compacts on its own because the context filled, or manual after /compact. After the compaction,
 # scripts/hooks/session-start reads the record, deletes it, and tells the orchestrator after an automatic compaction
 # that its state file may be behind, because such a compaction can come in the middle of a step.
-# It records nothing for a subagent, whose input can hold the orchestrator's session id, and nothing when the loop's
-# folder has no state file, because then no orchestrator runs.
+# It records only what session-start reads: a compaction of a session that can run the loop, as can_run_loop in
+# session-start decides, which is a session in the main checkout whose input has no agent_id. A subagent's input can
+# hold the orchestrator's session id and lack an agent_id, but a subagent works in a worktree. The hook also records
+# nothing when the loop's folder has no state file, because then no orchestrator runs.
 # Copilot CLI and Cursor also run the hooks in .claude/settings.json, so the hook does nothing outside Claude Code.
 # It prints nothing, and exits with code 0 even when it fails, so that it never stops a compaction.
 
@@ -26,10 +28,19 @@ if [[ -n $agent_id ]]; then
   exit 0
 fi
 
-# The hook finds the loop's folder from the folder that it runs in, as session-start does, so that both find the same
-# folder.
-git_folders=$(git rev-parse --path-format=absolute --git-common-dir --show-toplevel 2>/dev/null) || exit 0
-loop=$(loop_folder "${git_folders%%$'\n'*}" "${git_folders#*$'\n'}")
+# The hook finds the checkout and the loop's folder from the folder that it runs in, as session-start does, so that
+# both find the same ones.
+git_folders=$(git rev-parse --path-format=absolute --absolute-git-dir --git-common-dir --show-toplevel 2>/dev/null) ||
+  exit 0
+{
+  IFS= read -r git_folder
+  IFS= read -r shared_git_folder
+  IFS= read -r checkout
+} <<<"$git_folders"
+if [[ $git_folder != "$shared_git_folder" ]]; then
+  exit 0
+fi
+loop=$(loop_folder "$shared_git_folder" "$checkout")
 if [[ ! -f $loop/state.md ]] || ! record=$(compaction_record "$loop" "$session_id"); then
   exit 0
 fi

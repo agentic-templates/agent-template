@@ -226,20 +226,20 @@ if [[ -n $state_file && -f $state_file ]]; then
   owner_process=$(state_field "$state_file" pid)
   both_lines="\"session: $session_id\" and \"pid: $CLAUDE_PID\" as the session and pid lines"
   # A builder runs as a subagent in the orchestrator's process, so it has the orchestrator's pid, and its input can
-  # hold the orchestrator's session id. A subagent's input has an agent_id, and a builder works in a worktree.
+  # hold the orchestrator's session id. A subagent's input can have an agent_id, and a builder works in a worktree.
   can_run_loop=""
   if [[ -z $agent_id && -n $in_main_checkout ]]; then
     can_run_loop=yes
   fi
   # A compaction that Claude Code starts on its own can come in the middle of a step, such as after the orchestrator
   # started a builder and before it wrote the builder in its state file. A compaction that the orchestrator asks for,
-  # or that the maintainer types, comes between turns. A subagent leaves the record alone, because its input can hold
-  # the orchestrator's session id.
+  # or that the maintainer types, comes between turns. Only a session that can run the loop reads and deletes its
+  # record, because a subagent's input can hold the orchestrator's session id.
   behind_note=""
-  if [[ $event_source == compact && -z $agent_id ]] && record=$(compaction_record "$loop" "$session_id") &&
+  if [[ -n $can_run_loop && $event_source == compact ]] && record=$(compaction_record "$loop" "$session_id") &&
     [[ -f $record ]]; then
     trigger=""
-    IFS= read -r trigger <"$record" || true
+    IFS= read -r trigger 2>/dev/null <"$record" || true
     rm -f "$record" || true
     if [[ $trigger == auto ]]; then
       behind_note="Claude Code compacted this conversation when the context filled, maybe in the middle of a step. So your state file may lack the steps you took after the time on its updated: line. Before you go on, check the file against the open pull requests, the issues assigned to you and the agents that scripts/loop/meter lists, and add to it what it lacks."
