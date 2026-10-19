@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Runs the bash 3.2 job's test runner on small sets of tests, and checks that the script-tests job runs it too, and
-# that the matrix of each job lists every part.
+# Runs the step of .github/workflows/ci.yml that runs the tests of the scripts and hooks on small sets of tests, and
+# checks that each job that runs those tests has that step, and a matrix that lists every part.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -17,17 +17,22 @@ step_command() {
   ' .github/workflows/ci.yml
 }
 
+# The jobs that run the tests of the scripts and hooks, each with its own bash or tools.
+test_jobs=(script-tests bash-3-2 macos)
+test_step="Run the tests of the scripts and hooks"
+
 # Run the workflow's command so removing the runner from CI also fails these cases.
-step=$(step_command bash-3-2 "Run tests with bash 3.2")
+step=$(step_command script-tests "$test_step")
 if [[ -z $step ]]; then
-  echo "error: the bash-3-2 job has no test step. Add the step to .github/workflows/ci.yml." >&2
+  echo "error: the script-tests job has no step \"$test_step\". Add the step to .github/workflows/ci.yml." >&2
   exit 1
 fi
-script_tests_step=$(step_command script-tests "Run the tests of the scripts and hooks")
-if [[ $script_tests_step != "$step" ]]; then
-  echo "error: the step \"Run the tests of the scripts and hooks\" of the script-tests job in .github/workflows/ci.yml must run $step, as the test step of the bash-3-2 job does. Add the step, or change its command to $step." >&2
-  exit 1
-fi
+for job in "${test_jobs[@]}"; do
+  if [[ $(step_command "$job" "$test_step") != "$step" ]]; then
+    echo "error: the step \"$test_step\" of the $job job in .github/workflows/ci.yml must run $step, as the step of the script-tests job does. Add the step, or change its command to $step." >&2
+    exit 1
+  fi
+done
 printf '%s\n' "$step" > "$base/step"
 
 # The step runs with only these commands and a case's stand-ins for tools on PATH, so that each case decides
@@ -42,8 +47,8 @@ done
 case_count=0
 failed_cases=0
 
-# Cases for the matrices of the script-tests and bash-3-2 jobs, which must list every part, because a part that's left
-# out leaves its test files untested.
+# Cases for the matrices of the jobs that run the tests of the scripts and hooks, which must list every part, because a
+# part that's left out leaves its test files untested.
 
 # Prints the parts that the matrix of a job lists, one to a line: matrix_parts <workflow> <job>
 matrix_parts() {
@@ -117,7 +122,7 @@ expect_matrix "fails when a part is above the count" "$base/extra.yml" tests 1 \
 write_matrix_workflow "$base/none.yml"
 expect_matrix "fails when the job has no matrix" "$base/none.yml" tests 1 \
   "error: the tests job in $base/none.yml has no matrix of parts. Give it one, such as \"part: [1/2, 2/2]\", because its test step runs scripts/test-scripts --part."
-for job in script-tests bash-3-2; do
+for job in "${test_jobs[@]}"; do
   expect_matrix "of the $job job in .github/workflows/ci.yml lists every part" .github/workflows/ci.yml "$job" 0 ""
 done
 

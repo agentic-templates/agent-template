@@ -66,8 +66,8 @@ if [[ -n $runs_hooks_tests ]]; then
     fi
   done
 fi
-# The ShellCheck cases run shellcheck, which the bash-3-2 job doesn't install, so they run only where shellcheck is
-# installed, in CI too.
+# The ShellCheck cases run shellcheck, which the bash-3-2 and macos jobs don't install, so they run only where shellcheck
+# is installed, in CI too.
 if command -v shellcheck >/dev/null; then
   start_test scripts/test-check --shellcheck-only
 fi

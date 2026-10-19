@@ -121,19 +121,66 @@ jobs:
           PART: ${{ matrix.part }}
           ZIZMOR_GITHUB_TOKEN: ${{ github.token }}
 
-  # Runs the tests of the scripts and hooks with /bin/bash, the bash 3.2 that macOS ships. On a Mac without a newer bash,
-  # the hooks and scripts/check run with it. The script-tests job's bash is newer, and shellcheck doesn't flag what
-  # bash 3.2 lacks, such as declare -A.
-  # Its runner has fewer cores than the script-tests job's, so the matrix splits the tests into more parts.
+  # Runs the tests of the scripts and hooks with bash 3.2, the bash that macOS ships as /bin/bash. On a Mac without a
+  # newer bash, the hooks and scripts/check run with it. The script-tests job's bash is newer, and shellcheck doesn't
+  # flag what bash 3.2 lacks, such as declare -A.
   bash-3-2:
     needs: changes
     if: needs.changes.outputs.script_tests == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The Docker library's image of the tag bash:3.2.
+    container:
+      image: bash:3.2@sha256:0fd7cb8499c63a3c9345e7088a9cd83bb69f6e895e83833859aff838a0312091
+    # A container job's steps run with sh unless the job names a shell, and scripts/ci.test runs the test step with
+    # bash.
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1/2, 2/2]
+    steps:
+      # Alpine keeps only the newest build of each package, so a pinned version would stop installing at its next
+      # update. The image's digest fixes the Alpine release that the packages come from.
+      # scripts/hooks/after-edit.test runs a hook with a PATH that has /usr/bin and /bin, where macOS and Ubuntu have a
+      # bash, and not /usr/local/bin, where the image has it.
+      - name: Install git and jq, and make /bin/bash bash 3.2
+        run: |
+          apk add --no-cache git jq
+          ln -s /usr/local/bin/bash /bin/bash
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The runner's user owns the checkout, but the job runs as the container's root, and git refuses a repository
+      # that another user owns.
+      - name: Give the checkout to root
+        run: chown -R root:root .
+
+      - name: Run the tests of the scripts and hooks
+        run: scripts/test-scripts --part "$PART"
+        env:
+          PART: ${{ matrix.part }}
+
+  # Runs the tests of the scripts and hooks on macOS, with its /bin/bash 3.2 and the tools that it ships, which differ
+  # from the GNU tools of Ubuntu and the BusyBox tools of the bash-3-2 job. For example, macOS's date has no -d.
+  # It runs only in the merge queue, because GitHub's free plan runs at most 5 macOS jobs at once, and pull requests
+  # whose checks ran at the same time waited for each other's macOS jobs. On a pull request it's skipped, so the
+  # required checks don't wait for it.
+  # With 2 parts, a merge group's run takes about 2 minutes, and the macOS jobs of 2 merge groups run at once. The pull
+  # request that set the parts gives the measurements.
+  macos:
+    needs: changes
+    if: github.event_name == 'merge_group' && needs.changes.outputs.script_tests == 'true'
     runs-on: macos-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        part: [1/4, 2/4, 3/4, 4/4]
+        part: [1/2, 2/2]
     # With this PATH, the scripts' #!/usr/bin/env bash lines find /bin/bash.
     # macOS 15 and later have jq and git in /usr/bin.
     env:
@@ -152,7 +199,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run tests with bash 3.2
+      - name: Run the tests of the scripts and hooks
         run: scripts/test-scripts --part "$PART"
         env:
           PART: ${{ matrix.part }}
@@ -186,7 +233,7 @@ jobs:
   # It fails unless each job in needs passed or was skipped. When you add a job to this workflow, add it to needs.
   # It runs with if: always(), because otherwise a failed job would skip it, and GitHub counts a skip as a pass.
   check:
-    needs: [changes, linux, script-tests, bash-3-2, leak-scan]
+    needs: [changes, linux, script-tests, bash-3-2, macos, leak-scan]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2

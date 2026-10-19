@@ -171,7 +171,7 @@ repository_as_it_is() {
 run_case repository_as_it_is pass
 
 # These cases run only with --shellcheck-only, which scripts/test-scripts uses only where shellcheck is installed,
-# so the bash-3-2 job needs no external linters.
+# so the bash-3-2 and macos jobs need no external linters.
 shellcheck_fixture=scripts/shellcheck-fixture
 while [[ -e $shellcheck_fixture ]]; do
   shellcheck_fixture=$shellcheck_fixture-fixture
