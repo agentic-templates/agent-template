@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # Functions that the tests in this folder share. A test file sources this file, checks its cases
-# with expect_block and expect_allow, and ends with finish_tests. scripts/test-hooks runs every test file at the
+# with expect_block and expect_allow, and ends with finish_tests. scripts/test-scripts runs every test file at the
 # same time as the others, so a test file writes its files only to a folder of its own, such as one from mktemp -d.
 
 hooks_folder=$(cd "${BASH_SOURCE[0]%/*}" && pwd)

@@ -41,15 +41,16 @@ done
 case_count=0
 failed_cases=0
 
-# Makes a folder for a case, with a copy of the runner and of the file it reads, stand-ins for scripts/test-hooks and
-# scripts/test-check that do nothing, and a stand-in for jq, and sets case_dir to it: new_case
+# Makes a folder for a case, with a copy of the runner and of the file it reads, an empty scripts/hooks/, a stand-in
+# for scripts/test-check that does nothing, and a stand-in for jq, and sets case_dir to it. The step runs the whole
+# list of test files, as part 1 of 1, unless the case sets part: new_case
 new_case() {
   case_dir=$(mktemp -d "$base/case.XXXXXX")
-  mkdir "$case_dir/scripts" "$case_dir/tools"
+  mkdir -p "$case_dir/scripts/hooks" "$case_dir/tools"
   cp scripts/test-scripts scripts/missing-tools "$case_dir/scripts/"
-  printf '%s\n' '#!/usr/bin/env bash' > "$case_dir/scripts/test-hooks"
   printf '%s\n' '#!/usr/bin/env bash' > "$case_dir/scripts/test-check"
   add_tool jq
+  part=1/1
 }
 
 # Makes a tool count as installed in the case, with a stand-in that does nothing: add_tool <tool>
@@ -58,13 +59,13 @@ add_tool() {
   chmod +x "$case_dir/tools/$1"
 }
 
-# Runs the step in the case's folder, with CI set to the value given or empty, and sets status and output:
-# run_step [<CI>]
+# Runs the step in the case's folder, with CI set to the value given or empty, and the matrix's part in PART, and sets
+# status and output: run_step [<CI>]
 # GitHub's bash shell exits on a failing command and sets pipefail.
 run_step() {
   status=0
-  output=$(cd "$case_dir" && CI=${1:-} PATH=$case_dir/tools:$commands "$BASH" --noprofile --norc -eo pipefail "$base/step" 2>&1) ||
-    status=$?
+  output=$(cd "$case_dir" && CI=${1:-} PART=$part PATH=$case_dir/tools:$commands \
+    "$BASH" --noprofile --norc -eo pipefail "$base/step" 2>&1) || status=$?
 }
 
 expect_result() {
@@ -110,7 +111,7 @@ cat > "$case_dir/scripts/child" <<'CHILD'
 #!/usr/bin/env bash
 printf '%s\n' "$BASH_VERSION"
 CHILD
-cp "$case_dir/scripts/child" "$case_dir/scripts/test-hooks"
+cp "$case_dir/scripts/child" "$case_dir/scripts/hooks/version.test"
 cp "$case_dir/scripts/child" "$case_dir/scripts/test-check"
 chmod +x "$case_dir/scripts/version.test" "$case_dir/scripts/child"
 run_step
@@ -120,7 +121,7 @@ expect_result "uses the current bash for every test file and child scripts" 0 "$
 new_case
 for name in hooks check first second; do
   case "$name" in
-    hooks) file=test-hooks ;;
+    hooks) file=hooks/hooks.test ;;
     check) file=test-check ;;
     *) file=$name.test ;;
   esac
@@ -143,13 +144,108 @@ run_step
 expect_result "runs every test file at the same time and keeps the output of each together" 0 \
   $'hooks started\nhooks passed\ncheck started\ncheck passed\nfirst started\nfirst passed\nsecond started\nsecond passed'
 
-for group in test-hooks test-check; do
+for failing_test in hooks/failing.test test-check; do
   new_case
-  printf '%s\n' '#!/usr/bin/env bash' 'echo failed >&2' 'exit 7' > "$case_dir/scripts/$group"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo failed >&2' 'exit 7' > "$case_dir/scripts/$failing_test"
   printf '%s\n' '#!/usr/bin/env bash' 'echo scripts passed' > "$case_dir/scripts/pass.test"
   run_step
-  expect_result "fails when $group fails and still waits for the script tests" 7 $'failed\nscripts passed'
+  expect_result "fails when scripts/$failing_test fails and still waits for the script tests" 7 $'failed\nscripts passed'
 done
+
+# Cases for --part, which runs every so many test files of the list, as each job of the matrix does.
+
+# Writes stand-ins that print their names, for a list of five test files: hooks/alpha.test, test-check, bravo.test,
+# charlie.test and delta.test: write_named_tests
+write_named_tests() {
+  local name
+  for name in hooks/alpha bravo charlie delta; do
+    printf '%s\n' '#!/usr/bin/env bash' "echo ${name#hooks/}" > "$case_dir/scripts/$name.test"
+  done
+  printf '%s\n' '#!/usr/bin/env bash' 'echo check' > "$case_dir/scripts/test-check"
+}
+
+new_case
+write_named_tests
+part=1/2
+run_step
+expect_result "runs the first, third and fifth test files for part 1 of 2" 0 $'alpha\nbravo\ndelta'
+
+new_case
+write_named_tests
+part=2/2
+run_step
+expect_result "runs the second and fourth test files for part 2 of 2" 0 $'check\ncharlie'
+
+new_case
+write_named_tests
+part=5/5
+run_step
+expect_result "runs the fifth test file for part 5 of 5" 0 "delta"
+
+new_case
+write_named_tests
+part=3/2
+run_step
+expect_result "fails for a part above the number of parts, before it starts a test" 2 \
+  "error: --part 3/2 names part 3 of 2. Give a part from 1 to 2."
+
+for part_value in 0/2 1/0 2 "" a/b; do
+  new_case
+  write_named_tests
+  part=$part_value
+  run_step
+  expect_result "fails for the part \"$part_value\", before it starts a test" 2 \
+    "error: scripts/test-scripts takes no argument, or --part and a part such as 2/3, and it got: --part $part_value"
+done
+
+# Case for stopping the runner, which stops each test that still runs. The stand-in runs for 10 seconds, unless it's
+# stopped.
+
+# Waits up to 10 seconds for a file to exist, and fails if it doesn't: wait_for_file <path>
+wait_for_file() {
+  local tries
+  for ((tries = 0; tries < 100; tries++)); do
+    if [[ -e $1 ]]; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+# Starts the runner in the background, with a temporary folder of the case's own, and stops it once the stand-in
+# endless.test has started. Prints an error and fails if the runner leaves the stand-in running or leaves files in
+# the temporary folder: stop_runner
+stop_runner() {
+  local runner
+  mkdir "$case_dir/tmp"
+  # exec makes the runner the process that kill stops.
+  (cd "$case_dir" && TMPDIR=$case_dir/tmp PATH=$case_dir/tools:$commands exec scripts/test-scripts >/dev/null 2>&1) &
+  runner=$!
+  if ! wait_for_file "$case_dir/endless.started"; then
+    echo "error: scripts/test-scripts didn't start endless.test within 10 seconds." >&2
+    return 1
+  fi
+  kill "$runner"
+  # The redirection hides the shell's message that the runner was stopped.
+  wait "$runner" 2>/dev/null || true
+  if ! wait_for_file "$case_dir/endless.stopped"; then
+    echo "error: when scripts/test-scripts stops, it must stop each test that still runs, but endless.test went on running." >&2
+    return 1
+  fi
+  if [[ -n $(ls -A "$case_dir/tmp") ]]; then
+    echo "error: when scripts/test-scripts stops, it must remove its files from TMPDIR, but it left: $(ls -A "$case_dir/tmp")" >&2
+    return 1
+  fi
+}
+
+new_case
+printf '%s\n' '#!/usr/bin/env bash' "trap 'touch endless.stopped; exit 1' TERM" 'touch endless.started' \
+  'for ((tries = 0; tries < 100; tries++)); do' '  sleep 0.1' 'done' > "$case_dir/scripts/endless.test"
+case_count=$((case_count + 1))
+if ! stop_runner; then
+  failed_cases=$((failed_cases + 1))
+fi
 
 # Cases for the ShellCheck cases of scripts/test-check, which its option --shellcheck-only runs.
 
@@ -179,7 +275,7 @@ expect_result "skips the ShellCheck cases of scripts/test-check where shellcheck
 
 new_case
 rm "$case_dir/tools/jq"
-printf '%s\n' '#!/usr/bin/env bash' 'echo "the hooks tests ran"' > "$case_dir/scripts/test-hooks"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "the hooks tests ran"' > "$case_dir/scripts/hooks/hook.test"
 printf '%s\n' '#!/usr/bin/env bash' 'echo "scripts passed"' > "$case_dir/scripts/pass.test"
 run_step
 expect_result "skips the hooks' tests where jq isn't installed, and runs the other tests" 0 \
@@ -187,7 +283,7 @@ expect_result "skips the hooks' tests where jq isn't installed, and runs the oth
 
 new_case
 rm "$case_dir/tools/jq"
-printf '%s\n' '#!/usr/bin/env bash' 'echo "the hooks tests ran"' > "$case_dir/scripts/test-hooks"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "the hooks tests ran"' > "$case_dir/scripts/hooks/hook.test"
 printf '%s\n' '#!/usr/bin/env bash' 'echo "scripts passed"' > "$case_dir/scripts/pass.test"
 run_step true
 expect_result "fails in CI where jq isn't installed, before it starts a test" 1 \

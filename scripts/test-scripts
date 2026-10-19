@@ -1,10 +1,28 @@
 #!/usr/bin/env bash
-# Runs the tests of the scripts and hooks, each test file in a process of its own, all at the same time: the hooks'
-# tests, the cases of scripts/test-check and each scripts/*.test. It prints the outputs of the files in that order, so
-# that they don't mix. A failure in any file fails the script.
-# scripts/check runs it, and so do the script-tests and bash-3-2 jobs in .github/workflows/ci.yml.
+# Runs the tests of the scripts and hooks, each test file in a process of its own, all at the same time:
+# scripts/test-scripts [--part <part>/<parts>]
+# The test files are each scripts/hooks/*.test, the cases of scripts/test-check and each scripts/*.test. The script
+# prints the outputs of the files in that order, so that they don't mix. A failure in any file fails the script.
+# With --part, as in --part 2/3, it runs only every third file of that list, starting with the second. The jobs of
+# .github/workflows/ci.yml that run the tests each run one part, because on one runner the tests took two minutes.
+# scripts/check runs every file.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+part=1
+parts=1
+if (($# > 0)); then
+  if [[ $# != 2 || $1 != --part || ! $2 =~ ^[1-9][0-9]*/[1-9][0-9]*$ ]]; then
+    echo "error: scripts/test-scripts takes no argument, or --part and a part such as 2/3, and it got: $*" >&2
+    exit 2
+  fi
+  part=${2%/*}
+  parts=${2#*/}
+  if ((part > parts)); then
+    echo "error: --part $2 names part $part of $parts. Give a part from 1 to $parts." >&2
+    exit 2
+  fi
+fi
 
 # shellcheck source=scripts/missing-tools
 source scripts/missing-tools
@@ -24,29 +42,37 @@ stop_tests() {
 }
 trap stop_tests EXIT
 
-# Each test file writes its output and errors to files named for its place in the list.
+# The place of the next test file in the list of all test files.
+place=0
+# The process of each test file in the part, which writes its output and errors to files named for its place.
 process_ids=()
 
-# Starts a test file in the background: start_test <command>...
+# Starts a test file in the background if it's in the part: start_test <test file> [<argument>]
 start_test() {
-  local index=${#process_ids[@]}
-  "$@" >"$outputs/$index.out" 2>"$outputs/$index.err" &
-  process_ids[index]=$!
+  if ((place % parts == part - 1)); then
+    bash "$@" >"$outputs/${#process_ids[@]}.out" 2>"$outputs/${#process_ids[@]}.err" &
+    process_ids+=("$!")
+  fi
+  place=$((place + 1))
 }
 
+# -f skips the pattern itself, which a loop gets when no file matches it.
 if [[ -n $runs_hooks_tests ]]; then
-  start_test bash scripts/test-hooks
+  for hook_test in scripts/hooks/*.test; do
+    if [[ -f $hook_test ]]; then
+      start_test "$hook_test"
+    fi
+  done
 fi
 # The ShellCheck cases run shellcheck, which the bash-3-2 job doesn't install, so they run only where shellcheck is
 # installed, in CI too.
 if command -v shellcheck >/dev/null; then
-  start_test bash scripts/test-check --shellcheck-only
+  start_test scripts/test-check --shellcheck-only
 fi
-start_test bash scripts/test-check
-# -f skips the pattern itself, which the loop gets when no test matches it.
+start_test scripts/test-check
 for script_test in scripts/*.test; do
   if [[ -f $script_test ]]; then
-    start_test bash "$script_test"
+    start_test "$script_test"
   fi
 done
 
