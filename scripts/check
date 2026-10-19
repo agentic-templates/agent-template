@@ -390,11 +390,13 @@ if [[ -n "$found_prose_error" ]]; then
   exit 1
 fi
 
+# The first line of a script that bash or sh runs.
+shebang='^#!(/bin/|/usr/bin/env )(sh|bash)([[:space:]]|$)'
+
 # scripts/test-check sets CHECK_UNDER_TEST in its copies to skip unrelated checks and prevent recursion.
 # Only its ShellCheck cases set the value to shellcheck, to test the real invocation and file discovery below.
 if [[ -z "${CHECK_UNDER_TEST:-}" || ${CHECK_UNDER_TEST:-} == shellcheck ]]; then
   if has shellcheck https://github.com/koalaman/shellcheck#installing; then
-    shebang='^#!(/bin/|/usr/bin/env )(sh|bash)([[:space:]]|$)'
     # -f skips the submodules and deleted files that git ls-files also lists.
     git ls-files -z | while IFS= read -r -d '' file; do
       if [[ -f $file ]] && IFS= read -r first_line < "$file" && [[ $first_line =~ $shebang ]]; then
@@ -425,27 +427,65 @@ if [[ -z "${CHECK_UNDER_TEST:-}" || ${CHECK_UNDER_TEST:-} == python ]]; then
   # The Python files are the tracked and the untracked files that git doesn't ignore, and that is_python_file accepts.
   # pyproject.toml holds the tools' settings.
   # uv runs the tools with the versions in uv.lock, and --locked stops it when uv.lock doesn't match pyproject.toml.
+  # The bash files are the scripts that bash or sh runs, and the files that they source, which start with a directive
+  # such as "# shellcheck shell=bash".
   if has uv https://docs.astral.sh/uv/getting-started/installation/; then
     # shellcheck source=scripts/python-files
     source scripts/python-files
+    shellcheck_directive='^# shellcheck shell=(sh|bash)$'
     python_files=()
+    bash_files=()
     while IFS= read -r -d '' file; do
       # -f skips the deleted files that git ls-files also lists.
-      if [[ -f $file ]] && is_python_file "$file"; then
+      if [[ ! -f $file ]]; then
+        continue
+      fi
+      first_line=""
+      IFS= read -r first_line < "$file" || true
+      if is_python_file "$file"; then
         python_files+=("$file")
+      elif [[ $first_line =~ $shebang || $first_line =~ $shellcheck_directive ]]; then
+        bash_files+=("$file")
       fi
     done < <(git ls-files -z --cached --others --exclude-standard)
     if ((${#python_files[@]} > 0)); then
       uv run --locked --quiet ruff format --check --quiet -- "${python_files[@]}"
       uv run --locked --quiet ruff check --quiet -- "${python_files[@]}"
       uv run --locked --quiet mypy --no-error-summary -- "${python_files[@]}"
-      if [[ -z "${CHECK_UNDER_TEST:-}" ]]; then
+    fi
+
+    # The copies that scripts/test-check makes skip the tests, their coverage and the complexity check.
+    if [[ -z "${CHECK_UNDER_TEST:-}" ]]; then
+      has_shfmt=""
+      if has shfmt https://github.com/mvdan/sh#shfmt "the complexity check of the bash files"; then
+        has_shfmt=yes
+      fi
+      if ((${#python_files[@]} > 0)); then
         # Each Python process of the tests writes its own coverage data, which combine merges.
         coverage_file=$(git rev-parse --git-path coverage)
         COVERAGE_FILE=$coverage_file uv run --locked --quiet coverage erase
         COVERAGE_FILE=$coverage_file uv run --locked --quiet coverage run scripts/loop/run-tests
         COVERAGE_FILE=$coverage_file uv run --locked --quiet coverage combine --quiet
-        COVERAGE_FILE=$coverage_file uv run --locked --quiet coverage report
+        if [[ -n $has_shfmt ]]; then
+          COVERAGE_FILE=$coverage_file uv run --locked --quiet coverage report
+        else
+          # Without shfmt, the tests of scripts/check-complexity skip their bash cases, so the lines of those cases and
+          # of the code that reads bash don't run. CI checks their coverage.
+          COVERAGE_FILE=$coverage_file uv run --locked --quiet coverage report \
+            --omit=scripts/check-complexity,scripts/loop/test_check_complexity.py
+        fi
+      fi
+
+      # Each option of scripts/check-complexity takes at least one file.
+      complexity_arguments=()
+      if ((${#python_files[@]} > 0)); then
+        complexity_arguments+=(--python "${python_files[@]}")
+      fi
+      if [[ -n $has_shfmt ]] && ((${#bash_files[@]} > 0)); then
+        complexity_arguments+=(--bash "${bash_files[@]}")
+      fi
+      if ((${#complexity_arguments[@]} > 0)); then
+        scripts/check-complexity "${complexity_arguments[@]}"
       fi
     fi
   fi

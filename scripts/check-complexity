@@ -1,0 +1,403 @@
+#!/usr/bin/env -S uv run --script --quiet
+"""Fails when the cognitive complexity of a bash or Python function is over 15.
+
+  scripts/check-complexity [--bash FILE ...] [--python FILE ...]
+
+Cognitive complexity counts how hard a function is to follow, by Sonar's rules:
+https://www.sonarsource.com/docs/CognitiveComplexity.pdf
+
+Each if, for, while, until, case and except adds 1, and so does each conditional expression, such as ?: in bash's
+arithmetic. Each of them adds 1 more for each level of nesting that it's in.
+
+The body of an if, elif, else, loop, case item, except or match case is one level deeper than the code around it, and
+so are the branches of a conditional expression. In Python, the condition of a conditional expression is one level
+deeper too, and so is a function inside another function, unless the outer function only defines it and returns it,
+as a decorator does.
+
+Each elif and else adds 1, including the else of a loop or a try. Each run of the same boolean operator adds 1, so
+a && b || c adds 2. In bash, these are && and || between commands, inside [[ ]] and inside (( )). Parentheses end a
+run.
+
+A bash function inside another function gets a count of its own. A Python function inside another function adds to
+the count of the outer function. The code outside functions doesn't count.
+
+A function that would be harder to read in parts may skip the check, with a comment in the comment lines right above
+it, or above its decorators, that gives the reason:
+
+  # check-complexity: skip, because each branch reads one field of the same record
+
+The script prints an error for each function over the limit, and for each skip comment that gives no reason or skips
+nothing, and exits with code 1. It exits with code 0 when it finds none, and with code 2 when it can't read a file.
+"""
+
+import argparse
+import ast
+import io
+import json
+import re
+import subprocess
+import sys
+import tokenize
+from collections.abc import Callable, Container, Iterator, Sequence
+from pathlib import Path
+from typing import Any, NamedTuple
+
+LIMIT = 15
+SKIP_MARKER = "check-complexity: skip"
+# The marker ends at a word boundary, so that a comment such as "check-complexity: skipping" doesn't hold it.
+SKIP_COMMENT = re.compile(re.escape(SKIP_MARKER) + r"\b(?P<reason>.*)")
+SKIP_EXAMPLE = f"# {SKIP_MARKER}, because each branch reads one field of the same record"
+SHFMT_INSTALL_URL = "https://github.com/mvdan/sh#shfmt"
+MISPLACED_SKIP_COMMENT = (
+    "the skip comment isn't in the comment lines right above a function that the check counts, so it skips nothing. "
+    "Move it there, or remove it."
+)
+
+
+class Function(NamedTuple):
+    name: str
+    # The line of the function's first decorator, or of the function's name.
+    line: int
+    complexity: int
+
+
+class ParsedFile(NamedTuple):
+    lines: list[str]
+    functions: list[Function]
+    # The text of each comment, by its line.
+    comments: dict[int, str]
+
+
+class UnreadableFile(Exception):
+    """A file that the script can't read or parse, with what to do about it."""
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="scripts/check-complexity", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    for language in READERS:
+        parser.add_argument(f"--{language}", nargs="+", default=[], metavar="FILE", help=f"the {language} files")
+    options = vars(parser.parse_args(argv))
+    errors = []
+    try:
+        for language, read in READERS.items():
+            for path in options[language]:
+                errors += file_errors(path, read(path))
+    except UnreadableFile as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    for message in errors:
+        print(message, file=sys.stderr)
+    return 1 if errors else 0
+
+
+def file_errors(path: str, parsed: ParsedFile) -> list[str]:
+    """An error for each function over the limit that no skip comment lets through, and for each skip comment that
+    gives no reason or skips nothing, in the order of their lines."""
+    reasons = {line: match["reason"] for line, text in parsed.comments.items() if (match := SKIP_COMMENT.search(text))}
+    errors: list[tuple[int, str]] = []
+    for function in parsed.functions:
+        skip_line = skip_comment_above(parsed, function.line, reasons)
+        if skip_line is None:
+            if function.complexity > LIMIT:
+                errors.append(
+                    (function.line, f"{count_and_limit(function)} Split it into functions that each have one purpose.")
+                )
+            continue
+        reason = reasons.pop(skip_line)
+        if function.complexity <= LIMIT:
+            errors.append(
+                (skip_line, f"the skip comment skips nothing, because {count_and_limit(function)} Remove the comment.")
+            )
+        elif not re.search(r"\w", reason):
+            errors.append(
+                (skip_line, f'the skip comment gives no reason. Write it after the marker, as in "{SKIP_EXAMPLE}".')
+            )
+    # The skip comments that are left are above no function.
+    errors += [(line, MISPLACED_SKIP_COMMENT) for line in reasons]
+    return [f"error: {path}:{line}: {message}" for line, message in sorted(errors)]
+
+
+def count_and_limit(function: Function) -> str:
+    """A sentence that gives a function's count and the limit."""
+    return f"{function.name} has a cognitive complexity of {function.complexity}, and the limit is {LIMIT}."
+
+
+def skip_comment_above(parsed: ParsedFile, line: int, skip_lines: Container[int]) -> int | None:
+    """The line of the skip comment in the comment lines right above a line, if they hold one."""
+    above = line - 1
+    while above in parsed.comments and parsed.lines[above - 1].lstrip().startswith("#"):
+        if above in skip_lines:
+            return above
+        above -= 1
+    return None
+
+
+def read_text(path: str) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except OSError as error:
+        raise UnreadableFile(f"can't read {path}: {error.strerror}. Check the path.") from error
+
+
+def read_bash(path: str) -> ParsedFile:
+    source = read_text(path)
+    command = ["shfmt", "--language-dialect", "bash", "--filename", path, "--to-json"]
+    try:
+        done = subprocess.run(command, input=source, capture_output=True, text=True, check=False)
+    except FileNotFoundError as error:
+        raise UnreadableFile(
+            f"shfmt is not installed, and the check reads bash with it. Install it: {SHFMT_INSTALL_URL}"
+        ) from error
+    if done.returncode != 0:
+        raise UnreadableFile(f"shfmt can't parse {path}: {done.stderr.strip()}. Fix the line that it names.")
+    tree = json.loads(done.stdout)
+    return ParsedFile(source.splitlines(), bash_functions(tree), dict(bash_comments(tree)))
+
+
+def read_python(path: str) -> ParsedFile:
+    source = read_text(path)
+    try:
+        tree = ast.parse(source, filename=path)
+    except SyntaxError as error:
+        raise UnreadableFile(
+            f"Python can't parse {path}: {error.msg} on line {error.lineno}. Fix that line."
+        ) from error
+    tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+    comments = {token.start[0]: token.string for token in tokens if token.type == tokenize.COMMENT}
+    return ParsedFile(source.splitlines(), python_functions(tree, source), comments)
+
+
+# To check another language, add a reader for it here, and have scripts/check pass the language's files to the option
+# that the reader's key names, such as --bash.
+READERS: dict[str, Callable[[str], ParsedFile]] = {"bash": read_bash, "python": read_python}
+
+
+def bash_comments(node: Any) -> Iterator[tuple[int, str]]:
+    """The line and the text of each comment in the syntax tree that shfmt --to-json prints."""
+    if isinstance(node, list):
+        for item in node:
+            yield from bash_comments(item)
+    elif isinstance(node, dict):
+        if "Hash" in node and "Text" in node:
+            yield node["Hash"]["Line"], node["Text"]
+        for value in node.values():
+            yield from bash_comments(value)
+
+
+def bash_functions(tree: object) -> list[Function]:
+    """Each function in the syntax tree that shfmt --to-json prints, with its count."""
+    counter = BashCounter()
+    # The code outside functions doesn't count, because it's mostly a list of separate steps.
+    counter.count(tree, 0)
+    return counter.functions
+
+
+class BashCounter:
+    def __init__(self) -> None:
+        self.functions: list[Function] = []
+
+    def count(self, node: Any, level: int) -> int:
+        """The complexity of a node of shfmt's tree at a nesting level, without the functions inside it."""
+        if isinstance(node, list):
+            return sum(self.count(item, level) for item in node)
+        if not isinstance(node, dict):
+            return 0
+        match node.get("Type"), node.get("Op"):
+            case "FuncDecl", _:
+                self.functions.append(Function(node["Name"]["Value"], node["Pos"]["Line"], self.count(node["Body"], 0)))
+                return 0
+            case "IfClause", _:
+                return self.count_if(node, level)
+            case "WhileClause", _:
+                return 1 + level + self.count(node.get("Cond"), level) + self.count(node.get("Do"), level + 1)
+            case "ForClause", _:
+                return 1 + level + self.count(node.get("Loop"), level) + self.count(node.get("Do"), level + 1)
+            case "CaseClause", _:
+                return 1 + level + self.count(node.get("Word"), level) + self.count_case_items(node, level)
+            case "BinaryArithm", "?":
+                # The branches are in Y, joined by a node with the operator :.
+                return 1 + level + self.count(node.get("X"), level) + self.count(node.get("Y"), level + 1)
+            case "BinaryCmd" | "BinaryTest" | "BinaryArithm", "&&" | "||":
+                operators, operands = bash_run(node)
+                return runs(operators) + self.count(operands, level)
+        return sum(self.count(value, level) for value in node.values())
+
+    def count_if(self, node: dict[str, Any], level: int) -> int:
+        """The complexity of an if, with each elif and else that follows it. An elif has a condition, and an else has
+        none."""
+        total = level
+        branch: dict[str, Any] | None = node
+        while branch is not None:
+            total += 1 + self.count(branch.get("Cond"), level) + self.count(branch.get("Then"), level + 1)
+            branch = branch.get("Else")
+        return total
+
+    def count_case_items(self, node: dict[str, Any], level: int) -> int:
+        return sum(
+            self.count(item.get("Patterns"), level) + self.count(item.get("Stmts"), level + 1)
+            for item in node.get("Items", [])
+        )
+
+
+def bash_run(node: dict[str, Any]) -> tuple[list[str], list[Any]]:
+    """The operators && and || of the run that a node starts, in the order they're written, and their operands."""
+    operators: list[str] = []
+    operands: list[Any] = []
+    for side in ("X", "Y"):
+        if side == "Y":
+            operators.append(node["Op"])
+        operand = node[side]
+        # Between commands, each command is inside a statement.
+        inner = operand.get("Cmd") if node["Type"] == "BinaryCmd" else operand
+        if isinstance(inner, dict) and inner.get("Type") == node["Type"] and inner.get("Op") in ("&&", "||"):
+            inner_operators, inner_operands = bash_run(inner)
+            operators += inner_operators
+            operands += inner_operands
+        else:
+            operands.append(operand)
+    return operators, operands
+
+
+def runs(operators: list[Any]) -> int:
+    """The number of runs of the same operator."""
+    return sum(1 for index, operator in enumerate(operators) if index == 0 or operator != operators[index - 1])
+
+
+FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef
+
+
+def python_functions(tree: ast.Module, source: str) -> list[Function]:
+    """Each function that isn't inside another function, with its count, which includes the functions inside it."""
+    counter = PythonCounter(source)
+    return [
+        Function(function.name, first_line(function), counter.count(function, 0, None))
+        for function in outer_functions(tree)
+    ]
+
+
+def first_line(function: FunctionNode) -> int:
+    return function.decorator_list[0].lineno if function.decorator_list else function.lineno
+
+
+def outer_functions(node: ast.AST) -> Iterator[FunctionNode]:
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, FunctionNode):
+            yield child
+        else:
+            yield from outer_functions(child)
+
+
+class PythonCounter:
+    """Counts as sonar-python counts, where it differs from Sonar's paper: a with block doesn't nest, a match adds
+    nothing, and the operands of a conditional expression nest."""
+
+    def __init__(self, source: str) -> None:
+        # ast gives each column as an offset in the line's UTF-8 bytes.
+        self.source = source.encode()
+        self.line_starts = [0, *(match.end() for match in re.finditer(b"\n", self.source))]
+
+    def count(self, node: ast.AST, level: int, function: FunctionNode | None) -> int:
+        """The complexity of a node at a nesting level, inside a function, or directly inside a class or a module."""
+        match node:
+            case ast.FunctionDef() | ast.AsyncFunctionDef():
+                return self.count_children(node, self.function_level(node, level, function), node)
+            case ast.ClassDef():
+                return self.count_children(node, 0, None)
+            case ast.If():
+                return 1 + level + self.count_if(node, level, function)
+            case ast.For() | ast.AsyncFor():
+                loop = self.count_block([node.target, node.iter], node.body, level, function)
+                return 1 + level + loop + self.count_else(node.orelse, level, function)
+            case ast.While():
+                loop = self.count_block([node.test], node.body, level, function)
+                return 1 + level + loop + self.count_else(node.orelse, level, function)
+            case ast.Try() | ast.TryStar():
+                # The code in try and finally doesn't nest.
+                statements = [*node.body, *node.handlers, *node.finalbody]
+                return self.count_all(statements, level, function) + self.count_else(node.orelse, level, function)
+            case ast.ExceptHandler():
+                return 1 + level + self.count_block([node.type], node.body, level, function)
+            case ast.match_case():
+                return self.count_block([node.pattern, node.guard], node.body, level, function)
+            case ast.IfExp():
+                return 1 + level + self.count_children(node, level + 1, function)
+            case ast.BoolOp():
+                operators, operands = self.python_run(node)
+                return runs(operators) + self.count_all(operands, level, function)
+        return self.count_children(node, level, function)
+
+    def count_children(self, node: ast.AST, level: int, function: FunctionNode | None) -> int:
+        return self.count_all(list(ast.iter_child_nodes(node)), level, function)
+
+    def count_all(self, nodes: Sequence[ast.AST | None], level: int, function: FunctionNode | None) -> int:
+        return sum(self.count(node, level, function) for node in nodes if node is not None)
+
+    def count_block(
+        self, header: list[ast.AST | None], body: list[ast.stmt], level: int, function: FunctionNode | None
+    ) -> int:
+        """The complexity of the header of a block, such as the condition of an if, and of its body, one level deeper."""
+        return self.count_all(header, level, function) + self.count_all(body, level + 1, function)
+
+    def count_else(self, statements: list[ast.stmt], level: int, function: FunctionNode | None) -> int:
+        return 1 + self.count_all(statements, level + 1, function) if statements else 0
+
+    def count_if(self, node: ast.If, level: int, function: FunctionNode | None) -> int:
+        """The complexity of an if without its own 1 and nesting, with each elif and else that follows it."""
+        total = self.count_block([node.test], node.body, level, function)
+        elif_node = self.elif_node(node.orelse)
+        if elif_node is not None:
+            return total + 1 + self.count_if(elif_node, level, function)
+        return total + self.count_else(node.orelse, level, function)
+
+    @staticmethod
+    def function_level(node: FunctionNode, level: int, function: FunctionNode | None) -> int:
+        """The nesting level inside a function. A function inside another function nests one level deeper, unless the
+        other function only defines it and returns it, as a decorator does."""
+        if function is None:
+            return 0
+        others = [statement for statement in function.body if statement is not node]
+        if all(isinstance(statement, ast.Return) and isinstance(statement.value, ast.Name) for statement in others):
+            return level
+        return level + 1
+
+    def elif_node(self, statements: list[ast.stmt]) -> ast.If | None:
+        """The elif that the statements after an if's body are, if they are one."""
+        # ast gives an elif the same node as an if inside an else.
+        if len(statements) != 1 or not isinstance(statements[0], ast.If):
+            return None
+        node = statements[0]
+        return node if self.source.startswith(b"elif", self.offset(node.lineno, node.col_offset)) else None
+
+    def python_run(self, node: ast.BoolOp) -> tuple[list[type[ast.boolop]], list[ast.expr]]:
+        """The operators and and or of the run that a node starts, in the order they're written, and their operands."""
+        operators: list[type[ast.boolop]] = []
+        operands: list[ast.expr] = []
+        previous_end = self.offset(node.lineno, node.col_offset)
+        for index, value in enumerate(node.values):
+            if index > 0:
+                operators.append(type(node.op))
+            start = self.offset(value.lineno, value.col_offset)
+            # ast leaves out parentheses, so only the text before an operand shows them.
+            between = re.sub(rb"#[^\n]*", b"", self.source[previous_end:start])
+            if isinstance(value, ast.BoolOp) and b"(" not in between:
+                inner_operators, inner_operands = self.python_run(value)
+                operators += inner_operators
+                operands += inner_operands
+            else:
+                operands.append(value)
+            previous_end = self.end(value)
+        return operators, operands
+
+    def offset(self, line: int, column: int) -> int:
+        return self.line_starts[line - 1] + column
+
+    def end(self, node: ast.expr) -> int:
+        # ast.parse gives every node its end.
+        assert node.end_lineno is not None and node.end_col_offset is not None
+        return self.offset(node.end_lineno, node.end_col_offset)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
