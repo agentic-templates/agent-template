@@ -160,23 +160,28 @@ expect_hook PreToolUse claude-code "$checkouts/plain" "$repository"
 expect_hook PreToolUse claude-code "$checkouts/missing" "$repository"
 
 # A before-tool that can't run. bash exits with code 2 when it can't parse a file, such as one with a conflict marker
-# that a merge left, and the tools read code 2 as a block.
+# that a merge left, and the tools read code 2 as a block. The stand-ins run stand-in checks in order, as before-tool
+# runs its checks, and the first check that blocks ends the hook.
 
-# Writes a stand-in before-tool that blocks cat .env with a reason that names its checkout, and allows everything
-# else: write_blocking_hook <checkout>
-write_blocking_hook() {
-  # shellcheck disable=SC2016 # $(cat) and $input expand when the hook runs.
-  printf '%s\n' '#!/bin/sh' 'input=$(cat)' 'case $input in' \
-    "  *'cat .env'*) echo \"Blocked by the hook in $1.\" >&2; exit 2 ;;" 'esac' >"$1/scripts/hooks/before-tool"
+# Writes a stand-in before-tool into a checkout: write_hook <checkout> <check>...
+# The check env blocks cat .env with a reason that names the checkout, and the check conflict is a conflict marker.
+# The stand-in reads its input first, for the reason that the stand-ins above do.
+write_hook() {
+  local checkout=$1 hook=$1/scripts/hooks/before-tool check
+  shift
+  # shellcheck disable=SC2016 # $(cat) expands when the hook runs.
+  printf '%s\n' '#!/usr/bin/env bash' 'input=$(cat)' >"$hook"
+  for check in "$@"; do
+    case $check in
+      env) printf '%s\n' "case \$input in *'cat .env'*) echo \"Blocked by the hook in $checkout.\" >&2; exit 2 ;; esac" ;;
+      conflict) printf '%s\n' '<<<<<<< HEAD' 'exit 0' '=======' 'exit 2' '>>>>>>> other' ;;
+    esac
+  done >>"$hook"
 }
 
-# Writes a stand-in before-tool with a conflict marker, and prints the error that bash gives on it:
-# write_broken_hook <checkout>
-# The stand-in reads its input first, for the reason that the stand-ins above do.
-write_broken_hook() {
-  local hook=$1/scripts/hooks/before-tool
-  printf '%s\n' '#!/usr/bin/env bash' 'cat >/dev/null' '<<<<<<< HEAD' 'exit 0' '=======' 'exit 2' '>>>>>>> other' >"$hook"
-  "$hook" </dev/null 2>&1 || true
+# Prints the error that the stand-in before-tool of a checkout gives on an empty input: hook_error <checkout>
+hook_error() {
+  "$1/scripts/hooks/before-tool" </dev/null 2>&1 || true
 }
 
 # Checks what the PreToolUse command of a settings file tells the agent about a command:
@@ -211,21 +216,33 @@ expect_pre_tool_result() {
 
 # Checks the PreToolUse command of a settings file with each hook that can't run: check_broken_hooks <file> <tool>
 check_broken_hooks() {
-  local file=$1 tool=$2 worktree_error note main_error
-  write_blocking_hook "$repository"
-  worktree_error=$(write_broken_hook "$worktree")
-  note="$worktree/scripts/hooks/before-tool can't run, so the main checkout's copy checked this action instead."
-  expect_pre_tool_result "$file" "$tool" "$worktree" ls 0 "$note Fix the file that this error names: $worktree_error"
-  expect_pre_tool_result "$file" "$tool" "$worktree" 'cat .env' 2 \
-    "$worktree_error"$'\n'"$note Fix the file that the error above names."$'\n'"Blocked by the hook in $repository."
+  local file=$1 tool=$2 error
+  local note="$worktree/scripts/hooks/before-tool can't run, so the main checkout's copy checked this action instead."
 
-  # When the worktree's hook works, its block stands, and the main checkout's copy doesn't run.
-  write_blocking_hook "$worktree"
+  # A worktree whose hook has a syntax error. The main checkout's copy allows ls and blocks cat .env.
+  write_hook "$repository" env
+  write_hook "$worktree" conflict
+  error=$(hook_error "$worktree")
+  expect_pre_tool_result "$file" "$tool" "$worktree" ls 0 "$note Fix the file that this error names: $error"
+  expect_pre_tool_result "$file" "$tool" "$worktree" 'cat .env' 2 \
+    "$error"$'\n'"$note Fix the file that the error above names."$'\n'"Blocked by the hook in $repository."
+
+  # From here on, the main checkout's copy allows every action, so only the worktree's hook can block one.
+  # In a worktree whose hook has a working check before a check with a syntax error, a block from the working check
+  # stands.
+  write_hook "$repository"
+  write_hook "$worktree" env conflict
+  error=$(hook_error "$worktree")
+  expect_pre_tool_result "$file" "$tool" "$worktree" 'cat .env' 2 "Blocked by the hook in $worktree."
+  expect_pre_tool_result "$file" "$tool" "$worktree" ls 0 "$note Fix the file that this error names: $error"
+
+  # A worktree whose hook works
+  write_hook "$worktree" env
   expect_pre_tool_result "$file" "$tool" "$worktree" 'cat .env' 2 "Blocked by the hook in $worktree."
 
   # In the main checkout, no other copy can check the action, so the command blocks it.
-  main_error=$(write_broken_hook "$repository")
-  expect_pre_tool_result "$file" "$tool" "$repository" ls 2 "$main_error"
+  write_hook "$repository" conflict
+  expect_pre_tool_result "$file" "$tool" "$repository" ls 2 "$(hook_error "$repository")"
 }
 
 check_broken_hooks "$settings" claude-code
