@@ -10,7 +10,7 @@ from machine import Machine
 # The scheduler's own numbers. A retrospective changes them from the lines on heavy commands that scripts/loop/report
 # gives.
 # The room that the scheduler leaves to the agents and to everything else that runs outside it
-KEEP_FREE_CORES = 1.0
+KEEP_FREE_CORES = 0.5
 KEEP_FREE_MEMORY_GB = 2.0
 KEEP_FREE_GPU_PERCENT = 10.0
 # A command reserves the most that it used in this many of its last runs.
