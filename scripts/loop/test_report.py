@@ -14,7 +14,8 @@ from typing import Any
 from unittest import mock
 
 import paths
-from test_transcripts import START, at, call_line, prompt_line
+from test_agent_time import message_line
+from test_transcripts import START, at, call_line, command_line, prompt_line, result_line
 
 REPORT = Path(__file__).with_name("report")
 # The report's file name has no .py, so the tests load it by its path.
@@ -176,6 +177,7 @@ class EmptyPeriodTest(ReportTest):
                     "Requests of the agents of a session that have no event: 0 of 0",
                     "Orchestrator's share of the input tokens: none used",
                     "Hook blocks: 0",
+                    "Agents' time: 0.0 min, from the transcripts of 0 agents, and 0 agents have none",
                     "Machine: no readings",
                 ],
                 "",
@@ -488,6 +490,83 @@ class TypeTest(ReportTest):
         status, lines, errors = self.run_report()
         self.assertEqual((status, lines), (1, []))
         self.assertIn("Could not resolve to a PullRequest", errors)
+
+
+class AgentTimeTest(ReportTest):
+    def agent_transcript(self, agent_id: str, lines: list[Any]) -> Path:
+        """Writes the transcript of the agent that the Agent call with the id started."""
+        transcript = self.transcript(f"agent-{agent_id}", lines, "session")
+        transcript.with_suffix(".meta.json").write_text(json.dumps({"toolUseId": agent_id}))
+        return transcript
+
+    def test_totals_each_part_of_the_time_of_the_agents_with_a_transcript_and_counts_those_without(self) -> None:
+        self.log_agents(
+            start("a", 0, issue=12, kind="other", label="feature"),
+            end("a", 30, minutes=12, pull_request=57),
+            start("b", 1),
+            start("c", 2),
+            start("gone", 3),
+            {**start("test", 4), "test": True},
+            start("old", -10),
+        )
+        self.add_pull_request(57)
+        self.agent_transcript(
+            "a",
+            [
+                prompt_line(0),
+                command_line("x", 2, "toolu_1", "scripts/check"),
+                result_line(8, "toolu_1", "passed"),
+                call_line("y", 10),
+                message_line(28),
+                call_line("z", 30),
+            ],
+        )
+        self.agent_transcript(
+            "b", [prompt_line(1), command_line("x", 3, "toolu_2", "sleep 120"), result_line(5, "toolu_2", "")]
+        )
+        self.agent_transcript("gone", [prompt_line(3)]).unlink()
+        self.agent_transcript("test", [prompt_line(4), call_line("x", 50)])
+        self.agent_transcript("old", [prompt_line(-10), call_line("x", 50)])
+        status, lines, errors = self.run_report("--since", SINCE.isoformat(), "--issues")
+        self.assertEqual((status, errors), (0, ""))
+        self.assertEqual(
+            next(line for line in lines if line.startswith("Agents' time")),
+            (
+                "Agents' time: 34.0 min, from the transcripts of 2 agents, and 2 agents have none | model 8.0 min "
+                "(24%) | scripts/check 6.0 min (18%) | single test files 0.0 min (0%) | waiting for CI 0.0 min (0%) "
+                "| sleeps 2.0 min (6%) | other commands 0.0 min (0%) | other tools 0.0 min (0%) | waiting for "
+                "background tasks 0.0 min (0%) | waiting for the orchestrator 18.0 min (53%)"
+            ),
+        )
+        self.assertEqual(
+            next(line for line in lines if line.startswith("Issue")),
+            (
+                "Issue #12 feature other: builder, 12.0 min, 1 tool calls, 1 input tokens, 1 output tokens | pull "
+                "request #57: no fix after review, failed check, unmerged exit from the merge queue or second builder "
+                "| time: model 6.0 min, scripts/check 6.0 min, waiting for the orchestrator 18.0 min"
+            ),
+        )
+
+    def test_gives_the_split_of_an_agent_that_has_not_ended_or_opened_no_pull_request(self) -> None:
+        self.log_agents(
+            start("a", 0, issue=12, kind="other", label="feature"),
+            start("b", 0, issue=13, kind="other", label="bug"),
+            end("b", 2, minutes=2),
+        )
+        self.agent_transcript("a", [prompt_line(0), call_line("x", 1)])
+        self.agent_transcript("b", [prompt_line(0), call_line("x", 2)])
+        status, lines, errors = self.run_report("--since", SINCE.isoformat(), "--issues")
+        self.assertEqual((status, errors), (0, ""))
+        self.assertEqual(
+            [line for line in lines if line.startswith("Issue")],
+            [
+                "Issue #12 feature other: builder, not ended | time: model 1.0 min",
+                (
+                    "Issue #13 bug other: builder, 2.0 min, 1 tool calls, 1 input tokens, 1 output tokens | no pull "
+                    "request | time: model 2.0 min"
+                ),
+            ],
+        )
 
 
 class OrchestratorTest(ReportTest):
