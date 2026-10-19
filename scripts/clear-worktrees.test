@@ -65,7 +65,7 @@ starting_case=$base/starting-case
 git init --quiet --bare "$starting_case/origin.git"
 git init --quiet --initial-branch=main "$starting_case/main"
 mkdir "$starting_case/main/scripts"
-cp scripts/clear-worktrees "$starting_case/main/scripts/clear-worktrees"
+cp scripts/clear-worktrees scripts/secret-file-names "$starting_case/main/scripts/"
 printf 'January: 120\n' >"$starting_case/main/totals.txt"
 git -C "$starting_case/main" add --all
 git -C "$starting_case/main" commit --quiet -m "feat: total the expenses"

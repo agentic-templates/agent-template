@@ -1,18 +1,23 @@
 #!/usr/bin/env -S uv run --script --quiet
 """Starts a builder for one issue with Claude Code or Codex, waits for it to end, and says where its report is.
 
-  scripts/loop/run-builder <issue> --tool claude|codex [--account NAME] [--model MODEL] [--effort EFFORT]
+  scripts/loop/run-builder <issue> <kind> --tool claude|codex [--account NAME] [--model MODEL] [--effort EFFORT]
 
-The builder runs on the account called NAME in .loop/accounts.json, which scripts/loop/meter --help describes, or on
-the tool's first account there. It works in .claude/worktrees/run-<issue> in the main checkout, on the issue's
-branch. The script doesn't start when that worktree exists already, or when the issue has needs-triage.
+<issue> <kind> is the line that scripts/take-next-issue printed, such as 12 other. The builder runs on the account
+called NAME in .loop/accounts.json, which scripts/loop/meter --help describes, or on the tool's first account there.
+It works in .claude/worktrees/run-<issue> in the main checkout, on the issue's branch, and the script removes the
+worktree when the run ends. The script doesn't start when that worktree exists already, or when the issue has
+needs-triage.
 
 A Claude builder builds the issue as "Build one issue" in docs/building.md describes.
 
-A Codex builder runs in a sandbox that can't reach the network or write the git folder, so it only edits files. When
-it ends, the script commits its changes and pushes them. If the branch has no pull request yet, the script opens one
-with the builder's report as its description, and turns on auto-merge unless scripts/check-main-rules fails. If the
-builder changed no file, its report becomes a comment on the issue instead.
+A Codex builder runs in a sandbox that can't reach the network or write the git folder, so it only edits files, and
+it builds only the kinds research and other. When it ends, the script commits its changes and pushes them, unless a file's
+name suggests a secret, or scripts/leak-scan or the main checkout's git hooks refuse the commit. If the branch has no
+pull request yet, the script opens one with the builder's report as its description, and turns on auto-merge unless
+scripts/check-main-rules fails. If scripts/loop/consequential lists a file that the branch changes, the pull request
+is a draft without auto-merge instead, also when the branch had it already. If the builder changed no file, its
+report becomes a comment on the issue.
 
 The last line gives the issue, the tool and the account, how the run ended, its minutes, and where the builder's
 report is. The run folder, .loop/runs/<issue>-<time>, keeps the brief, the builder's events and report, and
@@ -30,15 +35,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import paths
 from accounts import TOOLS, Account, AccountsError, claude_environment, load_accounts
 
-# The checkout that holds this script. The script runs this checkout's hooks and checks, because the worktree's
-# copies are files that the builder can change, and they would run outside Codex's sandbox.
+# The checkout that holds this script. The script runs this checkout's checks, such as scripts/hooks/before-tool,
+# because the worktree's copies are files that the builder can change, and they would run outside Codex's sandbox.
 TRUSTED_ROOT = Path(__file__).resolve().parents[2]
-GIT_HOOKS = TRUSTED_ROOT / "scripts" / "git-hooks"
 CLAUDE_COMMAND = [
     "claude",
     "-p",
@@ -51,10 +55,24 @@ CLAUDE_COMMAND = [
     "--verbose",
 ]
 COMMIT_TYPES = {"feature": "feat", "bug": "fix", "maintenance": "chore"}
-# Codex runs without the variables whose names match, because it can't use a credential in its sandbox, and what it
-# prints ends up in the run folder and on GitHub.
+# The kinds that scripts/take-next-issue prints. A Codex builder builds only CODEX_KINDS, because the others need gh.
+KIND = re.compile(r"research|parent|other|left behind [1-9][0-9]*")
+CODEX_KINDS = ("research", "other")
+# Codex runs without the variables whose names match, because they can hold a credential, which it can't use in its
+# sandbox, or choose another account, such as CODEX_HOME. What it prints ends up in the run folder and on GitHub.
 CREDENTIAL_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE", re.IGNORECASE)
-CREDENTIAL_PREFIXES = ("GH_", "GITHUB_", "ANTHROPIC_", "AWS_", "AZURE_", "GOOGLE_", "SSH_", "CLAUDE")
+CREDENTIAL_PREFIXES = (
+    "GH_",
+    "GITHUB_",
+    "ANTHROPIC_",
+    "AWS_",
+    "AZURE_",
+    "GOOGLE_",
+    "SSH_",
+    "CLAUDE",
+    "CODEX_",
+    "OPENAI_",
+)
 # The URL of a remote, over HTTPS or SSH. Group 1 holds the repository's owner, and group 2 its name.
 REMOTE_URL = re.compile(
     r"^(?:[a-z+]+://(?:[^/@]+@)?[^/:]+(?::\d+)?/|[^/@]+@[^/:]+:)([^/]+)/([^/]+?)(?:\.git)?/?$", re.IGNORECASE
@@ -72,8 +90,10 @@ to uv's cache. CI runs every check on the pull request.
 
 When you end, the script that started you commits your changes, pushes them and opens a pull request, with your last
 message under "What changed and why" in its description. Write that message for a developer who joins the project
-later, as docs/writing.md says. If you change no file, your last message becomes a comment on the issue instead: for
-a research issue, your answer with a recommendation and the evidence, and otherwise what you need to finish the issue.
+later, as docs/writing.md says. If scripts/loop/consequential lists a file that your change touches, the pull request
+is a draft, because a reviewer reads it before it merges. If you change no file, your last message becomes a comment
+on the issue instead: for a research issue, your answer with a recommendation and the evidence, and otherwise what you
+need to finish the issue.
 """
 
 
@@ -81,35 +101,48 @@ class Stop(Exception):
     """Ends the run, with the reason."""
 
 
+class Folders(NamedTuple):
+    checkout: Path
+    worktree: Path
+    run: Path
+    # The main checkout's git hooks folder, as an absolute path. A relative core.hooksPath would name the worktree's
+    # copies of the hooks.
+    hooks: str
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="scripts/loop/run-builder", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("issue", type=int)
+    parser.add_argument("kind", nargs="+", help="the issue's kind, as scripts/take-next-issue printed it")
     parser.add_argument("--tool", required=True, choices=TOOLS)
     parser.add_argument("--account", help="the account's name in .loop/accounts.json")
     parser.add_argument("--model")
     parser.add_argument("--effort")
     options = parser.parse_args(argv)
+    kind = " ".join(options.kind)
     checkout = paths.main_checkout(Path.cwd())
     worktree = checkout / ".claude" / "worktrees" / f"run-{options.issue}"
     try:
+        check_kind(kind, options.tool)
         account = pick_account(load_accounts(paths.loop_dir() / "accounts.json"), options.tool, options.account)
         check_can_start(options.tool, worktree)
         repository = github_repository(checkout)
         # Every gh command from here on acts on that repository, the builder's too.
         os.environ["GH_REPO"] = repository
         issue = read_issue(options.issue, checkout)
+        hooks = run_ok(["git", "rev-parse", "--path-format=absolute", "--git-path", "hooks"], checkout).strip()
     except (AccountsError, Stop) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
     started = dt.datetime.now().astimezone()
-    folder = paths.loop_dir() / "runs" / f"{options.issue}-{started:%Y%m%d-%H%M%S}"
-    folder.mkdir(parents=True)
+    folders = Folders(checkout, worktree, paths.loop_dir() / "runs" / f"{options.issue}-{started:%Y%m%d-%H%M%S}", hooks)
+    folders.run.mkdir(parents=True)
     begun = time.monotonic()
     try:
-        outcome = build(options, account, issue, repository, checkout, worktree, folder)
+        outcome = build(options, kind, account, issue, repository, folders)
         is_ok = True
     except Stop as stop:
         outcome = f"failed: {stop}"
@@ -123,37 +156,47 @@ def main(argv: list[str] | None = None) -> int:
         "minutes": round(minutes, 1),
         "outcome": outcome,
     }
-    (folder / "status.json").write_text(json.dumps(status, indent=2) + "\n")
-    report = folder / "report.md"
-    where = f"report {report}" if report.exists() else f"no report, see {folder}"
+    (folders.run / "status.json").write_text(json.dumps(status, indent=2) + "\n")
+    report = folders.run / "report.md"
+    where = f"report {report}" if report.exists() else f"no report, see {folders.run}"
     print(f"issue {options.issue} | {options.tool} {account['name']} | {outcome} | {minutes:.1f} min | {where}")
     return 0 if is_ok else 1
 
 
 def build(
-    options: argparse.Namespace,
-    account: Account,
-    issue: dict[str, Any],
-    repository: str,
-    checkout: Path,
-    worktree: Path,
-    folder: Path,
+    options: argparse.Namespace, kind: str, account: Account, issue: dict[str, Any], repository: str, folders: Folders
 ) -> str:
     """Runs the builder in its worktree, and returns how the run ended."""
-    branch = make_worktree(issue["number"], repository, checkout, worktree)
-    brief = brief_for(issue, options.tool)
-    (folder / "brief.md").write_text(brief)
-    if options.tool == "claude":
-        model_options = [*option("--model", options.model), *option("--effort", options.effort)]
-        run_claude(brief, account, model_options, worktree, folder)
-        return "finished"
-    effort = f'model_reasoning_effort="{options.effort}"' if options.effort else None
-    run_codex(brief, account, [*option("--model", options.model), *option("--config", effort)], worktree, folder)
-    return finish_codex(issue, branch, checkout, worktree, folder / "report.md")
+    try:
+        branch = make_worktree(issue["number"], repository, folders)
+        brief = brief_for(issue, kind, options.tool)
+        (folders.run / "brief.md").write_text(brief)
+        if options.tool == "claude":
+            model_options = [*option("--model", options.model), *option("--effort", options.effort)]
+            run_claude(brief, account, model_options, folders)
+            return "finished"
+        effort = f'model_reasoning_effort="{options.effort}"' if options.effort else None
+        run_codex(brief, account, [*option("--model", options.model), *option("--config", effort)], folders)
+        return finish_codex(issue, branch, folders)
+    finally:
+        # Another run on the issue can't start while the worktree exists, and scripts/start-issue can't check out the
+        # branch while the worktree has it.
+        if folders.worktree.exists():
+            git(["worktree", "remove", "--force", str(folders.worktree)], folders.checkout, folders.hooks)
 
 
 def option(flag: str, value: str | None) -> list[str]:
     return [flag, value] if value else []
+
+
+def check_kind(kind: str, tool: str) -> None:
+    if not KIND.fullmatch(kind):
+        raise Stop(
+            f'"{kind}" isn\'t a kind that scripts/take-next-issue prints: research, parent, left behind <pull request> '
+            "or other. Give the line that it printed for the issue."
+        )
+    if tool == "codex" and kind not in CODEX_KINDS:
+        raise Stop(f"a Codex builder can't build an issue of the kind {kind}, because it needs gh. Use --tool claude.")
 
 
 def pick_account(accounts: list[Account], tool: str, name: str | None) -> Account:
@@ -201,19 +244,7 @@ def read_issue(number: int, checkout: Path) -> dict[str, Any]:
         run_ok(["gh", "issue", "view", str(number), "--json", "number,title,body,labels"], checkout)
     )
     if "needs-triage" in label_names(issue):
-        message = subprocess.run(
-            [
-                "bash",
-                "-c",
-                'source "$0" && needs_triage_message "$1" "$1"',
-                TRUSTED_ROOT / "scripts" / "needs-triage",
-                str(number),
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        raise Stop(message.stdout.strip())
+        raise Stop(shell_function("needs-triage", 'needs_triage_message "$1" "$1"', str(number)).strip())
     return issue
 
 
@@ -221,19 +252,18 @@ def label_names(issue: dict[str, Any]) -> list[str]:
     return [label["name"] for label in issue["labels"]]
 
 
-def make_worktree(issue: int, repository: str, checkout: Path, worktree: Path) -> str:
+def make_worktree(issue: int, repository: str, folders: Folders) -> str:
     """Adds the worktree on the issue's branch, and returns the branch."""
-    git(["fetch", "--prune", "--quiet", "origin"], checkout)
-    branch = newest_linked_branch(issue, repository, checkout)
+    git(["fetch", "--prune", "--quiet", "origin"], folders.checkout, folders.hooks)
+    branch = newest_linked_branch(issue, repository, folders.checkout)
     if branch is None:
-        run_ok(["gh", "issue", "develop", str(issue)], checkout)
-        git(["fetch", "--quiet", "origin"], checkout)
-        branch = newest_linked_branch(issue, repository, checkout)
+        run_ok(["gh", "issue", "develop", str(issue)], folders.checkout)
+        git(["fetch", "--quiet", "origin"], folders.checkout, folders.hooks)
+        branch = newest_linked_branch(issue, repository, folders.checkout)
     if branch is None:
         raise Stop(f"gh issue develop created no branch for issue #{issue} that origin has.")
-    # git creates the local branch from origin's if it has none.
-    git(["worktree", "add", "--quiet", str(worktree), branch], checkout)
-    git(["merge", "--ff-only", "--quiet", f"refs/remotes/origin/{branch}"], worktree)
+    git(["worktree", "add", "--quiet", str(folders.worktree), branch], folders.checkout, folders.hooks)
+    git(["merge", "--ff-only", "--quiet", f"refs/remotes/origin/{branch}"], folders.worktree, folders.hooks)
     return branch
 
 
@@ -252,24 +282,22 @@ def newest_linked_branch(issue: int, repository: str, checkout: Path) -> str | N
     return newest[1] if newest else None
 
 
-def brief_for(issue: dict[str, Any], tool: str) -> str:
-    kind = "research" if "research" in label_names(issue) else "other"
+def brief_for(issue: dict[str, Any], kind: str, tool: str) -> str:
     issue_text = f"Issue #{issue['number']}: {issue['title']}\n\n{issue['body']}\n\n---\n\n"
     return issue_text + SHARED_BRIEF.format(kind=kind) + (CLAUDE_BRIEF if tool == "claude" else CODEX_BRIEF)
 
 
-def run_claude(brief: str, account: Account, model_options: list[str], worktree: Path, folder: Path) -> None:
+def run_claude(brief: str, account: Account, model_options: list[str], folders: Folders) -> None:
     """Runs claude until it ends, and writes its result to report.md in the run folder."""
     # The variable makes claude wait through a usage limit.
     environment = claude_environment(account) | {"CLAUDE_CODE_RETRY_WATCHDOG": "1"}
     result: dict[str, Any] | None = None
     with (
-        (folder / "events.jsonl").open("w") as events,
-        (folder / "stderr.log").open("w") as errors,
-        # Popen waits for claude to end when the block ends, also when the block raises Stop.
+        (folders.run / "events.jsonl").open("w") as events,
+        (folders.run / "stderr.log").open("w") as errors,
         subprocess.Popen(
             [*CLAUDE_COMMAND, *model_options, brief],
-            cwd=worktree,
+            cwd=folders.worktree,
             env=environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -277,7 +305,6 @@ def run_claude(brief: str, account: Account, model_options: list[str], worktree:
             text=True,
         ) as process,
     ):
-        # Popen gives stdout because of stdout=subprocess.PIPE.
         assert process.stdout is not None
         for line in process.stdout:
             events.write(line)
@@ -297,7 +324,7 @@ def run_claude(brief: str, account: Account, model_options: list[str], worktree:
     problem = claude_problem(result, exit_code)
     if problem:
         raise Stop(problem)
-    (folder / "report.md").write_text(str(result.get("result", "")))
+    (folders.run / "report.md").write_text(str(result.get("result", "")))
 
 
 def claude_problem(result: dict[str, Any], exit_code: int) -> str | None:
@@ -310,7 +337,7 @@ def claude_problem(result: dict[str, Any], exit_code: int) -> str | None:
     return None
 
 
-def run_codex(brief: str, account: Account, model_options: list[str], worktree: Path, folder: Path) -> None:
+def run_codex(brief: str, account: Account, model_options: list[str], folders: Folders) -> None:
     """Runs codex until it ends. Codex writes its last message to report.md in the run folder."""
     command = [
         "codex",
@@ -318,30 +345,32 @@ def run_codex(brief: str, account: Account, model_options: list[str], worktree: 
         "--sandbox",
         "workspace-write",
         "--cd",
-        str(worktree),
+        str(folders.worktree),
         "--json",
         "--output-last-message",
-        str(folder / "report.md"),
+        str(folders.run / "report.md"),
         *model_options,
         brief,
     ]
-    with (folder / "events.jsonl").open("w") as events, (folder / "stderr.log").open("w") as errors:
+    with (folders.run / "events.jsonl").open("w") as events, (folders.run / "stderr.log").open("w") as errors:
         done = subprocess.run(
             command,
-            cwd=worktree,
+            cwd=folders.worktree,
             env=codex_environment(account),
             stdin=subprocess.DEVNULL,
             stdout=events,
             stderr=errors,
             check=False,
         )
-    problem = codex_problem(list(map(parse_event, (folder / "events.jsonl").read_text().splitlines())), done.returncode)
+    events_text = (folders.run / "events.jsonl").read_text()
+    problem = codex_problem(list(map(parse_event, events_text.splitlines())), done.returncode)
     if problem:
         raise Stop(problem)
 
 
 def codex_environment(account: Account) -> dict[str, str]:
-    """This process's environment without the variables that can hold a credential, and with the account's variables."""
+    """This process's environment without the variables that CREDENTIAL_NAME and CREDENTIAL_PREFIXES match, and with
+    the account's variables."""
     kept = {
         name: value
         for name, value in os.environ.items()
@@ -375,43 +404,55 @@ def parse_event(line: str) -> dict[str, Any]:
     return event if isinstance(event, dict) else {}
 
 
-def finish_codex(issue: dict[str, Any], branch: str, checkout: Path, worktree: Path, report_file: Path) -> str:
+def finish_codex(issue: dict[str, Any], branch: str, folders: Folders) -> str:
     """Posts what codex did: the pull request of its changes, or its report as a comment when it changed no file.
     Returns the outcome."""
+    report_file = folders.run / "report.md"
     report = report_file.read_text().strip() if report_file.exists() else ""
     if not report:
         raise Stop("codex wrote no report, so the script can't describe its change or post its answer.")
-    if git(["status", "--porcelain"], worktree).strip():
-        return push_changes(issue, branch, checkout, worktree, report)
+    if git(["status", "--porcelain"], folders.worktree, folders.hooks).strip():
+        return push_changes(issue, branch, folders, report)
     comment = ["gh", "issue", "comment", str(issue["number"]), "--body", report]
-    reason = hook_block(comment, checkout)
+    reason = hook_block(comment, folders.checkout)
     if reason:
         raise Stop(f"the hooks would block codex's report as a comment on the issue: {reason}")
-    run_ok(comment, checkout)
+    run_ok(comment, folders.checkout)
     return "comment"
 
 
-def push_changes(issue: dict[str, Any], branch: str, checkout: Path, worktree: Path, report: str) -> str:
-    """Commits the changes, pushes them, and opens a pull request if the branch has none. Returns the outcome."""
+def push_changes(issue: dict[str, Any], branch: str, folders: Folders, report: str) -> str:
+    """Commits the changes and checks the commit, pushes it, and opens a pull request if the branch has none. Returns
+    the outcome."""
     title = commit_subject(issue)
-    git(["add", "--all"], worktree)
-    git(["commit", "--quiet", "--message", title], worktree)
-    head = git(["rev-parse", "HEAD"], worktree).strip()
-    existing = own_pull_request(branch, checkout)
+    head = commit_changes(title, folders)
+    scan_for_leaks(f"refs/remotes/origin/{branch}..{head}", folders.checkout)
+    needs_review = is_consequential(head, folders.checkout)
+    pull_request = own_pull_request(branch, folders.checkout)
     body = pull_request_body(issue["number"], report)
-    if existing is None:
-        problems = pull_request_problems(title, body, head, checkout)
+    if pull_request is None:
+        problems = pull_request_problems(title, body, head, folders.checkout)
         if problems:
             raise Stop(f"the pull request's text has problems, so the script pushed nothing: {problems}")
-    git(["push", "--quiet", "origin", f"{head}:refs/heads/{branch}"], worktree)
-    if existing is not None:
-        return f"pull request #{existing}"
-    created = run_ok(
-        ["gh", "pr", "create", "--title", title, "--body", body, "--head", branch, "--base", "main"], checkout
-    )
-    # gh prints the new pull request's URL, which ends in its number.
-    number = created.strip().rsplit("/", 1)[-1]
-    return f"pull request #{number}{turn_on_auto_merge(number, head, checkout)}"
+    elif needs_review:
+        hold_for_review(pull_request, folders.checkout)
+    git(["push", "--quiet", "origin", f"{head}:refs/heads/{branch}"], folders.worktree, folders.hooks)
+    if pull_request is not None:
+        return pull_request_outcome(str(pull_request["number"]), needs_review or pull_request["isDraft"])
+    return open_pull_request(title, body, branch, head, needs_review, folders.checkout)
+
+
+def commit_changes(title: str, folders: Folders) -> str:
+    """Commits the changes in the worktree, unless a file's name suggests a secret, and returns the commit."""
+    # The commit stays off the local branch, so that a commit that a check refuses can't go out with a later push.
+    git(["switch", "--quiet", "--detach"], folders.worktree, folders.hooks)
+    git(["add", "--all"], folders.worktree, folders.hooks)
+    staged = git(["diff", "--cached", "--name-only", "--diff-filter=d", "-z"], folders.worktree, folders.hooks)
+    secrets = secret_names([path for path in staged.split("\0") if path])
+    if secrets:
+        raise Stop(f"codex left files whose names suggest a secret, so the script pushed nothing: {', '.join(secrets)}")
+    git(["commit", "--quiet", "--message", title], folders.worktree, folders.hooks)
+    return git(["rev-parse", "HEAD"], folders.worktree, folders.hooks).strip()
 
 
 def commit_subject(issue: dict[str, Any]) -> str:
@@ -423,16 +464,77 @@ def pull_request_body(number: int, report: str) -> str:
     return f"Closes #{number}\n\n## What changed and why\n\n{report}\n"
 
 
-def own_pull_request(branch: str, checkout: Path) -> str | None:
-    """The number of the branch's open pull request, if it has one. A pull request from a fork can come from a branch
-    of the same name, and a push doesn't change it."""
-    listed = json.loads(
-        run_ok(
-            ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number,isCrossRepository"], checkout
-        )
+def secret_names(files: list[str]) -> list[str]:
+    """The files whose names suggest a secret, as has_secret_name in scripts/secret-file-names tells."""
+    each = 'for file in "$@"; do if has_secret_name "$file"; then printf "%s\\n" "$file"; fi; done'
+    return shell_function("secret-file-names", each, *files).splitlines()
+
+
+def scan_for_leaks(commits: str, checkout: Path) -> None:
+    done = subprocess.run(
+        [TRUSTED_ROOT / "scripts" / "leak-scan", "--range", commits],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    numbers = [str(pull_request["number"]) for pull_request in listed if not pull_request["isCrossRepository"]]
-    return numbers[0] if numbers else None
+    if done.returncode != 0:
+        problems = one_line(done.stdout + done.stderr)
+        raise Stop(f"scripts/leak-scan refused codex's commit, so the script pushed nothing: {problems}")
+
+
+def is_consequential(head: str, checkout: Path) -> bool:
+    """Whether scripts/loop/consequential lists a file that the branch changes against main. The script exits with
+    code 1 when it crashes too, so only its own line says that a change isn't consequential."""
+    done = subprocess.run(
+        [TRUSTED_ROOT / "scripts" / "loop" / "consequential", f"refs/remotes/origin/main...{head}"],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if done.returncode == 0:
+        return True
+    if done.returncode == 1 and done.stdout.strip() == "Not consequential.":
+        return False
+    raise Stop(
+        "scripts/loop/consequential can't tell whether a reviewer must read the change, so the script pushed "
+        f"nothing: {one_line(done.stderr or done.stdout)}"
+    )
+
+
+def own_pull_request(branch: str, checkout: Path) -> dict[str, Any] | None:
+    """The branch's open pull request, if it has one. A pull request from a fork can come from a branch of the same
+    name, and a push doesn't change it."""
+    fields = "number,isCrossRepository,isDraft,autoMergeRequest"
+    listed = json.loads(run_ok(["gh", "pr", "list", "--head", branch, "--state", "open", "--json", fields], checkout))
+    own = [pull_request for pull_request in listed if not pull_request["isCrossRepository"]]
+    return own[0] if own else None
+
+
+def hold_for_review(pull_request: dict[str, Any], checkout: Path) -> None:
+    """Turns off the pull request's auto-merge and makes it a draft, so that the change that the push adds waits for a
+    reviewer."""
+    number = str(pull_request["number"])
+    if pull_request["autoMergeRequest"]:
+        run_ok(["gh", "pr", "merge", number, "--disable-auto"], checkout)
+    if not pull_request["isDraft"]:
+        run_ok(["gh", "pr", "ready", number, "--undo"], checkout)
+
+
+def open_pull_request(title: str, body: str, branch: str, head: str, is_draft: bool, checkout: Path) -> str:
+    """Opens the pull request, as a draft or with auto-merge, and returns the outcome."""
+    command = ["gh", "pr", "create", "--title", title, "--body", body, "--head", branch, "--base", "main"]
+    created = run_ok([*command, "--draft"] if is_draft else command, checkout)
+    # gh prints the new pull request's URL, which ends in its number.
+    number = created.strip().rsplit("/", 1)[-1]
+    if is_draft:
+        return pull_request_outcome(number, True)
+    return f"{pull_request_outcome(number, False)}{turn_on_auto_merge(number, head, checkout)}"
+
+
+def pull_request_outcome(number: str, is_draft: bool) -> str:
+    return f"draft pull request #{number}" if is_draft else f"pull request #{number}"
 
 
 def hook_block(command: list[str], checkout: Path) -> str:
@@ -473,10 +575,21 @@ def turn_on_auto_merge(number: str, head: str, checkout: Path) -> str:
     return ""
 
 
-def git(arguments: list[str], folder: Path) -> str:
-    """The output of a git command that must succeed. Git runs the hooks in scripts/git-hooks of the checkout that holds
-    this script, never the worktree's."""
-    return run_ok(["git", "-c", f"core.hooksPath={GIT_HOOKS}", *arguments], folder)
+def shell_function(file: str, call: str, *arguments: str) -> str:
+    """The output of a call of the functions in a file in scripts/ of the checkout that holds this script, such as
+    scripts/needs-triage."""
+    done = subprocess.run(
+        ["bash", "-c", f'source "$0" && {call}', TRUSTED_ROOT / "scripts" / file, *arguments],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return done.stdout
+
+
+def git(arguments: list[str], folder: Path, hooks: str) -> str:
+    """The output of a git command that must succeed. Git runs the hooks in the folder hooks, as an absolute path."""
+    return run_ok(["git", "-c", f"core.hooksPath={hooks}", *arguments], folder)
 
 
 def run(command: list[str], folder: Path) -> subprocess.CompletedProcess[str]:

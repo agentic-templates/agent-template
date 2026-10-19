@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TypedDict
 
 TOOLS = ("claude", "codex")
+CLAUDE_VARIABLE_PREFIXES = ("ANTHROPIC_", "CLAUDE")
 
 
 class Account(TypedDict):
@@ -50,10 +51,9 @@ def account_from(entry: object, file: Path) -> Account:
 
 
 def claude_environment(account: Account) -> dict[str, str]:
-    """The environment that runs claude on the account: this process's environment with the account's variables. It
-    leaves out the variables of a Claude Code session, which would make claude think that it runs inside that
-    session."""
-    environment = {
-        key: value for key, value in os.environ.items() if not key.startswith("CLAUDE_CODE_") and key != "CLAUDECODE"
-    }
+    """The environment that runs claude on the account: this process's variables without those whose names start with
+    one of CLAUDE_VARIABLE_PREFIXES, and the account's variables. The caller's CLAUDE_CONFIG_DIR or ANTHROPIC_API_KEY
+    would run claude on another account or bill an API key, and the variables of a Claude Code session would make
+    claude think that it runs inside that session."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(CLAUDE_VARIABLE_PREFIXES)}
     return environment | account["env"]
