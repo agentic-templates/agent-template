@@ -107,10 +107,11 @@ After each issue, go back to step 1. Start an auditor too when "Start a retrospe
 - **Drafts.** For each draft pull request that the loop opened, and that no reviewer has read yet, start a
   `reviewer` agent with the pull request's number. Give each error that the reviewer reports to the builder that
   opened the draft, and ask it to fix each one, with a test when the error is in code. If you opened the draft, fix
-  the errors yourself. Nobody reviews the fixes again. Once the errors are fixed, or if the reviewer reports none, run
-  `gh pr ready <number>` and `gh pr merge <number>`. If it's the auditor's pull request, first add the label
-  `retrospective` to it if it's missing, because the meter counts the hours that the agents worked since the newest
-  merged pull request with that label.
+  the errors yourself. If the draft changes code that the loop's safety depends on, which is the first kind in the
+  description of `builder-deep`, start a new reviewer on it after each round of fixes, until a reviewer reports no
+  error. When no error remains, run `gh pr ready <number>` and `gh pr merge <number>`.
+  If it's the auditor's pull request, first add the label `retrospective` to it if it's missing, because the meter
+  counts the hours that the agents worked since the newest merged pull request with that label.
 - **Stuck pull requests.** Run `scripts/merge-dependabot-pull-requests`, which turns on auto-merge for Dependabot's
   pull requests. Then run `scripts/stuck-pull-requests`. For each pull request that it prints:
   - If it's Dependabot's, look for an issue about it with `gh issue list --state all --search "#<number>"`. If there's
