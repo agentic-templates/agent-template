@@ -16,7 +16,8 @@ that it measures what the command uses.
 
 A command starts ahead of the first in line only if the first still gets its room once the commands that run now end.
 When no heavy command runs, the first in line starts even if the machine has no room for it. A heavy command that
-another one starts runs at once, and so does every command in CI.
+another one starts runs at once, and so does every command in CI and in Codex's sandbox. In the sandbox, the script
+reads and writes nothing in the loop folder, which the sandbox can't write.
 
 The script adds a line to .loop/heavy.jsonl in the main checkout when a command starts to wait, when it starts, when
 a signal, such as Ctrl-C, stops it while it waits, and when it ends. Each line gives the machine's readings, as
@@ -144,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     command: list[str] = parser.parse_args(argv).command
     if not command:
         parser.error("give the command to run, as in scripts/loop/run-heavy make test")
-    if os.environ.get(HEAVY_VARIABLE) or os.environ.get("CI"):
+    if os.environ.get(HEAVY_VARIABLE) or os.environ.get("CI") or paths.is_in_codex_sandbox():
         return run_at_once(command)
     loop_folder = paths.loop_dir()
     turn = Turn(loop_folder / FOLDER, loop_folder / heavy_log.NAME, uuid.uuid4().hex, shlex.join(command), time.time())

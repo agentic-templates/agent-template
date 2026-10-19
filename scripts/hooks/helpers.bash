@@ -494,6 +494,15 @@ find_head_commit() {
   head_commit=$(git rev-parse --verify --quiet "$head_ref^{commit}") || return 1
 }
 
+# Succeeds if the pull request's latest commit, as find_head_commit finds it, is HEAD. A commit before gh in the same
+# command, as in git commit -am ... && gh pr create, then adds the changes on disk to the pull request, because the
+# hooks run before the whole command.
+is_pull_request_at_head() {
+  local head
+  head=$(git rev-parse --verify --quiet HEAD) || return 1
+  [[ $head_commit == "$head" ]]
+}
+
 # Sets base_commit and head_commit to the commits that the pull request of opens_pull_request compares, in the
 # repository of the current folder, or fails when it can't find them. The pull request's commits are those on its
 # branch, as find_head_commit finds its latest commit, that aren't on the base branch on GitHub. The base branch is the

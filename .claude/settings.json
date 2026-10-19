@@ -67,6 +67,16 @@
         ]
       }
     ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "unset CDPATH; input=$(cat); root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; common_dir() { cd \"$1\" && cd \"$(git rev-parse --git-common-dir)\" && pwd -P; }; cwd=$(printf '%s\\n' \"$input\" | jq -r '.cwd // empty' 2>/dev/null); cwd_root=$(cd \"${cwd:-.}\" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null) && [ \"$(common_dir \"$cwd_root\")\" = \"$(common_dir \"$root\")\" ] && root=$cwd_root; [ -x \"$root/scripts/hooks/before-compact\" ] || exit 0; printf '%s\\n' \"$input\" | \"$root/scripts/hooks/before-compact\""
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [

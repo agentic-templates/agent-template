@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tests scripts/hooks/session-start, run from a stand-in working folder two levels below a stand-in home folder.
+# Tests scripts/hooks/session-start, run from a stand-in working folder two levels below a stand-in home folder, and
+# scripts/hooks/before-compact, which records for it what started a compaction.
 # The cases assume that no CLAUDE.md, .claude/CLAUDE.md or CLAUDE.local.md exists above the system's temporary folder.
 set -euo pipefail
 # shellcheck source=scripts/hooks/testing.bash
@@ -324,6 +325,182 @@ run_session_start CLAUDE_PID="$running_process" LOOP_DIR="$other_loop"
 expect_output "With LOOP_DIR, the state file in its folder follows the note" \
   "You are this repository's orchestrator. Continue the loop from your state file, $other_loop/state.md, which follows."$'\n\n'"$(<"$other_loop/state.md")"
 
+# Before a compaction, Claude Code runs scripts/hooks/before-compact, with a trigger that is auto when Claude Code
+# compacts on its own because the context filled, and manual after /compact.
+behind_note="Claude Code compacted this conversation when the context filled, maybe in the middle of a step. So your state file may lack the steps you took after the time on its updated: line. Before you go on, check the file against the open pull requests, the issues assigned to you and the agents that scripts/loop/meter lists, and add to it what it lacks."
+
+# Prints the input that Claude Code sends before a compaction: compact_input <trigger> <session id> [<agent id>]
+compact_input() {
+  jq -n --arg trigger "$1" --arg session_id "$2" --arg agent_id "${3:-}" --arg cwd "$work" \
+    '{session_id: $session_id, cwd: $cwd, hook_event_name: "PreCompact", trigger: $trigger, custom_instructions: ""}
+      + if $agent_id == "" then {} else {agent_id: $agent_id} end'
+}
+
+# Runs scripts/hooks/before-compact in the working folder as Claude Code does, and checks that it prints nothing and
+# exits with code 0: run_before_compact <trigger> <session id> [<agent id>]
+run_before_compact() {
+  local status=0 output
+  output=$(cd "$work" && env -u LOOP_DIR HOME="$home" CLAUDECODE=1 "$hooks_folder/before-compact" \
+    <<<"$(compact_input "$@")" 2>&1) || status=$?
+  case_count=$((case_count + 1))
+  if ((status != 0)) || [[ -n $output ]]; then
+    echo "error: Before a compaction of the session $2${3:+ and the agent $3}, with the trigger $1, scripts/hooks/before-compact must print nothing and exit with code 0, but it exited with code $status and printed: $output" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks that the hooks left no record of a compaction in the loop's folder: expect_no_records <description>
+expect_no_records() {
+  local records
+  case_count=$((case_count + 1))
+  records=$(ls -A "$work/.loop/compactions" 2>/dev/null) || true
+  if [[ -n $records ]]; then
+    echo "error: $1, the hooks must leave no record of a compaction, but $work/.loop/compactions holds: $records" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+new_state_file
+run_before_compact auto owner-1
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_output "After an automatic compaction of the orchestrator" \
+  "$compacted"$'\n'"$owner_note"$'\n'"$behind_note"$'\n\n'"$(<"$state_file")"
+expect_no_records "After an automatic compaction of the orchestrator"
+
+new_state_file
+run_before_compact manual owner-1
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_output "After a manual compaction of the orchestrator" "$compacted"$'\n'"$owner_note"$'\n\n'"$(<"$state_file")"
+expect_output_without "After a manual compaction of the orchestrator" "$behind_note"
+expect_no_records "After a manual compaction of the orchestrator"
+
+new_state_file
+run_before_compact auto new-2
+session_input compact new-2
+run_session_start CLAUDE_PID="$running_process"
+expect_output "After /clear and an automatic compaction, before the orchestrator wrote both lines" \
+  "$(new_lines_note new-2 "$running_process")"$'\n'"$behind_note"$'\n\n'"$(<"$state_file")"
+
+# A subagent's input can hold the orchestrator's session id.
+new_state_file
+run_before_compact manual owner-1
+run_before_compact auto owner-1 agent-7
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_output "After a manual compaction of the orchestrator, during which a subagent's compaction started" \
+  "$owner_note"$'\n\n'"$(<"$state_file")"
+expect_output_without "After a manual compaction of the orchestrator, during which a subagent's compaction started" \
+  "$behind_note"
+
+new_state_file
+run_before_compact auto owner-1
+echo '{"source": "compact", "session_id": "owner-1", "agent_id": "agent-7"}' >"$input_file"
+run_session_start CLAUDE_PID="$running_process"
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_output "After an automatic compaction of the orchestrator, during which a subagent's compaction ended" \
+  "$owner_note"$'\n'"$behind_note"
+
+new_state_file
+run_before_compact manual owner-1
+run_before_compact auto someone-else
+session_input compact someone-else
+run_session_start CLAUDE_PID="$new_process"
+expect_output "After an automatic compaction of another session" "$other_note"
+expect_output_without "After an automatic compaction of another session" "$behind_note"
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_output "After a manual compaction of the orchestrator, during which another session's compaction started" \
+  "$owner_note"$'\n\n'"$(<"$state_file")"
+expect_output_without \
+  "After a manual compaction of the orchestrator, during which another session's compaction started" "$behind_note"
+expect_no_records "After the compactions of the orchestrator and another session"
+
+new_state_file
+mkdir -p "$work/.loop/compactions"
+run_before_compact auto ../state.md
+session_input compact ../state.md
+run_session_start CLAUDE_PID="$new_process"
+case_count=$((case_count + 1))
+if [[ $(<"$state_file") != "$(state_lines owner-1 "$running_process")" ]]; then
+  echo "error: After a compaction of the session ../state.md, the hooks must leave the state file as it was, but it holds: $(<"$state_file")" >&2
+  failed_cases=$((failed_cases + 1))
+fi
+
+new_state_file
+(cd "$work" && env -u CLAUDECODE -u LOOP_DIR HOME="$home" "$hooks_folder/before-compact" <<<"$(compact_input auto owner-1)") ||
+  true
+expect_no_records "Before a compaction, without CLAUDECODE"
+
+new_state_file
+rm "$state_file"
+run_before_compact auto owner-1
+expect_no_records "Before a compaction, without a state file"
+
+# A record that is empty, or that the hook can't read, doesn't say that Claude Code started the compaction.
+for record_kind in empty unreadable; do
+  new_state_file
+  mkdir -p "$work/.loop/compactions"
+  record=$work/.loop/compactions/owner-1
+  if [[ $record_kind == empty ]]; then
+    : >"$record"
+  else
+    echo auto >"$record"
+    chmod 0 "$record"
+  fi
+  session_input compact owner-1
+  run_session_start CLAUDE_PID="$running_process"
+  expect_output "After a compaction of the orchestrator, with an $record_kind record" \
+    "$compacted"$'\n'"$owner_note"$'\n\n'"$(<"$state_file")"
+  expect_output_without "After a compaction of the orchestrator, with an $record_kind record" "$behind_note"
+  expect_no_records "After a compaction of the orchestrator, with an $record_kind record"
+done
+
+# The orchestrator asks the maintainer's compaction sender for a compaction with a request, which names its session on
+# the first line: write_request <loop folder> <session id>
+write_request() {
+  printf '%s\nResume from .loop/state.md.\n' "$2" >"$1/compact-request.txt"
+}
+
+# Checks whether the hook left the request in place: expect_request <description> <loop folder> <kept|deleted>
+expect_request() {
+  local found=deleted
+  case_count=$((case_count + 1))
+  if [[ -f $2/compact-request.txt ]]; then
+    found=kept
+  fi
+  if [[ $found != "$3" ]]; then
+    echo "error: $1, the hook must have $3 the compaction request, but it $found it" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+new_state_file
+write_request "$work/.loop" owner-1
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_request "After a compaction of the orchestrator, which asked for it" "$work/.loop" deleted
+
+new_state_file
+write_request "$work/.loop" someone-else
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_request "After a compaction of the orchestrator, with a request of another session" "$work/.loop" kept
+
+new_state_file
+write_request "$work/.loop" owner-1
+session_input clear owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_request "After /clear in the orchestrator, which asked for a compaction" "$work/.loop" kept
+
+new_state_file
+write_request "$work/.loop" owner-1
+echo '{"source": "compact", "session_id": "owner-1", "agent_id": "agent-7"}' >"$input_file"
+run_session_start CLAUDE_PID="$running_process"
+expect_request "After a compaction of a subagent of the orchestrator, which asked for one" "$work/.loop" kept
+
 new_state_file
 session_input clear new-2
 run_session_start CLAUDE_PID="$running_process"
@@ -404,6 +581,46 @@ session_input compact owner-1
 run_session_start CLAUDE_PID="$running_process"
 expect_output "After a compaction of a builder in a worktree, whose input has no agent_id" "$builder_note"
 expect_output_without "After a compaction of a builder in a worktree, whose input has no agent_id" "$state_text"
+
+new_worktree "$running_process"
+write_request "$main_checkout/.loop" owner-1
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_request "After a compaction of a builder in a worktree, whose input has no agent_id" "$main_checkout/.loop" kept
+
+# Runs a function of these cases with another working folder: in_folder <folder> <function> [<argument>...]
+in_folder() {
+  local saved_work=$work
+  work=$1
+  shift
+  "$@"
+  work=$saved_work
+}
+main_owner_note="You are this repository's orchestrator. Continue the loop from your state file, $main_checkout/.loop/state.md, which follows."
+
+# The orchestrator works in the main checkout, and its subagent in a worktree, with the orchestrator's session id and no
+# agent_id in its input.
+new_worktree "$running_process"
+in_folder "$main_checkout" run_before_compact manual owner-1
+run_before_compact auto owner-1
+session_input compact owner-1
+in_folder "$main_checkout" run_session_start CLAUDE_PID="$running_process"
+expect_output "After a manual compaction of the orchestrator, during which its subagent in a worktree started one" \
+  "$main_owner_note"$'\n\n'"$(<"$main_checkout/.loop/state.md")"
+expect_output_without "After a manual compaction of the orchestrator, during which its subagent in a worktree started one" \
+  "$behind_note"
+in_folder "$main_checkout" expect_no_records \
+  "After a manual compaction of the orchestrator, during which its subagent in a worktree started one"
+
+new_worktree "$running_process"
+in_folder "$main_checkout" run_before_compact auto owner-1
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process"
+in_folder "$main_checkout" run_session_start CLAUDE_PID="$running_process"
+expect_output "After an automatic compaction of the orchestrator, during which its subagent in a worktree ended one" \
+  "$main_owner_note"$'\n'"$behind_note"
+in_folder "$main_checkout" expect_no_records \
+  "After an automatic compaction of the orchestrator, during which its subagent in a worktree ended one"
 
 new_state_file
 echo '{"source": "compact", "session_id": "owner-1", "agent_id": "agent-7"}' >"$input_file"

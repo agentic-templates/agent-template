@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Tests the jq filter of read_ready_issues in scripts/ready-issues on a sample answer of GitHub's GraphQL API, with a
+# stand-in for gh that runs the filter with jq. scripts/take-next-issue.test gives the script the filter's lines
+# instead.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# shellcheck source=scripts/missing-tools
+source scripts/missing-tools
+if ! has jq https://jqlang.org/download/ "scripts/ready-issues.test"; then
+  exit 0
+fi
+
+base=$(mktemp -d)
+trap 'rm -rf "$base"' EXIT
+mkdir -p "$base/bin"
+
+# A stand-in for gh, first on the PATH. It answers the GraphQL query that lists the ready issues with the file in
+# TEST_ANSWER, run through the --jq filter, as gh does. It fails every other command.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+if [[ $1 != api || $2 != graphql || $* != *'issues(labels: ["ready"], states: OPEN'* ]]; then
+  echo "The stand-in for gh doesn't answer: gh $*" >&2
+  exit 1
+fi
+while (($# > 0)); do
+  if [[ $1 == --jq ]]; then
+    exec jq --raw-output "$2" "$TEST_ANSWER"
+  fi
+  shift
+done
+echo "The stand-in for gh got no --jq filter." >&2
+exit 1
+STAND_IN
+chmod +x "$base/bin/gh"
+
+# The answer has the shape that GitHub gives to the query. Each count differs from the others, so that a filter that
+# reads one in place of another prints other lines.
+cat >"$base/answer.json" <<'ANSWER'
+{
+  "data": {
+    "repository": {
+      "issues": {
+        "nodes": [
+          {
+            "number": 12,
+            "assignees": { "totalCount": 2 },
+            "labels": { "nodes": [{ "name": "feature" }, { "name": "ready" }, { "name": "needs-decision" }] },
+            "blockedBy": { "nodes": [{ "number": 20, "state": "OPEN" }, { "number": 21, "state": "CLOSED" }] },
+            "subIssuesSummary": { "total": 3, "completed": 1 }
+          },
+          {
+            "number": 15,
+            "assignees": { "totalCount": 0 },
+            "labels": { "nodes": [{ "name": "bug" }, { "name": "ready" }] },
+            "blockedBy": { "nodes": [] },
+            "subIssuesSummary": { "total": 0, "completed": 0 }
+          }
+        ],
+        "pageInfo": { "hasNextPage": false, "endCursor": "Y3Vyc29yOnYyOpHOAAAADw==" }
+      }
+    }
+  }
+}
+ANSWER
+
+tab=$'\t'
+expected_lines="issue${tab}12${tab}2${tab}3${tab}1
+label${tab}12${tab}feature
+label${tab}12${tab}ready
+label${tab}12${tab}needs-decision
+blocked-by${tab}12${tab}OPEN${tab}20
+blocked-by${tab}12${tab}CLOSED${tab}21
+issue${tab}15${tab}0${tab}0${tab}0
+label${tab}15${tab}bug
+label${tab}15${tab}ready"
+
+# shellcheck source=scripts/ready-issues
+source scripts/ready-issues
+status=0
+ready_issues=""
+output=$(TEST_ANSWER=$base/answer.json PATH=$base/bin:$PATH read_ready_issues 2>&1 && printf '%s' "$ready_issues") ||
+  status=$?
+if [[ $status != 0 || $output != "$expected_lines" ]]; then
+  echo "error: On a sample answer with two issues, read_ready_issues must succeed and set ready_issues to \"$expected_lines\", but it exited with code $status and gave \"$output\"." >&2
+  exit 1
+fi
+echo "scripts/ready-issues.test passed."

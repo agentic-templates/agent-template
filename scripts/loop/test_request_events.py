@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import paths
 import request_events
 
 LAUNCHER = Path(__file__).with_name("claude-with-events")
@@ -69,6 +70,9 @@ SET_TO_SEND_MORE = {
 }
 # The variables that bash sets itself
 BASH_VARIABLES = ("PWD", "OLDPWD", "SHLVL", "_")
+# Marks the tests that open a TCP port of 127.0.0.1, or try to, as each receiver does. Codex's sandbox denies it, so
+# they skip themselves there, and CI runs them.
+needs_tcp_port = unittest.skipIf(paths.is_in_codex_sandbox(), "it opens a TCP port, which Codex's sandbox denies")
 
 
 class NotHttp(socketserver.BaseRequestHandler):
@@ -141,7 +145,10 @@ class OutputTokensTest(unittest.TestCase):
         self.assertEqual(request_events.output_tokens(""), {})
 
 
+@needs_tcp_port
 class FolderTest(unittest.TestCase):
+    """A test of a receiver for a loop folder, which opens a TCP port or tries to."""
+
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)

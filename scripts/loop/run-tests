@@ -4,7 +4,8 @@ own:
 
   scripts/loop/run-tests [--part <part>/<parts>] [<folder>]
 
-The script prints the outputs of the parts in order, so that they don't mix. A failure in any part fails the script.
+The script prints the outputs of the parts in order, so that they don't mix, and names each test that skipped itself,
+with the reason. A failure in any part fails the script.
 With --part, as in --part 2/3, it runs only every third test of the folder, starting with the second, without
 starting other processes.
 """
@@ -76,6 +77,8 @@ def run_part(folder: Path, part: int, parts: int) -> int:
     # Taking every parts-th test keeps the tests of each module and class in a part together, so that the part sets up
     # their fixtures, such as a module's setUpModule, once.
     result = unittest.TextTestRunner().run(unittest.TestSuite(tests[part - 1 :: parts]))
+    for test, reason in result.skipped:
+        print(f"Skipped {test.id()}, because {reason}.", file=sys.stderr)
     return 0 if result.wasSuccessful() else 1
 
 
