@@ -326,8 +326,9 @@ class AccountLineTest(MeterTest):
 
     def test_adds_each_reading_to_the_log(self) -> None:
         self.run_meter()
-        entry = json.loads((self.loop / "meter.jsonl").read_text())
-        self.assertEqual(set(entry.pop("machine")), set(Machine.__annotations__))
+        machine, entry = map(json.loads, (self.loop / "meter.jsonl").read_text().splitlines())
+        self.assertEqual(set(machine.pop("machine")), set(Machine.__annotations__))
+        self.assertEqual(machine, {"at": "2026-10-18T03:08:00-04:00"})
         self.assertEqual(
             entry,
             {
@@ -463,6 +464,13 @@ class AccountsTest(MeterTest):
         self.accounts({"name": "one", "tool": "claude"}, {"name": "two", "tool": "claude"})
         status, lines, _ = self.run_meter()
         self.assertEqual((status, [line.split(" ")[0] for line in lines]), (0, ["one", "two", "agents", "machine"]))
+
+    def test_logs_one_reading_of_the_machine_for_all_the_accounts(self) -> None:
+        self.accounts({"name": "one", "tool": "claude"}, {"name": "two", "tool": "claude"})
+        self.run_meter()
+        entries = [json.loads(line) for line in (self.loop / "meter.jsonl").read_text().splitlines()]
+        self.assertEqual([entry.get("account") for entry in entries], [None, "one", "two"])
+        self.assertEqual(["machine" in entry for entry in entries], [True, False, False])
 
     def test_stops_on_a_file_that_is_wrong(self) -> None:
         example = '{"accounts": [{"name": "claude", "tool": "claude"}]}'

@@ -61,8 +61,8 @@ The lines are:
                             .loop/meter.jsonl: free disk, free memory, swap in use, GPU use, GPU memory in use and
                             load. Each gives the median and the worst: the lowest of free disk and free memory, and
                             the highest of the others. Free disk also gives its change from the first reading to the
-                            last. Swap in use also gives the share of the readings in which it grew since the reading
-                            before, out of the readings that give it and follow one that gives it. The load also gives
+                            last. Swap in use also gives the share of the time between readings in which it grew,
+                            leaving out a gap of more than an hour, when the loop stopped. The load also gives
                             the share of the readings with a load above the number of cores. A number that no reading
                             gives says so. Then a line for each number of agents, from one to the most that worked at a
                             reading: how many readings they worked at, and the median of each number in those
@@ -211,6 +211,10 @@ MACHINE_NUMBERS = (
     MachineNumber("gpu_memory_used_gb", "GPU memory in use, GB", "GPU memory in use", False),
     MachineNumber("load", "Load", "load", False),
 )
+
+# scripts/loop/meter reads the machine at least every 50 minutes while the loop runs, so a longer gap between two
+# readings is a time when the loop stopped, such as a night, and the swap share leaves it out.
+LONGEST_READING_GAP = dt.timedelta(hours=1)
 
 
 class ReportError(Exception):
@@ -853,24 +857,29 @@ def machine_line(number: MachineNumber, readings: list[MachineReading]) -> str:
 
 
 def swap_growth(readings: list[MachineReading]) -> str:
-    """The share of the readings in which the swap in use grew since the reading before. Swap stays in use after the
-    memory frees up again, so only its growth shows that the machine ran out of memory. A reading counts only when it
-    and the reading before both give swap."""
-    swaps = [reading.machine["swap_used_gb"] for reading in readings]
-    pairs = [(before, after) for before, after in itertools.pairwise(swaps) if before is not None and after is not None]
-    if not pairs:
+    """The share of the time between readings in which the swap in use grew. Swap stays in use after the memory frees
+    up again, so only its growth shows that the machine ran out of memory. The share counts time rather than readings,
+    because the meter reads more often near a stop, and two meters can read seconds apart."""
+    counted = dt.timedelta()
+    grew = dt.timedelta()
+    for before, after in itertools.pairwise(readings):
+        swap_before, swap_after = before.machine["swap_used_gb"], after.machine["swap_used_gb"]
+        gap = after.at - before.at
+        if swap_before is None or swap_after is None or gap > LONGEST_READING_GAP:
+            continue
+        counted += gap
+        if swap_after > swap_before:
+            grew += gap
+    if not counted:
         return "no two readings in a row to compare"
-    grew = sum(1 for before, after in pairs if after > before)
-    return f"grew since the reading before in {grew / len(pairs):.0%} of the readings"
+    return f"grew in {grew / counted:.0%} of the time between readings"
 
 
 def known_values(number: MachineNumber, readings: list[MachineReading]) -> list[float]:
-    """The number in each reading that gives it."""
     return [reading.machine[number.key] for reading in readings if reading.machine[number.key] is not None]
 
 
 def agents_line(count: int, readings: list[MachineReading]) -> str:
-    """The median of each number in the readings while the count of agents worked."""
     label = f"Median with {count} agent{'' if count == 1 else 's'}"
     if not readings:
         return f"{label}: no readings"

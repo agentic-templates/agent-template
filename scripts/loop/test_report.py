@@ -846,7 +846,7 @@ class MachineTest(ReportTest):
             [
                 "Free disk, GB: median 96.5, lowest 90.0, net change -10.0",
                 "Free memory, GB: no readings",
-                "Swap in use, GB: median 3.0, highest 6.0, grew since the reading before in 75% of the readings",
+                "Swap in use, GB: median 3.0, highest 6.0, grew in 85% of the time between readings",
                 "GPU use, %: no readings",
                 "GPU memory in use, GB: no readings",
                 "Load: no readings",
@@ -866,21 +866,24 @@ class MachineTest(ReportTest):
             ],
         )
 
-    def test_gives_the_share_of_the_readings_in_which_swap_grew_and_with_a_load_above_the_cores(self) -> None:
-        # The swap counts at 12, 17 and 30: the first reading has none before it, and the reading at 25 follows one
-        # that gives no swap.
+    def test_gives_the_share_of_the_time_in_which_swap_grew_and_of_the_readings_with_a_load_above_the_cores(
+        self,
+    ) -> None:
+        # Swap grows in 78 of the 90 minutes that count. The gap of 61 minutes from minute 80 doesn't count, and
+        # neither do the minutes next to the reading without swap.
         self.log_readings(
-            meter_reading(8, cores=10, swap_used_gb=1.0, load=12),
-            meter_reading(12, cores=10, swap_used_gb=1.5, load=10),
-            meter_reading(17, cores=8, swap_used_gb=1.5, load=4),
-            meter_reading(20, cores=8, swap_used_gb=None, load=9),
-            meter_reading(25, swap_used_gb=2.0),
-            meter_reading(30, swap_used_gb=1.0),
+            meter_reading(0, cores=10, swap_used_gb=1.0, load=12),
+            meter_reading(10, cores=10, swap_used_gb=1.5, load=10),
+            meter_reading(12, cores=8, swap_used_gb=1.5, load=4),
+            meter_reading(20, cores=8, swap_used_gb=2.0, load=9),
+            meter_reading(80, swap_used_gb=3.0),
+            meter_reading(141, swap_used_gb=4.0),
+            meter_reading(151, swap_used_gb=4.0),
+            meter_reading(161, swap_used_gb=None),
+            meter_reading(171, swap_used_gb=5.0),
         )
         lines = self.machine_lines()
-        self.assertIn(
-            "Swap in use, GB: median 1.5, highest 2.0, grew since the reading before in 33% of the readings", lines
-        )
+        self.assertIn("Swap in use, GB: median 2.5, highest 5.0, grew in 87% of the time between readings", lines)
         self.assertIn("Load: median 9.5, highest 12.0, above the cores in 50% of the readings", lines)
 
     def test_says_when_no_two_readings_in_a_row_give_swap(self) -> None:
