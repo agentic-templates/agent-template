@@ -67,6 +67,41 @@ class RunTestsTest(unittest.TestCase):
         self.assertEqual(done.returncode, 1)
         self.assertIn("the expected failure", done.stderr)
 
+    def test_names_each_test_that_skips_itself_with_the_reason(self) -> None:
+        self.write_tests(
+            "test_skipping",
+            """\
+            import unittest
+
+            class SomeSkipTest(unittest.TestCase):
+                def test_runs(self):
+                    pass
+
+                @unittest.skip("it needs a GPU")
+                def test_needs_a_gpu(self):
+                    pass
+
+            @unittest.skip("it opens a TCP port")
+            class AllSkipTest(unittest.TestCase):
+                def test_listens(self):
+                    pass
+
+                def test_connects(self):
+                    pass
+            """,
+        )
+        done = self.run_script()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        skipped = sorted(line for line in done.stderr.splitlines() if line.startswith("Skipped"))
+        self.assertEqual(
+            skipped,
+            [
+                "Skipped test_skipping.AllSkipTest.test_connects, because it opens a TCP port.",
+                "Skipped test_skipping.AllSkipTest.test_listens, because it opens a TCP port.",
+                "Skipped test_skipping.SomeSkipTest.test_needs_a_gpu, because it needs a GPU.",
+            ],
+        )
+
     def test_fails_when_a_test_module_cannot_be_imported(self) -> None:
         self.write_tests("test_broken", "import module_that_does_not_exist\n")
         done = self.run_script()

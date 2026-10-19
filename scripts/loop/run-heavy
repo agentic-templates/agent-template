@@ -66,9 +66,6 @@ from processes import Sampler, gpu_percent
 
 # Marks the commands that a heavy command starts, which run at once
 HEAVY_VARIABLE = "LOOP_HEAVY_COMMAND"
-# Holds the line of commands, its lock, and a lock file for each command that waits or runs. The process of a command
-# holds its lock file until it ends, so the scheduler drops the command once the lock is free, even after a crash.
-FOLDER = "heavy"
 # How often a waiting command looks for room, and a running one measures its processes
 SAMPLE_SECONDS = 2.0
 # Commands that look within this time share one reading, so that ten commands that wait read the machine once.
@@ -147,7 +144,9 @@ def main(argv: list[str] | None = None) -> int:
     if os.environ.get(HEAVY_VARIABLE) or os.environ.get("CI"):
         return run_at_once(command)
     loop_folder = paths.loop_dir()
-    turn = Turn(loop_folder / FOLDER, loop_folder / heavy_log.NAME, uuid.uuid4().hex, shlex.join(command), time.time())
+    turn = Turn(
+        loop_folder / heavy_log.FOLDER, loop_folder / heavy_log.NAME, uuid.uuid4().hex, shlex.join(command), time.time()
+    )
     turn.folder.mkdir(parents=True, exist_ok=True)
     with holding_turn(turn):
         try:

@@ -18,6 +18,7 @@ from unittest import mock
 import agent_log
 import request_events
 from test_paths import GIT_ENVIRONMENT
+from test_request_events import needs_tcp_port
 
 RUN_BUILDER = Path(__file__).with_name("run-builder")
 SCRIPTS = RUN_BUILDER.parents[1]
@@ -26,12 +27,13 @@ run_builder = types.ModuleType("run_builder")
 run_builder.__file__ = str(RUN_BUILDER)
 importlib.machinery.SourceFileLoader("run_builder", str(RUN_BUILDER)).exec_module(run_builder)
 
-# A stand-in for gh, claude and codex. It writes each call to calls.jsonl in STANDIN_DIR, with its arguments, the folder
-# it runs in, the HEAD of that folder's worktree and its environment. It gives the answers in answers.json there under
-# the longest start of its arguments, such as "pr create", one answer for each call, and the last one again when they
-# run out. An answer can print to stdout and stderr, exit with a status, write files in the folder it runs in, write
-# codex's report, and push a branch from origin's main, as gh issue develop creates one. -S keeps coverage, which
-# starts in each Python process of the tests, out of the stand-ins.
+# A stand-in for gh, claude, codex and uv. It writes each call to calls.jsonl in STANDIN_DIR, with its arguments, the
+# folder it runs in, the HEAD of that folder's worktree and its environment. It gives the answers in answers.json there
+# under the longest start of its arguments, such as "pr create", one answer for each call, and the last one again when
+# they run out. An answer can run another program with the same arguments in the stand-in's place, print to stdout and
+# stderr, exit with a status, write files in the folder it runs in, write codex's report, and push a branch from
+# origin's main, as gh issue develop creates one. -S keeps coverage, which starts in each Python process of the tests,
+# out of the stand-ins.
 STANDIN = """#!PYTHON -S
 import json, os, sys
 folder, tool, args = os.environ["STANDIN_DIR"], os.path.basename(sys.argv[0]), sys.argv[1:]
@@ -47,6 +49,8 @@ with open(log, "a") as handle:
 calls = [json.loads(line) for line in open(log)]
 count = sum(call["tool"] == tool and call["start"] == start for call in calls)
 answer = answers[start][min(count, len(answers[start])) - 1]
+if "exec" in answer:
+    os.execv(answer["exec"], [answer["exec"], *args])
 for path, content in answer.get("write", {}).items():
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     open(path, "w").write(content)
@@ -61,6 +65,8 @@ sys.stderr.write(answer.get("stderr", ""))
 sys.exit(answer.get("status", 0))
 """.replace("PYTHON", sys.executable)
 
+# The stand-in for uv runs the real uv for each call but uv sync, such as for scripts/leak-scan, which uv runs.
+REAL_UV = shutil.which("uv")
 GITHUB_URL = "https://github.com/owner/repo.git"
 BRANCH = "12-fix-the-importer"
 ISSUE = {"number": 12, "title": "Fix the importer", "body": "It drops rows.", "labels": [{"name": "bug"}]}
@@ -136,9 +142,11 @@ def starting_repositories() -> tempfile.TemporaryDirectory[str]:
     return folder
 
 
+@needs_tcp_port
 class RunBuilderTest(unittest.TestCase):
-    """A test in a clone whose origin is a bare repository with a GitHub URL, with stand-ins for gh, claude and codex
-    first on PATH, a loop folder with four accounts, and git hooks in the clone that record that they ran."""
+    """A test in a clone whose origin is a bare repository with a GitHub URL, with stand-ins for gh, claude, codex and
+    uv first on PATH, a loop folder with four accounts, the loop's receiver of Claude Code's events, and git hooks in
+    the clone that record that they ran."""
 
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory()
@@ -148,7 +156,7 @@ class RunBuilderTest(unittest.TestCase):
         self.loop, self.standins, self.bin = self.root / "loop", self.root / "standins", self.root / "bin"
         for created in (self.loop, self.standins, self.bin):
             created.mkdir()
-        for tool in ("gh", "claude", "codex"):
+        for tool in ("gh", "claude", "codex", "uv"):
             (self.bin / tool).write_text(STANDIN)
             (self.bin / tool).chmod(0o755)
         environment = mock.patch.dict(
@@ -199,6 +207,7 @@ class RunBuilderTest(unittest.TestCase):
             },
             "claude": {"": [{"stdout": lines(INIT, "not an event", RESULT)}]},
             "codex": {"": [self.codex_answer({"built.txt": "built\n"})]},
+            "uv": {"": [{"exec": REAL_UV}], "sync": [{}]},
         }
 
     def codex_answer(self, files: dict[str, str], report: str = REPORT) -> dict[str, Any]:
@@ -579,10 +588,18 @@ class CodexTest(RunBuilderTest):
         self.assertRegex(printed, rf"^issue 12 \| codex work \| pull request #7 \| [0-9.]+ min \| report {report}\n$")
         [call] = self.calls("codex")
         brief = (self.run_folder() / "brief.md").read_text()
-        command = ["exec", "--sandbox", "workspace-write", "--cd", str(self.worktree), "--json"]
-        command += ["--output-last-message", str(report)]
+        writable = json.dumps([str(self.loop / "heavy"), str(self.loop / "heavy.jsonl")])
+        command = [
+            "exec",
+            "--sandbox",
+            "workspace-write",
+            "--config",
+            f"sandbox_workspace_write.writable_roots={writable}",
+        ]
+        command += ["--cd", str(self.worktree), "--json", "--output-last-message", str(report)]
         self.assertEqual(call["args"], [*command, brief])
         self.assertIn("so don't run git or gh.", brief)
+        self.assertIn("Run scripts/check, and fix each failure that your change causes.", brief)
         self.assertEqual([name for name in caller if call["env"].get(name, "/codex-work") != "/codex-work"], [])
         self.assertEqual(self.origin_git("log", "-1", "--format=%s", BRANCH), "fix: Fix the importer")
         self.assertEqual(self.origin_git("show", f"{BRANCH}:built.txt"), "built")
@@ -593,6 +610,33 @@ class CodexTest(RunBuilderTest):
         self.assertEqual(self.arguments("gh", "pr merge"), [["pr", "merge", "7", "--match-head-commit", pushed]])
         self.assertEqual(self.status()["outcome"], "pull request #7")
         self.assertEqual(self.hooks_that_ran(), list(GIT_HOOKS))
+        self.assertFalse(self.worktree.exists())
+
+    def test_installs_the_packages_of_the_worktree_into_a_uv_cache_of_its_own_before_codex_starts(self) -> None:
+        with mock.patch.dict(os.environ, {"GH_TOKEN": "a", "UV_CACHE_DIR": str(self.root / "shared-cache")}):
+            status, _, errors = self.run_builder("--tool", "codex")
+        self.assertEqual((status, errors), (0, ""))
+        [sync] = self.calls("uv", "sync")
+        [codex] = self.calls("codex")
+        self.assertEqual((sync["args"], sync["cwd"]), (["sync", "--locked", "--no-build"], str(self.worktree)))
+        self.assertNotIn("GH_TOKEN", sync["env"])
+        self.assertEqual(sync["env"]["UV_CACHE_DIR"], codex["env"]["UV_CACHE_DIR"])
+        self.assertNotEqual(codex["env"]["UV_CACHE_DIR"], str(self.root / "shared-cache"))
+        self.assertFalse(Path(codex["env"]["UV_CACHE_DIR"]).exists())
+        log = (self.standins / "calls.jsonl").read_text().splitlines()
+        order = [(call["tool"], call["start"]) for call in map(json.loads, log)]
+        self.assertLess(order.index(("uv", "sync")), order.index(("codex", "")))
+
+    def test_fails_without_starting_codex_when_uv_sync_fails(self) -> None:
+        self.answer("uv", "sync", {"stderr": "error: The lockfile at `uv.lock` needs to be updated.\n", "status": 1})
+        status, printed, _ = self.run_builder("--tool", "codex")
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "| failed: uv sync failed in the worktree, so codex didn't start: error: The lockfile at `uv.lock` needs to "
+            "be updated. |",
+            printed,
+        )
+        self.assertEqual(self.calls("codex"), [])
         self.assertFalse(self.worktree.exists())
 
     def test_codex_builder_that_changes_no_file_comments_its_report_on_the_issue(self) -> None:

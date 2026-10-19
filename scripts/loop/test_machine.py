@@ -256,3 +256,9 @@ class ReadMachineTest(unittest.TestCase):
         (self.bin / "nvidia-smi").write_text("#!/bin/sh\nexec /bin/sleep 30\n")
         with mock.patch.object(machine, "COMMAND_TIMEOUT_SECONDS", 0.2):
             self.assertIsNone(self.read("linux")["gpu_percent"])
+
+    def test_records_the_numbers_of_a_command_that_cannot_start_as_missing(self) -> None:
+        # As ps, which macOS doesn't start in Codex's sandbox
+        self.answer(machine.NVIDIA_SMI, NVIDIA_SMI)
+        (self.bin / "nvidia-smi").chmod(0o644)
+        self.assertIsNone(self.read("linux")["gpu_percent"])

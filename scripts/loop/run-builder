@@ -19,9 +19,12 @@ worktree exists already, or when the issue has needs-triage.
 A Claude builder builds the issue as "Build one issue" in docs/building.md describes. It sends the tokens of its
 requests to .loop/requests.jsonl, as scripts/loop/claude-with-events does.
 
-A Codex builder runs in a sandbox that can't reach the network or write the git folder, so it only edits files, and
-it builds only the kinds research and other. When it ends, the script commits its changes and pushes them, unless a file's
-name suggests a secret, or scripts/leak-scan or the main checkout's git hooks refuse the commit. If the branch has no
+A Codex builder runs in a sandbox that can't reach the network or write the git folder, so it only edits files and runs
+scripts/check, and it builds only the kinds research and other. Before it starts, the script installs the packages of
+the worktree's uv.lock with uv sync --locked --no-build, into a uv cache of the run's own, which the builder's uv uses
+too. The sandbox can also write what scripts/loop/run-heavy writes in the loop folder, so that the builder's heavy
+commands wait their turn. When the builder ends, the script commits its changes and pushes them, unless a file's name
+suggests a secret, or scripts/leak-scan or the main checkout's git hooks refuse the commit. If the branch has no
 pull request yet, the script opens one with the builder's report as its description, and turns on auto-merge unless
 scripts/check-main-rules fails. If scripts/loop/consequential lists a file that the branch changes, the pull request
 is a draft without auto-merge instead, also when the branch had it already. If the builder changed no file, its
@@ -50,11 +53,13 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, NamedTuple
 
 import agent_log
+import heavy_log
 import paths
 import request_events
 from accounts import TOOLS, Account, AccountsError, claude_environment, load_accounts
@@ -84,6 +89,9 @@ CLAUDE_INPUT_FIELDS = ("inputTokens", "cacheReadInputTokens", "cacheCreationInpu
 CLAUDE_OUTPUT_FIELD = "outputTokens"
 # The items of a Codex run that are tool calls, as codex exec --json lists them
 CODEX_TOOL_ITEMS = ("command_execution", "file_change", "mcp_tool_call", "web_search", "todo_list")
+# Runs outside Codex's sandbox, before Codex starts, on the uv.lock of the builder's branch. --no-build keeps uv from
+# building a package from its source, which would run the package's code outside the sandbox.
+UV_SYNC = ["uv", "sync", "--locked", "--no-build"]
 # Codex runs without the variables whose names match, because they can hold a credential, which it can't use in its
 # sandbox, or choose another account, such as CODEX_HOME. What it prints ends up in the run folder and on GitHub.
 CREDENTIAL_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE", re.IGNORECASE)
@@ -119,8 +127,8 @@ CHANGES_FILE = "changes.diff"
 # The environment variable that tells scripts/hooks/hand-off that a session is a builder that may hand off its work
 HAND_OFF_VARIABLE = "LOOP_HAND_OFF"
 CODEX_BRIEF = """Your sandbox can't write the git folder or reach the network, so don't run git or gh. Edit the files in
-this worktree, which is on the issue's branch. scripts/check stops with an error where it writes to the git folder or
-to uv's cache. CI runs every check on the pull request.
+this worktree, which is on the issue's branch. Run scripts/check, and fix each failure that your change causes. In the
+sandbox, it skips the tests that open a TCP port and the coverage report, and CI runs every check on the pull request.
 
 When you end, the script that started you commits your changes, pushes them and opens a pull request, with your last
 message under "What changed and why" in its description. Write that message for a developer who joins the project
@@ -606,12 +614,19 @@ def claude_problem(result: dict[str, Any], exit_code: int) -> str | None:
 
 
 def run_codex(brief: str, account: Account, folders: Folders) -> None:
-    """Runs codex until it ends. Codex writes its last message to report.md in the run folder."""
+    """Installs the packages of the worktree's uv.lock, and runs codex until it ends. Codex writes its last message to
+    report.md in the run folder."""
+    loop = paths.loop_dir()
+    # The builder's heavy commands wait their turn in scripts/loop/run-heavy, which writes these.
+    writable = [str(loop / heavy_log.FOLDER), str(loop / heavy_log.NAME)]
     command = [
         "codex",
         "exec",
         "--sandbox",
         "workspace-write",
+        # The value is TOML, which reads the array that json.dumps writes.
+        "--config",
+        f"sandbox_workspace_write.writable_roots={json.dumps(writable)}",
         "--cd",
         str(folders.worktree),
         "--json",
@@ -619,19 +634,33 @@ def run_codex(brief: str, account: Account, folders: Folders) -> None:
         str(folders.run / "report.md"),
         brief,
     ]
-    with (folders.run / "events.jsonl").open("w") as events, (folders.run / "stderr.log").open("w") as errors:
-        done = subprocess.run(
-            command,
-            cwd=folders.worktree,
-            env=codex_environment(account),
-            stdin=subprocess.DEVNULL,
-            stdout=events,
-            stderr=errors,
-            check=False,
-        )
+    environment = codex_environment(account)
+    # uv in the sandbox uses a cache of the run's own. Writing uv's shared cache would let the builder change the files
+    # that every later uv command on the machine uses.
+    with tempfile.TemporaryDirectory() as uv_cache:
+        environment["UV_CACHE_DIR"] = uv_cache
+        install_packages(folders.worktree, environment)
+        with (folders.run / "events.jsonl").open("w") as events, (folders.run / "stderr.log").open("w") as errors:
+            done = subprocess.run(
+                command,
+                cwd=folders.worktree,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=events,
+                stderr=errors,
+                check=False,
+            )
     problem = codex_problem(read_events(folders.run / "events.jsonl"), done.returncode)
     if problem:
         raise Stop(problem)
+
+
+def install_packages(worktree: Path, environment: dict[str, str]) -> None:
+    """Installs the packages that the worktree's uv.lock names, which scripts/check needs, because the sandbox can't
+    download them."""
+    done = subprocess.run(UV_SYNC, cwd=worktree, env=environment, capture_output=True, text=True, check=False)
+    if done.returncode != 0:
+        raise Stop(f"uv sync failed in the worktree, so codex didn't start: {one_line(done.stderr or done.stdout)}")
 
 
 def codex_environment(account: Account) -> dict[str, str]:

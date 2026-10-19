@@ -168,11 +168,11 @@ def peak_memory_bytes(usage: resource.struct_rusage) -> int:
 
 
 def output_of(command: list[str]) -> str:
-    """What a command prints, or nothing if it isn't installed, fails or doesn't end in time. nvidia-smi fails on a
-    machine without an NVIDIA driver."""
+    """What a command prints, or nothing if it isn't installed, can't start, fails or doesn't end in time. nvidia-smi
+    fails on a machine without an NVIDIA driver, and macOS doesn't start ps in Codex's sandbox, because ps is setuid."""
     try:
         done = subprocess.run(command, capture_output=True, text=True, timeout=COMMAND_TIMEOUT_SECONDS, check=False)
-    except FileNotFoundError, subprocess.TimeoutExpired:
+    except OSError, subprocess.TimeoutExpired:
         return ""
     return done.stdout if done.returncode == 0 else ""
 

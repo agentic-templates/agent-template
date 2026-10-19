@@ -25,6 +25,10 @@ case_count=0
 skip_script_tests=""
 # A case sets this to leave its files unstaged, so that the copy's untracked files stay untracked.
 leave_unstaged=""
+# A case sets this to 1 to run the copy's scripts/check as in Codex's sandbox, with CODEX_SANDBOX_NETWORK_DISABLED. The
+# other cases leave the variable empty, also when this script runs in the sandbox, so that their copies record a pass,
+# which they can, because the sandbox can write the copies' git folders.
+codex_sandbox=""
 
 # Only --shellcheck-only runs real ShellCheck. The other cases test what scripts/check finds by itself.
 # Stand-ins for skipped tools come first on each copy's PATH and fail if a copy runs one.
@@ -66,8 +70,8 @@ git ls-files -z | while IFS= read -r -d '' file; do
 done
 git -C "$starting_copy" init --quiet
 
-# Checks that scripts/check recorded the tree of the copy's files in .git/check-passed if it passed, and nothing if it failed
-# or skipped the tests of the scripts and hooks because of SKIP_SCRIPT_TESTS.
+# Checks that scripts/check recorded the tree of the copy's files in .git/check-passed if it passed, and nothing if it failed,
+# skipped the tests of the scripts and hooks because of SKIP_SCRIPT_TESTS, or ran as in Codex's sandbox.
 # Every file of the copy is staged, so the tree of the index is the tree of the files on disk.
 # Prints an error and fails if the record is wrong: check_record <function> <pass or fail>
 check_record() {
@@ -76,6 +80,8 @@ check_record() {
     reason="failed"
   elif [[ -n $skip_script_tests ]]; then
     reason="skipped the tests of the scripts and hooks"
+  elif [[ -n $codex_sandbox ]]; then
+    reason="ran as in Codex's sandbox"
   fi
   if [[ -n $reason ]]; then
     if [[ -f $record ]]; then
@@ -130,8 +136,8 @@ check_case() (
     git -C "$copy" add --all
   fi
   # CHECK_UNDER_TEST stops the copy's scripts/check from running this script again.
-  if ! output=$(cd "$copy" && CHECK_UNDER_TEST=$check_under_test SKIP_SCRIPT_TESTS=$skip_script_tests PATH=$stand_ins:$PATH \
-    scripts/check 2>&1); then
+  if ! output=$(cd "$copy" && CHECK_UNDER_TEST=$check_under_test SKIP_SCRIPT_TESTS=$skip_script_tests \
+    CODEX_SANDBOX_NETWORK_DISABLED=$codex_sandbox PATH=$stand_ins:$PATH scripts/check 2>&1); then
     actual=fail
   fi
 
@@ -230,6 +236,15 @@ claude_md_with_the_script_tests_skipped() {
 
 run_case script_tests_skipped pass "Skipped the tests of the scripts and hooks because SKIP_SCRIPT_TESTS is set."
 run_case claude_md_with_the_script_tests_skipped fail "error: CLAUDE.md makes a tool skip AGENTS.md."
+
+# Case for Codex's sandbox, where scripts/check records no pass, which run_case checks.
+# The copies run no Python tests, so the case can't check that scripts/check skips the coverage report there.
+
+in_codex_sandbox() {
+  codex_sandbox=1
+}
+
+run_case in_codex_sandbox pass "The checks ran in Codex's sandbox, so scripts/check records no pass."
 
 # Cases for the check that each action pinned to a commit SHA has a version comment.
 
