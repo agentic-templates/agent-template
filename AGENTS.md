@@ -101,7 +101,7 @@ A change is done when all of these are true:
 
 Everything in the repository, and in its issues and pull requests, is public.
 
-- Don't commit plans, notes, session logs, TODO lists or review records. Keep working files outside the repository.
+- Don't commit plans, notes, session logs, TODO lists or review records. Keep working files outside the repository, or in `.loop/`.
 - Never read, print or commit secrets. Keep them in `.env`, and list each variable in `.env.example` with a placeholder value.
 - Keep personal email addresses, local paths, private links and internal ticket numbers out of files, commit messages, issues and pull requests.
 - Don't create a `CLAUDE.md` or `CLAUDE.local.md` in any folder above the repository, including your home folder.
