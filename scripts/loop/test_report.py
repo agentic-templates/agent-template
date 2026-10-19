@@ -846,7 +846,7 @@ class MachineTest(ReportTest):
             [
                 "Free disk, GB: median 96.5, lowest 90.0, net change -10.0",
                 "Free memory, GB: no readings",
-                "Swap in use, GB: median 3.0, highest 6.0, in use in 100% of the readings",
+                "Swap in use, GB: median 3.0, highest 6.0, grew since the reading before in 75% of the readings",
                 "GPU use, %: no readings",
                 "GPU memory in use, GB: no readings",
                 "Load: no readings",
@@ -866,16 +866,28 @@ class MachineTest(ReportTest):
             ],
         )
 
-    def test_gives_the_share_of_the_readings_with_swap_in_use_and_with_a_load_above_the_cores(self) -> None:
+    def test_gives_the_share_of_the_readings_in_which_swap_grew_and_with_a_load_above_the_cores(self) -> None:
+        # The swap counts at 12, 17 and 30: the first reading has none before it, and the reading at 25 follows one
+        # that gives no swap.
         self.log_readings(
-            meter_reading(8, cores=10, swap_used_gb=0, load=12),
-            meter_reading(12, cores=10, swap_used_gb=0.5, load=10),
-            meter_reading(17, cores=8, swap_used_gb=0, load=4),
+            meter_reading(8, cores=10, swap_used_gb=1.0, load=12),
+            meter_reading(12, cores=10, swap_used_gb=1.5, load=10),
+            meter_reading(17, cores=8, swap_used_gb=1.5, load=4),
             meter_reading(20, cores=8, swap_used_gb=None, load=9),
+            meter_reading(25, swap_used_gb=2.0),
+            meter_reading(30, swap_used_gb=1.0),
         )
         lines = self.machine_lines()
-        self.assertIn("Swap in use, GB: median 0.0, highest 0.5, in use in 33% of the readings", lines)
+        self.assertIn(
+            "Swap in use, GB: median 1.5, highest 2.0, grew since the reading before in 33% of the readings", lines
+        )
         self.assertIn("Load: median 9.5, highest 12.0, above the cores in 50% of the readings", lines)
+
+    def test_says_when_no_two_readings_in_a_row_give_swap(self) -> None:
+        self.log_readings(meter_reading(8, swap_used_gb=None), meter_reading(12, swap_used_gb=2.0))
+        self.assertEqual(
+            self.line("Swap"), "Swap in use, GB: median 2.0, highest 2.0, no two readings in a row to compare"
+        )
 
     def test_says_none_for_a_number_that_no_reading_with_that_many_agents_gives(self) -> None:
         self.log_readings(meter_reading(8, load=2.5, gpu_percent=40), meter_reading(12, load=4.5, gpu_percent=None))

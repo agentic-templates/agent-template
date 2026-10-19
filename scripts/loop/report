@@ -61,7 +61,8 @@ The lines are:
                             .loop/meter.jsonl: free disk, free memory, swap in use, GPU use, GPU memory in use and
                             load. Each gives the median and the worst: the lowest of free disk and free memory, and
                             the highest of the others. Free disk also gives its change from the first reading to the
-                            last. Swap in use also gives the share of the readings with any swap in use, and the load
+                            last. Swap in use also gives the share of the readings in which it grew since the reading
+                            before, out of the readings that give it and follow one that gives it. The load also gives
                             the share of the readings with a load above the number of cores. A number that no reading
                             gives says so. Then a line for each number of agents, from one to the most that worked at a
                             reading: how many readings they worked at, and the median of each number in those
@@ -91,6 +92,7 @@ for.
 
 import argparse
 import datetime as dt
+import itertools
 import json
 import math
 import statistics
@@ -842,13 +844,24 @@ def machine_line(number: MachineNumber, readings: list[MachineReading]) -> str:
     if number.key == "disk_free_gb":
         parts.append(f"net change {known[-1] - known[0]:+.1f}")
     if number.key == "swap_used_gb":
-        in_use = sum(1 for swap in known if swap > 0)
-        parts.append(f"in use in {in_use / len(known):.0%} of the readings")
+        parts.append(swap_growth(readings))
     if number.key == "load":
         machines = [reading.machine for reading in readings if reading.machine["load"] is not None]
         above = sum(1 for machine in machines if machine["load"] > machine["cores"])
         parts.append(f"above the cores in {above / len(machines):.0%} of the readings")
     return f"{number.name}: {', '.join(parts)}"
+
+
+def swap_growth(readings: list[MachineReading]) -> str:
+    """The share of the readings in which the swap in use grew since the reading before. Swap stays in use after the
+    memory frees up again, so only its growth shows that the machine ran out of memory. A reading counts only when it
+    and the reading before both give swap."""
+    swaps = [reading.machine["swap_used_gb"] for reading in readings]
+    pairs = [(before, after) for before, after in itertools.pairwise(swaps) if before is not None and after is not None]
+    if not pairs:
+        return "no two readings in a row to compare"
+    grew = sum(1 for before, after in pairs if after > before)
+    return f"grew since the reading before in {grew / len(pairs):.0%} of the readings"
 
 
 def known_values(number: MachineNumber, readings: list[MachineReading]) -> list[float]:
