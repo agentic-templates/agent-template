@@ -8,6 +8,7 @@ The aim is text that a reader understands the first time they read it.
 - Leave out what the reader already knows and what the code already shows.
 - Leave out how something works inside, and how one tool differs from another, unless the reader must act on it.
 - Start with what the reader came for: what they can do, what changed or what went wrong.
+- Say each thing once. When two sentences say the same thing, merge them into one.
 
 ## Use plain words
 
