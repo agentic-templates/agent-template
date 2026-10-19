@@ -547,13 +547,14 @@ opens_pull_request() {
 # It sets flag, and sets value to the value in the same word, as in --title=Title, or to empty when the word gives
 # none. A word can hold several short flags, as in -dc, where each flag but the last takes no value. The first flag that
 # takes a value ends the flags, and the rest of the word is its value, as in -tTitle or -dt=Title, which gh reads as the
-# title Title. gh drops the = after a short flag only when more follows it, so it reads -t= as the title =. Of such a
-# word, flag is the flag that takes a value, or the whole word when none does. It sets value_is_next_word to yes when
-# the flag takes a value that the word doesn't give, because the next word is then the value, even if it starts with a
-# dash.
+# title Title. gh drops the = after a short flag only when more follows it, so it reads -t= as the title =. An = after
+# a flag that takes no value ends the flags too, and the rest of the word is that flag's value, as in -dd=false. Of such
+# a word, flag is the last flag, and flags_before holds the letters of the flags before it, such as d of -dt=Title. It
+# sets value_is_next_word to yes when the flag takes a value that the word doesn't give, because the next word is then
+# the value, even if it starts with a dash.
 split_flag_word() {
   local word=$1 flags_with_value=$2 position letter
-  flag=$word value="" value_is_next_word=""
+  flag=$word value="" value_is_next_word="" flags_before=""
   case $word in
     --*=*)
       flag=${word%%=*}
@@ -569,12 +570,15 @@ split_flag_word() {
   esac
   for ((position = 1; position < ${#word}; position++)); do
     letter=${word:position:1}
-    # gh reads what follows = as the value of the flag before it, which takes none here.
     if [[ $letter == = ]]; then
+      value=${word:position+1}
       return 0
     fi
+    if ((position > 1)); then
+      flags_before+=${flag#-}
+    fi
+    flag=-$letter
     if [[ $flags_with_value == *" -$letter "* ]]; then
-      flag=-$letter
       value=${word:position+1}
       case $value in
         "") value_is_next_word=yes ;;
@@ -592,7 +596,7 @@ split_flag_word() {
 # to yes when the command opens a draft. It also records expansion syntax in the title and body, and sets the body
 # source for read_body.
 read_pull_request_flags() {
-  local flags_with_value=$1 i word flag value value_is_next_word
+  local flags_with_value=$1 i word flag value value_is_next_word flags_before
   pr_base="" pr_head="" pr_title="" pr_has_title="" pr_title_may_expand="" pr_is_draft=""
   body_source="" body_word="" body_file="" body_may_expand=""
   for ((i = 3; i < ${#command_words[@]}; i++)); do
@@ -602,6 +606,10 @@ read_pull_request_flags() {
       -*) split_flag_word "$word" "$flags_with_value" ;;
       *) continue ;;
     esac
+    # A flag before the last in a word takes no value, so a -d there opens a draft.
+    if [[ $flags_before == *d* ]]; then
+      pr_is_draft=yes
+    fi
     if [[ -n $value_is_next_word ]]; then
       i=$((i + 1))
       value=${command_words[i]:-}

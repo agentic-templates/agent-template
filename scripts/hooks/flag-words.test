@@ -10,38 +10,42 @@ source "$hooks_folder/helpers.bash"
 review_flags=" -b --body -F --body-file -R --repo "
 
 # Checks what split_flag_word sets for a word of gh pr review:
-# expect_split <word> <flag> <value> <value_is_next_word>
+# expect_split <word> <flag> <value> <value_is_next_word> <flags_before>
 expect_split() {
-  local flag value value_is_next_word
+  local flag value value_is_next_word flags_before
   case_count=$((case_count + 1))
   split_flag_word "$1" "$review_flags"
-  if [[ $flag != "$2" || $value != "$3" || $value_is_next_word != "$4" ]]; then
-    echo "error: split_flag_word must split [$1] into the flag [$2], the value [$3] and value_is_next_word [$4], but it gave [$flag], [$value] and [$value_is_next_word]." >&2
+  if [[ $flag != "$2" || $value != "$3" || $value_is_next_word != "$4" || $flags_before != "$5" ]]; then
+    echo "error: split_flag_word must split [$1] into the flag [$2], the value [$3], value_is_next_word [$4] and flags_before [$5], but it gave [$flag], [$value], [$value_is_next_word] and [$flags_before]." >&2
     failed_cases=$((failed_cases + 1))
   fi
 }
 
 # Long flags
-expect_split --body=Text --body Text ""
-expect_split --body= --body "" ""
-expect_split --body --body "" yes
-expect_split --comment --comment "" ""
+expect_split --body=Text --body Text "" ""
+expect_split --body= --body "" "" ""
+expect_split --body --body "" yes ""
+expect_split --comment --comment "" "" ""
 
 # One short flag, with its value in the same word or the next. gh drops the = after a short flag only when more
 # follows it.
-expect_split -bText -b Text ""
-expect_split -b=Text -b Text ""
-expect_split -b==Text -b =Text ""
-expect_split -b= -b = ""
-expect_split -b -b "" yes
-expect_split -c -c "" ""
+expect_split -bText -b Text "" ""
+expect_split -b=Text -b Text "" ""
+expect_split -b==Text -b =Text "" ""
+expect_split -b= -b = "" ""
+expect_split -b -b "" yes ""
+expect_split -c -c "" "" ""
 
 # Several short flags in one word, where each flag but the last takes no value
-expect_split -cb -b "" yes
-expect_split -cbText -b Text ""
-expect_split -cb=Text -b Text ""
-expect_split -cb= -b = ""
-# gh reads what follows the = after -c as the value of -c.
-expect_split -c=bText -c=bText "" ""
+expect_split -cb -b "" yes c
+expect_split -cbText -b Text "" c
+expect_split -cb=Text -b Text "" c
+expect_split -cb= -b = "" c
+expect_split -ccb -b "" yes cc
+expect_split -cc -c "" "" c
+# gh reads what follows the = after a flag that takes no value as that flag's value, even when it starts with a flag
+# that takes one.
+expect_split -c=bText -c bText "" ""
+expect_split -cc=false -c false "" c
 
 finish_tests

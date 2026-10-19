@@ -369,6 +369,12 @@ expect_block Bash "gh pr create --draft --title '$title' --body-file ../body.md 
 expect_allow Bash "gh pr create --draft --title '$title' --body-file ../body.md"
 expect_allow Bash "gh pr create -d --title '$title' --body-file ../body.md"
 expect_allow Bash "gh pr new --title '$title' --body-file ../body.md --draft=true"
+# gh reads -dt'<title>' as -d -t '<title>', and the value after the = in -dd=false as the value of the last -d.
+expect_allow Bash "gh pr create -d -t '$title' --body-file ../body.md"
+expect_allow Bash "gh pr create -dt'$title' --body-file ../body.md"
+expect_allow Bash "gh pr create -d=true --title '$title' --body-file ../body.md"
+expect_block Bash "gh pr create -d=false --title '$title' --body-file ../body.md" "$rules_need_draft"
+expect_block Bash "gh pr create -dd=false --title '$title' --body-file ../body.md" "$rules_need_draft"
 git switch --quiet -c moved main
 mkdir tools
 git mv scripts/configure-github tools/configure-github

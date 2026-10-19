@@ -75,7 +75,7 @@ split_label_value() {
 # issue_arguments, added_labels, removed_labels, repository, asks_for_help, body_source (empty, text or file),
 # body_word, body_file and body_may_expand: read_issue_command <flags that take a value>
 read_issue_command() {
-  local flags_with_value=$1 i word flag value value_is_next_word
+  local flags_with_value=$1 i word flag value value_is_next_word flags_before
   local -a split_labels
   issue_arguments=() added_labels=() removed_labels=() repository=()
   asks_for_help="" body_source="" body_word="" body_file="" body_may_expand=""
