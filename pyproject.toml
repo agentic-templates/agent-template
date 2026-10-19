@@ -47,8 +47,9 @@ scripts_are_modules = true
 [tool.coverage.run]
 branch = true
 source = ["scripts"]
-# The tests run the scripts in scripts/loop as scripts too.
+# The tests run the scripts in scripts/loop as scripts too, and stop the receivers that they start with SIGTERM.
 patch = ["subprocess"]
+sigterm = true
 
 [tool.coverage.report]
 fail_under = 100

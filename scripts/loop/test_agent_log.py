@@ -239,10 +239,10 @@ class EndTest(AgentLogTest):
             self.transcript,
             [
                 prompt_line(0),
-                call_line("a", 1, tokens=1000, tool_calls=2, output_tokens=30),
+                call_line("a", 1, tokens=1000, tool_calls=2, output_tokens=30, request_id="req_a"),
                 command_line("b", 5, "toolu_9", "gh pr create --fill"),
                 result_line(6, "toolu_9", "https://github.com/owner/repo/pull/57\n"),
-                call_line("c", 12, tokens=500, output_tokens=4),
+                call_line("c", 12, tokens=500, output_tokens=4, request_id="req_c"),
             ],
         )
 
@@ -264,7 +264,7 @@ class EndTest(AgentLogTest):
                 "tool_calls": 3,
                 "input_tokens": 1500,
                 "output_tokens": 34,
-                "output_tokens_exact": False,
+                "requests": {"req_a": 30, "req_c": 4},
                 "pull_request": 57,
             },
         )

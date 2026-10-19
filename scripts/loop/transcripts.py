@@ -24,6 +24,8 @@ class Call(NamedTuple):
     # The output tokens as of the reply's start, which leave out most of them
     output_tokens: int
     tool_calls: int
+    # The id of the request to the API, which Claude Code's events give too, or None if the transcript has none
+    request_id: str | None = None
 
 
 def read_transcript(file: Path) -> tuple[list[Call], list[dt.datetime]]:
@@ -32,6 +34,7 @@ def read_transcript(file: Path) -> tuple[list[Call], list[dt.datetime]]:
     response, so its tool calls add up."""
     times: dict[str, list[dt.datetime]] = {}
     usage: dict[str, dict[str, int]] = {}
+    request_ids: dict[str, str] = {}
     tool_calls: Counter[str] = Counter()
     prompts = []
     for entry in transcript_entries(file):
@@ -46,6 +49,8 @@ def read_transcript(file: Path) -> tuple[list[Call], list[dt.datetime]]:
         for key in most:
             most[key] = max(most[key], message.get("usage", {}).get(key) or 0)
         tool_calls[call] += len(blocks(entry, "tool_use"))
+        if entry.get("requestId"):
+            request_ids[call] = entry["requestId"]
     calls = [
         Call(
             call,
@@ -54,6 +59,7 @@ def read_transcript(file: Path) -> tuple[list[Call], list[dt.datetime]]:
             sum(usage[call][key] for key in INPUT_KEYS),
             usage[call][OUTPUT_KEY],
             tool_calls[call],
+            request_ids.get(call),
         )
         for call, moments in times.items()
     ]

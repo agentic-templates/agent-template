@@ -16,7 +16,8 @@ draft before the push. If scripts/clear-worktrees or a check refuses the changes
 worktree or on the local branch, and the run fails and says where they are. The script doesn't start when that
 worktree exists already, or when the issue has needs-triage.
 
-A Claude builder builds the issue as "Build one issue" in docs/building.md describes.
+A Claude builder builds the issue as "Build one issue" in docs/building.md describes. It sends the tokens of its
+requests to .loop/requests.jsonl, as scripts/loop/claude-with-events does.
 
 A Codex builder runs in a sandbox that can't reach the network or write the git folder, so it only edits files, and
 it builds only the kinds research and other. When it ends, the script commits its changes and pushes them, unless a file's
@@ -55,6 +56,7 @@ from typing import Any, NamedTuple
 
 import agent_log
 import paths
+import request_events
 from accounts import TOOLS, Account, AccountsError, claude_environment, load_accounts
 
 # The checkout that holds this script. The script runs this checkout's checks, such as scripts/hooks/before-tool,
@@ -320,10 +322,10 @@ def run_numbers(
     transcript = project / f"{sessions[0]}.jsonl" if sessions else None
     if transcript is None or not transcript.exists():
         return agent_log.Numbers(
-            run_minutes(run), agent_log.period_texts([run]), 0, input_tokens, output_tokens, True, None
+            run_minutes(run), agent_log.period_texts([run]), 0, input_tokens, output_tokens, None, None
         )
     numbers = agent_log.transcript_numbers(transcript)
-    return numbers._replace(input_tokens=input_tokens, output_tokens=output_tokens, output_tokens_exact=True)
+    return numbers._replace(input_tokens=input_tokens, output_tokens=output_tokens, requests=None)
 
 
 def claude_tokens(events: list[dict[str, Any]]) -> tuple[int, int]:
@@ -346,7 +348,7 @@ def codex_numbers(events: list[dict[str, Any]], run: agent_log.Period, pull_requ
     input_tokens = sum(usage.get("input_tokens", 0) for usage in usages)
     output_tokens = sum(usage.get("output_tokens", 0) for usage in usages)
     periods = agent_log.period_texts([run])
-    return agent_log.Numbers(run_minutes(run), periods, tool_calls, input_tokens, output_tokens, True, pull_request)
+    return agent_log.Numbers(run_minutes(run), periods, tool_calls, input_tokens, output_tokens, None, pull_request)
 
 
 def run_minutes(run: agent_log.Period) -> float:
@@ -529,10 +531,17 @@ def write_brief(issue: dict[str, Any], kind: str, run_brief: str, folders: Folde
 
 
 def run_claude(brief: str, account: Account, settings: agent_log.AgentSettings, folders: Folders) -> None:
-    """Runs claude with the type's settings until it ends, and writes its result to report.md in the run folder."""
+    """Runs claude with the type's settings until it ends, and writes its result to report.md in the run folder.
+    claude sends the tokens of its requests to the loop's receiver, which this starts if it isn't running."""
+    try:
+        port = request_events.receiver_port(paths.loop_dir())
+    except request_events.ReceiverError as error:
+        raise Stop(str(error)) from error
     # The first variable makes claude wait through a usage limit. The second keeps the hooks from logging the agents
     # that the builder starts, because the run's tokens count theirs.
-    environment = claude_environment(account) | {"CLAUDE_CODE_RETRY_WATCHDOG": "1", agent_log.RUN_VARIABLE: "1"}
+    environment = request_events.with_events(
+        claude_environment(account) | {"CLAUDE_CODE_RETRY_WATCHDOG": "1", agent_log.RUN_VARIABLE: "1"}, port
+    )
     model_options = [
         *option("--model", settings.model),
         *option("--effort", settings.effort),

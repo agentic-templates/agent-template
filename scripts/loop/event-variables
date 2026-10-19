@@ -1,0 +1,27 @@
+#!/usr/bin/env -S uv run --script --quiet
+"""Starts the loop's receiver of Claude Code's events if it isn't running, and prints the variables that make claude
+send its events, and only them, to the receiver: NAME=VALUE for each variable to set, and NAME alone for each one to
+unset, a variable to a line. scripts/loop/claude-with-events reads them. scripts/loop/request_events.py describes the
+receiver.
+"""
+
+import sys
+
+import paths
+import request_events
+
+
+def main() -> int:
+    try:
+        port = request_events.receiver_port(paths.loop_dir())
+    except request_events.ReceiverError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    lines = list(request_events.UNSET_VARIABLES)
+    lines += [f"{name}={value}" for name, value in request_events.event_variables(port).items()]
+    print("\n".join(lines))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

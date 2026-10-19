@@ -22,6 +22,16 @@ report = types.ModuleType("report")
 importlib.machinery.SourceFileLoader("report", str(REPORT)).exec_module(report)
 
 SINCE = START
+# A line of requests.jsonl
+REQUEST = {
+    "session_id": "s1",
+    "request_id": "req_a",
+    "model": "claude-opus-5-5",
+    "input_tokens": 2,
+    "output_tokens": 1,
+    "cache_read_tokens": 100,
+    "cache_creation_tokens": 10,
+}
 
 # A stand-in for gh. It writes each call's arguments to calls.jsonl in STANDIN_DIR. For a list of runs it prints the
 # lines under "runs" in gh.json. For a GraphQL query of runs it gives the jobs under "jobs" for each id that the query
@@ -111,6 +121,11 @@ class ReportTest(unittest.TestCase):
     def log_agents(self, *lines: dict[str, Any]) -> None:
         (self.loop / "agents.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
 
+    def log_requests(self, *requests: tuple[str, int]) -> None:
+        """Writes requests.jsonl, with the output tokens of each request id."""
+        lines = [{**REQUEST, "request_id": request_id, "output_tokens": tokens} for request_id, tokens in requests]
+        (self.loop / "requests.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
+
     def add_run(self, minutes: float, *jobs: dict[str, str]) -> None:
         node = f"run-{len(self.runs)}"
         self.runs.append({"node_id": node, "run_started_at": at(0), "updated_at": at(minutes)})
@@ -158,6 +173,7 @@ class EmptyPeriodTest(ReportTest):
                     "Since 2026-10-11T14:00:00+00:00",
                     "CI runs that passed: 0",
                     "Types: no agent started",
+                    "Requests of the agents of a session that have no event: 0 of 0",
                     "Orchestrator's share of the input tokens: none used",
                     "Hook blocks: 0",
                     "Machine: no readings",
@@ -240,17 +256,18 @@ def end(
     tool_calls: int = 1,
     tokens: int = 1,
     output_tokens: int = 1,
-    is_exact: bool = False,
+    requests: dict[str, int] | None = None,
     pull_request: int | None = None,
 ) -> dict[str, Any]:
-    """An end line of agents.jsonl, with the tokens as its input tokens. Its output tokens are exact, as for a run of
-    scripts/loop/run-builder, or leave out most, as for an agent of a session."""
+    """An end line of agents.jsonl, with the tokens as its input tokens. Without requests, it's the line of a run of
+    scripts/loop/run-builder. With them, it's the line of an agent of a session, whose output tokens are the sum of
+    the requests' counts in its transcript."""
     numbers = {
         "minutes": minutes,
         "tool_calls": tool_calls,
         "input_tokens": tokens,
-        "output_tokens": output_tokens,
-        "output_tokens_exact": is_exact,
+        "output_tokens": output_tokens if requests is None else sum(requests.values()),
+        "requests": requests,
         "pull_request": pull_request,
     }
     return {
@@ -285,53 +302,61 @@ class TypeTest(ReportTest):
             [
                 (
                     "Type builder: 4 started, 3 ended, median 20.0 min and 6 tool calls, 75% of the agents' input "
-                    "tokens | output tokens: at least 3 in agents of a session, whose transcripts leave out most "
-                    "| pull requests: 0"
+                    "tokens | output tokens: 3 | pull requests: 0"
                 ),
                 (
                     "Type reviewer: 1 started, 1 ended, median 1.0 min and 99 tool calls, 25% of the agents' input "
-                    "tokens | output tokens: at least 1 in agents of a session, whose transcripts leave out most "
-                    "| pull requests: 0"
+                    "tokens | output tokens: 1 | pull requests: 0"
                 ),
             ],
         )
 
-    def test_gives_the_output_tokens_of_the_runs_of_run_builder_apart_from_those_of_the_agents_of_a_session(
-        self,
-    ) -> None:
+    def test_takes_the_output_tokens_of_each_request_of_an_agent_of_a_session_from_its_event(self) -> None:
+        self.log_agents(
+            start("toolu_1", 1),
+            end("toolu_1", 10, requests={"req_a": 4, "req_b": 9}),
+            start("toolu_2", 2),
+            end("toolu_2", 10, requests={"req_c": 0}),
+        )
+        self.log_requests(("req_a", 1200), ("req_b", 300), ("req_c", 45), ("req_other", 7000))
+        self.assertEqual(self.line("Type").split(" | ")[1], "output tokens: 1545")
+        self.assertEqual(self.line("Requests"), "Requests of the agents of a session that have no event: 0 of 3")
+
+    def test_takes_the_transcripts_count_for_a_request_with_no_event_and_counts_those_requests(self) -> None:
+        self.log_agents(
+            start("toolu_1", 1),
+            end("toolu_1", 10, requests={"req_a": 4, "req_b": 9}),
+            start("toolu_2", 2),
+            end("toolu_2", 10, requests={"req_c": 6}),
+        )
+        self.log_requests(("req_a", 1200))
+        self.assertEqual(self.line("Type").split(" | ")[1], "output tokens: 1215")
+        self.assertEqual(self.line("Requests"), "Requests of the agents of a session that have no event: 2 of 3")
+
+    def test_takes_the_output_tokens_of_a_run_of_run_builder_from_its_end_line(self) -> None:
         self.log_agents(
             start("run-1", 1),
-            end("run-1", 10, tokens=3000, output_tokens=9000, is_exact=True),
-            start("run-2", 2),
-            end("run-2", 10, tokens=3000, output_tokens=1000, is_exact=True),
-            start("toolu_1", 3),
-            end("toolu_1", 10, tokens=4000, output_tokens=1500),
-            start("run-3", 4, agent_type="builder-small"),
-            end("run-3", 10, tokens=10000, output_tokens=700, is_exact=True),
+            end("run-1", 10, output_tokens=9000),
+            start("toolu_1", 2),
+            end("toolu_1", 10, requests={"req_a": 4}),
         )
-        status, lines, errors = self.run_report()
-        self.assertEqual((status, errors), (0, ""))
-        self.assertEqual(
-            [line for line in lines if line.startswith("Type")],
-            [
-                (
-                    "Type builder: 3 started, 3 ended, median 1.0 min and 1 tool calls, 50% of the agents' input "
-                    "tokens | output tokens: 10000 in runs of run-builder, at least 1500 in agents of a session, whose "
-                    "transcripts leave out most | pull requests: 0"
-                ),
-                (
-                    "Type builder-small: 1 started, 1 ended, median 1.0 min and 1 tool calls, 50% of the agents' "
-                    "input tokens | output tokens: 700 in runs of run-builder | pull requests: 0"
-                ),
-            ],
-        )
+        self.log_requests(("req_a", 1200))
+        self.assertEqual(self.line("Type").split(" | ")[1], "output tokens: 10200")
+        self.assertEqual(self.line("Requests"), "Requests of the agents of a session that have no event: 0 of 1")
+
+    def test_takes_the_output_tokens_of_an_end_line_written_before_end_lines_had_requests_from_the_line(self) -> None:
+        old_end = {key: value for key, value in end("toolu_1", 10, output_tokens=3).items() if key != "requests"}
+        self.log_agents(start("toolu_1", 1), {**old_end, "output_tokens_exact": False})
+        self.log_requests(("req_a", 1200))
+        self.assertEqual(self.line("Type").split(" | ")[1], "output tokens: 3")
+        self.assertEqual(self.line("Requests"), "Requests of the agents of a session that have no event: 0 of 0")
 
     def test_counts_only_the_agents_that_started_after_the_time(self) -> None:
         self.log_agents(start("old", -10), end("old", 5, tokens=5000), start("new", 1), end("new", 6, tokens=1000))
         self.assertEqual(
             self.line("Type"),
             "Type builder: 1 started, 1 ended, median 1.0 min and 1 tool calls, 100% of the agents' input tokens "
-            "| output tokens: at least 1 in agents of a session, whose transcripts leave out most | pull requests: 0",
+            "| output tokens: 1 | pull requests: 0",
         )
 
     def test_leaves_out_the_test_builds_of_a_retrospective(self) -> None:
@@ -357,8 +382,7 @@ class TypeTest(ReportTest):
             [
                 (
                     "Type Explore: 1 started, 1 ended, median 1.0 min and 1 tool calls, 0% of the agents' input "
-                    "tokens | output tokens: at least 1 in agents of a session, whose transcripts leave out most "
-                    "| pull requests: 0"
+                    "tokens | output tokens: 1 | pull requests: 0"
                 ),
                 "Type builder: 1 started, 0 ended | pull requests: 0",
             ],
@@ -423,27 +447,27 @@ class TypeTest(ReportTest):
     def test_lists_each_agent_that_built_an_issue_with_the_issues_option(self) -> None:
         self.log_agents(
             start("a", 0, issue=12, kind="other", label="feature"),
-            end("a", 9, minutes=8.5, tool_calls=40, tokens=1200, output_tokens=90, pull_request=57),
+            end("a", 9, minutes=8.5, tool_calls=40, tokens=1200, requests={"req_a": 5, "req_b": 3}, pull_request=57),
             start("ra", 20, agent_type="reviewer", issue=57),
             start("b", 1, agent_type="builder-small", issue=13, kind="left behind 31", label="bug"),
-            end("b", 9, minutes=3, tool_calls=10, tokens=300, output_tokens=200, is_exact=True, pull_request=58),
+            end("b", 9, minutes=3, tool_calls=10, tokens=300, output_tokens=200, pull_request=58),
             start("c", 2, issue=14, kind="other", label="maintenance"),
-            end("c", 9, minutes=4, tool_calls=11, tokens=400, output_tokens=50, is_exact=True),
+            end("c", 9, minutes=4, tool_calls=11, tokens=400, output_tokens=50),
             start("d", 3, issue=15, kind="other", label="feature"),
             start("research", 4, agent_type="researcher", issue=16, kind="research", label="research"),
             end("research", 9),
         )
         self.add_pull_request(57, commit_minutes=(8, 30), conclusions=("FAILURE",))
         self.add_pull_request(58)
+        self.log_requests(("req_a", 800))
         status, lines, errors = self.run_report("--since", SINCE.isoformat(), "--issues")
         self.assertEqual((status, errors), (0, ""))
         self.assertEqual(
             [line for line in lines if line.startswith("Issue")],
             [
                 (
-                    "Issue #12 feature other: builder, 8.5 min, 40 tool calls, 1200 input tokens, at least 90 output "
-                    "tokens, because its transcript leaves out most | pull request #57: needed a fix after review, "
-                    "failed a check"
+                    "Issue #12 feature other: builder, 8.5 min, 40 tool calls, 1200 input tokens, 803 output tokens, "
+                    "1 of its requests with no event | pull request #57: needed a fix after review, failed a check"
                 ),
                 (
                     "Issue #13 bug left behind 31: builder-small, 3.0 min, 10 tool calls, 300 input tokens, 200 output "

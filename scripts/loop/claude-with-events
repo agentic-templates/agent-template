@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Runs claude with the arguments it's given, and has it send the tokens of each request that it and its agents make
+# to the loop's receiver, which scripts/loop/event-variables starts if it isn't running. Start the orchestrator with
+# it, as in scripts/loop/claude-with-events or scripts/loop/claude-with-events --resume, so that scripts/loop/report
+# counts its agents' exact output tokens. claude gets this shell's environment, with only Claude Code's events turned
+# on: no prompts, tool details, metrics or traces.
+set -euo pipefail
+variables=$("$(dirname "$0")/event-variables")
+while IFS= read -r variable; do
+  if [[ $variable == *=* ]]; then
+    export "${variable?}"
+  else
+    unset "$variable"
+  fi
+done <<<"$variables"
+exec claude "$@"

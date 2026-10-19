@@ -43,6 +43,7 @@ When a request doesn't fit this direction, say so, and ask the maintainer whethe
 
 - `scripts/check`: runs the checks that CI runs on the code.
 - `scripts/loop/meter`: prints the usage of each Claude and Codex account that `.loop/accounts.json` lists, and advises whether to start more work. `scripts/loop/meter --help` says how to read it.
+- `scripts/loop/claude-with-events`: the command that the maintainer starts the orchestrator with. It runs `claude` with the arguments it's given, and has it send the tokens of each request to `.loop/requests.jsonl`, so that `scripts/loop/report` counts the agents' exact output tokens.
 - `scripts/loop/run-builder <issue> <kind> --tool claude --type <agent type>`, or `--tool codex`: starts a builder for the issue on an account that `.loop/accounts.json` lists, in a worktree of its own, and says where the builder's report is. `<issue> <kind>` is the line that `scripts/take-next-issue` printed. A Claude builder runs at the model and effort of its type. `scripts/loop/run-builder --help` says which account it picks and what a Codex builder can do.
 - `scripts/loop/consequential`: lists the files of the branch's change that a reviewer reads before the change merges: the rules, the scripts and the files that keep agents safe.
 - `uv run --locked python -m unittest discover -s scripts/loop -t scripts/loop`: runs the tests of the Python scripts, which `scripts/check` runs too.
