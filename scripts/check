@@ -438,8 +438,7 @@ if [[ -z "${CHECK_UNDER_TEST:-}" ]]; then
       # Each Python process of the tests writes its own coverage data, which combine merges.
       coverage_file=$(git rev-parse --git-path coverage)
       COVERAGE_FILE=$coverage_file uv run --locked --quiet coverage erase
-      COVERAGE_FILE=$coverage_file uv run --locked --quiet \
-        coverage run -m unittest discover --start-directory scripts/loop --top-level-directory scripts/loop
+      COVERAGE_FILE=$coverage_file uv run --locked --quiet coverage run scripts/loop/run-tests
       COVERAGE_FILE=$coverage_file uv run --locked --quiet coverage combine --quiet
       COVERAGE_FILE=$coverage_file uv run --locked --quiet coverage report
     fi
