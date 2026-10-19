@@ -37,9 +37,11 @@ The lines are:
                             many agents or sessions it covers, the median and the largest of their peak context, and
                             the share of them whose peak passed the threshold at which scripts/hooks/hand-off tells a
                             builder to hand off, or for the sessions, tells the orchestrator to compact. Then the
-                            context that the results of their tool calls added, per tool call, how many of them the
-                            hook told to hand off, their compactions, and the three kinds of tool calls whose results
-                            added the most, by their share, as the Agents' time line groups the tool calls.
+                            context that the results of their tool calls added, per tool call, and how many steps it
+                            leaves out because their call has no event in .loop/requests.jsonl. Then how many of the
+                            agents the hook told to hand off, their compactions, and the three kinds of tool calls
+                            whose results added the most, by their share, as the Agents' time line groups the tool
+                            calls.
   Heavy command             A line for each command that scripts/loop/run-heavy ran, from .loop/heavy.jsonl: how many
                             runs started and ended, and the median minutes, cores and memory of those that ended.
                             Then how many runs waited, those that a signal stopped while they waited included, their
@@ -59,8 +61,8 @@ The lines are:
                             change from the first reading to the last. A number that no reading gives says so.
 
 With --issues, the report also gives a line for each agent that built an issue, of the kinds other and left behind,
-with its numbers, those of its pull request, its peak context and the context added per tool call, and the minutes of
-each part of its time.
+with its numbers, those of its pull request, its peak context, the context added per tool call in the steps that
+have an event, and the minutes of each part of its time.
 
 With --messages, the report also gives each message that a person typed in a session in the main checkout, such as
 the maintainer's messages to the orchestrator, with its time.
@@ -557,11 +559,14 @@ def context_lines(by_type: dict[str, list[Context]], orchestrator: list[Context]
     threshold at which it tells the orchestrator to compact."""
     hand_off = ("the hand-off threshold", hook_threshold("soon_tokens"))
     compaction = ("the compaction threshold", hook_threshold("compact_tokens"))
-    lines = [context_line(f"type {name}", "agents", by_type[name], hand_off) for name in sorted(by_type)]
-    return [*lines, context_line("the orchestrator", "sessions", orchestrator, compaction)]
+    lines = [context_line(f"type {name}", "agents", by_type[name], hand_off, True) for name in sorted(by_type)]
+    # The hook never tells the orchestrator to hand off.
+    return [*lines, context_line("the orchestrator", "sessions", orchestrator, compaction, False)]
 
 
-def context_line(whose: str, unit: str, contexts: list[Context], threshold: tuple[str, int]) -> str:
+def context_line(
+    whose: str, unit: str, contexts: list[Context], threshold: tuple[str, int], has_hand_offs: bool
+) -> str:
     if not contexts:
         return f"Context of {whose}: no calls"
     growths = [context.growth for context in contexts]
@@ -575,13 +580,14 @@ def context_line(whose: str, unit: str, contexts: list[Context], threshold: tupl
     added = +added
     told = sum(context.is_told_to_hand_off for context in contexts)
     compactions = sum(growth.compactions for growth in growths)
+    without_event = sum(growth.steps_without_event for growth in growths)
     parts = [
         (
             f"Context of {whose}: {len(contexts)} {unit}, peak median {thousands(statistics.median(peaks))}, largest "
             f"{thousands(max(peaks))}, {past:.0%} past {threshold_name} of {thousands(threshold_tokens)}"
         ),
-        f"{thousands(added_per_tool_call(growths))} added per tool call",
-        f"{told} told to hand off, {compactions} compactions",
+        f"{per_tool_call(growths)}, {without_event} steps without an event left out",
+        f"{told} told to hand off, {compactions} compactions" if has_hand_offs else f"{compactions} compactions",
     ]
     total = added.total()
     if total:
@@ -595,15 +601,16 @@ def agent_context_part(context: Context | None) -> str:
     without a transcript."""
     if context is None:
         return ""
-    growth = context.growth
-    return f" | context: peak {thousands(growth.peak)}, {thousands(added_per_tool_call([growth]))} per tool call"
+    return f" | context: peak {thousands(context.growth.peak)}, {per_tool_call([context.growth])}"
 
 
-def added_per_tool_call(growths: list[context_growth.Growth]) -> float:
+def per_tool_call(growths: list[context_growth.Growth]) -> str:
+    """The context added per tool call, in the steps that have an event."""
     tool_calls = sum(growth.tool_calls for growth in growths)
     if not tool_calls:
-        return 0
-    return sum(sum(growth.added.values()) for growth in growths) / tool_calls
+        return "no tool call measured"
+    added = sum(sum(growth.added.values()) for growth in growths)
+    return f"{thousands(added / tool_calls)} added per tool call"
 
 
 def thousands(tokens: float) -> str:

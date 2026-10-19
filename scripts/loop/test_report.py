@@ -546,7 +546,7 @@ class AgentTimeTest(ReportTest):
             (
                 "Issue #12 feature other: builder, 12.0 min, 1 tool calls, 1 input tokens, 1 output tokens | pull "
                 "request #57: no fix after review, failed check, unmerged exit from the merge queue or second builder "
-                "| context: peak 0.0k, 0.0k per tool call | time: model 6.0 min, scripts/check 6.0 min, waiting for "
+                "| context: peak 0.0k, no tool call measured | time: model 6.0 min, scripts/check 6.0 min, waiting for "
                 "the orchestrator 18.0 min"
             ),
         )
@@ -564,10 +564,10 @@ class AgentTimeTest(ReportTest):
         self.assertEqual(
             [line for line in lines if line.startswith("Issue")],
             [
-                "Issue #12 feature other: builder, not ended | context: peak 0.0k, 0.0k per tool call | time: model 1.0 min",
+                "Issue #12 feature other: builder, not ended | context: peak 0.0k, no tool call measured | time: model 1.0 min",
                 (
                     "Issue #13 bug other: builder, 2.0 min, 1 tool calls, 1 input tokens, 1 output tokens | no pull "
-                    "request | context: peak 0.0k, 0.0k per tool call | time: model 2.0 min"
+                    "request | context: peak 0.0k, no tool call measured | time: model 2.0 min"
                 ),
             ],
         )

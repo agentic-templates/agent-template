@@ -64,6 +64,8 @@ class ContextTest(ReportTest):
                 sized_call_line("s4", 8, 14_000),
             ],
         )
+        # The orchestrator's last step with a tool call has no event.
+        self.log_requests(*[(f"req_{call}", 0) for call in ("y1", "y2", "y3", "s1", "s2")], ("req_x1", 1_000))
         status, lines, errors = self.run_report("--since", SINCE.isoformat(), "--issues")
         self.assertEqual((status, errors), (0, ""))
         self.assertEqual(
@@ -71,17 +73,18 @@ class ContextTest(ReportTest):
             [
                 (
                     "Context of type builder: 2 agents, peak median 90.5k, largest 120.0k, 50% past the hand-off "
-                    "threshold of 100.0k | 32.5k added per tool call | 1 told to hand off, 0 compactions | added most "
+                    "threshold of 100.0k | 32.5k added per tool call, 0 steps without an event left out | 1 told to hand off, 0 compactions | added most "
                     "by scripts/check 85%, other tools 9%, other commands 6%"
                 ),
                 (
                     "Context of type reviewer: 1 agents, peak median 5.0k, largest 5.0k, 0% past the hand-off "
-                    "threshold of 100.0k | 0.0k added per tool call | 0 told to hand off, 0 compactions"
+                    "threshold of 100.0k | no tool call measured, 0 steps without an event left out | 0 told to hand "
+                    "off, 0 compactions"
                 ),
                 (
                     "Context of the orchestrator: 1 sessions, peak median 70.0k, largest 70.0k, 100% past the "
-                    "compaction threshold of 50.0k | 11.3k added per tool call | 0 told to hand off, 1 compactions "
-                    "| added most by other tools 100%"
+                    "compaction threshold of 50.0k | 15.0k added per tool call, 1 steps without an event left out | 1 "
+                    "compactions | added most by other tools 100%"
                 ),
             ],
         )
@@ -89,7 +92,8 @@ class ContextTest(ReportTest):
             next(line for line in lines if line.startswith("Issue")),
             (
                 "Issue #12 feature other: builder, 4.0 min, 1 tool calls, 1 input tokens, 1 output tokens | no pull "
-                "request | context: peak 120.0k, 99.0k per tool call | time: model 2.0 min, scripts/check 2.0 min"
+                "request | context: peak 120.0k, 99.0k added per tool call | time: model 2.0 min, scripts/check "
+                "2.0 min"
             ),
         )
 
@@ -112,11 +116,12 @@ class ContextTest(ReportTest):
                 sized_call_line("s2", 6, 36_000),
             ],
         )
+        self.log_requests(("req_before", 0), ("req_s1", 0))
         self.assertEqual(
             self.line("Context of the orchestrator"),
             (
                 "Context of the orchestrator: 2 sessions, peak median 33.0k, largest 36.0k, 0% past the compaction "
-                "threshold of 50.0k | 8.0k added per tool call | 0 told to hand off, 0 compactions | added most by "
-                "other tools 100%"
+                "threshold of 50.0k | 8.0k added per tool call, 0 steps without an event left out | 0 compactions | "
+                "added most by other tools 100%"
             ),
         )

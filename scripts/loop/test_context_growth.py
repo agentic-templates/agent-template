@@ -25,7 +25,7 @@ def sized_call_line(
     request_id: str | None = None,
 ) -> dict[str, Any]:
     """A transcript's line for a call whose context is the tokens, split between new and cached input as Claude Code
-    gives them, with the tool calls."""
+    gives them, with the tool calls, and with the request id, or else req_<call>."""
     usage = {
         "input_tokens": 1,
         "cache_creation_input_tokens": 9,
@@ -34,7 +34,7 @@ def sized_call_line(
     }
     content = [{"type": "text", "text": "Working."}, *uses]
     line = {"type": "assistant", "timestamp": at(minute), "message": {"id": call, "usage": usage, "content": content}}
-    return line | ({"requestId": request_id} if request_id else {})
+    return line | {"requestId": request_id or f"req_{call}"}
 
 
 def compaction_line(minute: float) -> dict[str, Any]:
@@ -56,10 +56,16 @@ class GrowthTest(unittest.TestCase):
     def growth(
         self, *lines: Any, counted: set[str] | None = None, event_tokens: dict[str, int] | None = None
     ) -> Growth:
+        """The growth in the transcript of the lines. Without event_tokens, each request has an event that gives the
+        output tokens that the transcript gives."""
         write_transcript(self.file, list(lines))
+        if event_tokens is None:
+            event_tokens = {
+                line["requestId"]: line["message"]["usage"]["output_tokens"] for line in lines if "requestId" in line
+            }
         calls = context_growth.read_calls(self.file)
         every_call = {context.call.id for context in calls}
-        return context_growth.growth(calls, every_call if counted is None else counted, event_tokens or {})
+        return context_growth.growth(calls, every_call if counted is None else counted, event_tokens)
 
     def test_gives_the_peak_and_the_context_that_the_results_of_each_kind_of_tool_call_added(self) -> None:
         self.assertEqual(
@@ -80,6 +86,7 @@ class GrowthTest(unittest.TestCase):
                 tool_calls=3,
                 added={"scripts/check": 10_000, "other tools": 3_000, "other commands": 300},
                 compactions=0,
+                steps_without_event=0,
             ),
         )
 
@@ -91,7 +98,13 @@ class GrowthTest(unittest.TestCase):
                 result_line(2, "toolu_2", "found"),
                 sized_call_line("b", 3, 13_000),
             ),
-            Growth(peak=13_000, tool_calls=2, added={"other commands": 1_500, "other tools": 1_500}, compactions=0),
+            Growth(
+                peak=13_000,
+                tool_calls=2,
+                added={"other commands": 1_500, "other tools": 1_500},
+                compactions=0,
+                steps_without_event=0,
+            ),
         )
 
     def test_counts_the_tool_calls_of_a_response_on_several_lines_once_each(self) -> None:
@@ -103,7 +116,13 @@ class GrowthTest(unittest.TestCase):
                 result_line(2, "toolu_2", "found"),
                 sized_call_line("b", 3, 13_000),
             ),
-            Growth(peak=13_000, tool_calls=2, added={"other commands": 1_500, "other tools": 1_500}, compactions=0),
+            Growth(
+                peak=13_000,
+                tool_calls=2,
+                added={"other commands": 1_500, "other tools": 1_500},
+                compactions=0,
+                steps_without_event=0,
+            ),
         )
 
     def test_counts_each_compaction_and_no_context_added_in_the_step_that_shrank(self) -> None:
@@ -118,20 +137,26 @@ class GrowthTest(unittest.TestCase):
                 compaction_line(7),
                 sized_call_line("d", 8, 12_000),
             ),
-            Growth(peak=290_000, tool_calls=2, added={"waiting for CI": 0, "other tools": 3_000}, compactions=2),
+            Growth(
+                peak=290_000,
+                tool_calls=2,
+                added={"waiting for CI": 0, "other tools": 3_000},
+                compactions=2,
+                steps_without_event=0,
+            ),
         )
 
-    def test_takes_a_calls_output_tokens_from_its_requests_event(self) -> None:
+    def test_takes_a_calls_output_tokens_from_its_event_and_leaves_out_a_step_whose_call_has_none(self) -> None:
         self.assertEqual(
             self.growth(
                 sized_call_line("a", 1, 10_000, tool("toolu_1", "Write"), output_tokens=5, request_id="req_a"),
                 result_line(2, "toolu_1", "written"),
-                sized_call_line("b", 3, 14_000, tool("toolu_2", "Read"), output_tokens=5, request_id="req_b"),
-                result_line(4, "toolu_2", "text"),
-                sized_call_line("c", 5, 15_005),
+                sized_call_line("b", 3, 15_000, tool("toolu_2", "Write"), output_tokens=5, request_id="req_b"),
+                result_line(4, "toolu_2", "written"),
+                sized_call_line("c", 5, 20_000),
                 event_tokens={"req_a": 4_000},
             ),
-            Growth(peak=15_005, tool_calls=2, added={"other tools": 1_000}, compactions=0),
+            Growth(peak=20_000, tool_calls=1, added={"other tools": 1_000}, compactions=0, steps_without_event=1),
         )
 
     def test_measures_only_the_counted_calls_and_the_steps_that_lead_to_them(self) -> None:
@@ -147,8 +172,16 @@ class GrowthTest(unittest.TestCase):
                 sized_call_line("d", 8, 20_000),
                 counted={"c", "d"},
             ),
-            Growth(peak=20_000, tool_calls=2, added={"other tools": 2_000, "scripts/check": 8_000}, compactions=0),
+            Growth(
+                peak=20_000,
+                tool_calls=2,
+                added={"other tools": 2_000, "scripts/check": 8_000},
+                compactions=0,
+                steps_without_event=0,
+            ),
         )
 
     def test_gives_nothing_for_a_transcript_without_calls(self) -> None:
-        self.assertEqual(self.growth(prompt_line(0)), Growth(peak=0, tool_calls=0, added={}, compactions=0))
+        self.assertEqual(
+            self.growth(prompt_line(0)), Growth(peak=0, tool_calls=0, added={}, compactions=0, steps_without_event=0)
+        )
