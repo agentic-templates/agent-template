@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tests scripts/hooks/unread-pages.check, on records that scripts/fresh-reader writes with a stand-in for claude.
+# Tests scripts/hooks/unread-pages.check, on records that scripts/fresh-reader writes with a stand-in for claude, and on
+# pull requests that a stand-in for gh lists.
 # The cases run the check alone, so that the other checks on gh pr create, which need a title, a body and a pass of
 # scripts/check, don't decide them.
 set -euo pipefail
@@ -18,7 +19,49 @@ export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_
 mkdir "$base/bin"
 printf '#!/usr/bin/env bash\necho "The reader found nothing to change."\n' >"$base/bin/claude"
 chmod +x "$base/bin/claude"
+# A stand-in for gh, in the same folder, that answers gh pr list --head <branch> --state <state> --json <fields>
+# --jq <filter> as gh does, from the pull requests on GitHub that pull-requests.json lists: it picks the branch's pull
+# requests in that state, and their fields, and runs the filter on them. It fails for any other command, and when the
+# file isn't there.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+if [[ ${1:-} != pr || ${2:-} != list ]]; then
+  echo "The stand-in for gh doesn't answer: gh $*" >&2
+  exit 1
+fi
+shift 2
+head="" state=open fields="" filter=.
+while (($# > 0)); do
+  case $1 in
+    --head) head=$2 ;;
+    --state) state=$2 ;;
+    --json) fields=$2 ;;
+    --jq) filter=$2 ;;
+    *)
+      echo "The stand-in for gh doesn't answer gh pr list with $1." >&2
+      exit 1
+      ;;
+  esac
+  shift 2
+done
+jq --arg head "$head" --arg state "$state" --arg fields "$fields" '($fields | split(",")) as $names
+  | [.[] | select(.headRefName == $head and ($state == "all" or (.state | ascii_downcase) == $state))
+    | with_entries(select(.key as $key | any($names[]; . == $key)))]' "${0%/*}/../pull-requests.json" | jq -r "$filter"
+STAND_IN
+chmod +x "$base/bin/gh"
 PATH=$base/bin:$PATH
+
+# Prints a pull request on GitHub, with each field that the check asks gh for:
+# pull_request <number> <branch> <base branch> <state: OPEN, CLOSED or MERGED> [<true if its branch is in a fork>]
+pull_request() {
+  jq -n --argjson number "$1" --arg branch "$2" --arg base "$3" --arg state "$4" --argjson fork "${5:-false}" \
+    '{number: $number, headRefName: $branch, baseRefName: $base, state: $state, isCrossRepository: $fork}'
+}
+
+# Makes the pull requests on GitHub those that pull_request printed: on_github [<pull request>...]
+on_github() {
+  printf '%s\n' "$@" | jq -s . >"$base/pull-requests.json"
+}
 
 # A folder for a PATH with the commands that the check runs, but no claude
 no_claude=$base/no-claude
@@ -35,20 +78,35 @@ work_in() {
   cd "$1"
 }
 
-# Prints the message that blocks a pull request with pages that no reader has read: unread <page>...
-unread() {
-  local page
-  echo "Blocked: this pull request adds or rewrites text in pages that no fresh reader has read as they are now. Give each page to a reader, as \"Review a changed page with a fresh reader\" in docs/pages.md describes:"
+# Prints the message that blocks a command that adds text that no reader has read to pages:
+# unread_text <what adds the text> <command> <page>...
+unread_text() {
+  local what=$1 command=$2 page
+  shift 2
+  echo "Blocked: $what adds or rewrites text in pages that no fresh reader has read as they are now. Give each page to a reader, as \"Review a changed page with a fresh reader\" in docs/pages.md describes:"
   for page in "$@"; do
     echo "scripts/fresh-reader \"<reader>\" $page"
   done
-  echo "If you change a page after the reader read it, run its command again. Then commit the pages, and run gh pr create in a command of its own."
+  echo "If you change a page after the reader read it, run its command again. Then commit the pages, and run $command in a command of its own."
 }
 
-# Prints the message that blocks a pull request while pages have changes that aren't committed:
-# uncommitted <the pages, separated by commas>
+# Prints the message that blocks a pull request with pages that no reader has read: unread <page>...
+unread() {
+  unread_text "this pull request" "gh pr create" "$@"
+}
+
+# Prints the message that blocks a push to a pull request with pages that no reader has read:
+# unread_push <pull request's number> <page>...
+unread_push() {
+  local number=$1
+  shift
+  unread_text "this push to pull request #$number" "git push" "$@"
+}
+
+# Prints the message that blocks a command while pages have changes that aren't committed:
+# uncommitted <the pages, separated by commas> [<command, gh pr create unless given>]
 uncommitted() {
-  echo "Blocked: these pages have changes that aren't committed, so this hook can't tell which text the pull request holds: $1. Commit them first, and then run gh pr create in a command of its own."
+  echo "Blocked: these pages have changes that aren't committed, so this hook can't tell which text the pull request holds: $1. Commit them first, and then run ${2:-gh pr create} in a command of its own."
 }
 
 # Runs the check on a command from the folder that the agent works in, and checks its exit code and message:
@@ -203,6 +261,100 @@ expect_check "$create" 2 "$(unread README.md docs/guide/setup.md)"
 read_page README.md
 read_page docs/guide/setup.md
 expect_check "$create" 0 ""
+
+# A branch whose pull request is open on GitHub, with a line of docs/loop.md that the reader read before the branch was
+# pushed and the pull request opened
+work_in "$clone"
+git switch --quiet -c pushed main
+sed 's/^It merges each pull request\.$/It merges each pull request once the checks pass./' docs/loop.md >"$base/loop.md"
+mv "$base/loop.md" docs/loop.md
+read_page docs/loop.md
+commit_all "docs: say when the loop merges"
+git push --quiet -u origin pushed
+on_github "$(pull_request 5 pushed main OPEN)"
+
+# A push that adds no text to a page goes ahead. A push that adds text to a page is blocked until the reader has read
+# the page as the push leaves it, however the command names the branch.
+echo "Notes" >notes.txt
+commit_all "chore: keep notes"
+expect_check "git push" 0 ""
+echo "It waits for the checks." >>docs/loop.md
+commit_all "docs: say that the loop waits for the checks"
+for push in "git push" "git push -u origin HEAD" "git push --force-with-lease origin +HEAD:refs/heads/pushed" \
+  "git push origin pushed" "cd docs && git push" "git -C docs push"; do
+  expect_check "$push" 2 "$(unread_push 5 docs/loop.md)"
+done
+read_page docs/loop.md
+expect_check "git push" 0 ""
+
+# A push to a branch without an open pull request from this repository goes ahead, and so does a push when gh fails.
+echo "It merges each pull request through the merge queue." >>docs/loop.md
+commit_all "docs: say how the loop merges"
+expect_check "git push" 2 "$(unread_push 5 docs/loop.md)"
+on_github "$(pull_request 5 pushed main MERGED)" "$(pull_request 6 pushed main OPEN true)"
+expect_check "git push" 0 ""
+rm "$base/pull-requests.json"
+expect_check "git push" 0 ""
+on_github "$(pull_request 5 pushed main OPEN)"
+git switch --quiet -c unpushed
+expect_check "git push -u origin HEAD" 0 ""
+git switch --quiet pushed
+
+# A push that leaves the branch on origin as it is, that pushes branches the command doesn't name, or that can give git
+# another repository goes ahead, and so does a push without claude.
+for push in "git push fork HEAD" "git push --dry-run" "git push origin -d pushed" "git push origin :pushed" \
+  "git push --all" "git --git-dir=.git push"; do
+  expect_check "$push" 0 ""
+done
+PATH=$no_claude
+expect_check "git push" 0 ""
+PATH=$path_with_claude
+
+# The pages on disk count when the push sends HEAD, because a commit before git push in the same command sends them.
+echo "It starts a builder for each ready issue." >>docs/loop.md
+commit_and_push="git commit -qam 'docs: say which issues the loop builds' && git push"
+expect_check "$commit_and_push" 2 "$(unread_push 5 docs/loop.md)"
+read_page docs/loop.md
+expect_check "$commit_and_push" 2 "$(uncommitted docs/loop.md "git push")"
+commit_all "docs: say which issues the loop builds"
+expect_check "git push" 0 ""
+git push --quiet
+git branch stacked pushed
+git push --quiet origin stacked
+
+# In a worktree of its own, whose record has none of the pages that the reader read in the clone, a push that adds no
+# text to a page goes ahead, and so does a merge of main that adds text only to a page that the pull request doesn't
+# change.
+git switch --quiet main
+echo "Then rewrite each sentence that the reader found unclear." >>docs/pages.md
+commit_all "docs: say what to do with the reader's answer"
+git push --quiet origin main
+pushed_worktree=$base/pushed-worktree
+git worktree add --quiet "$pushed_worktree" pushed
+work_in "$pushed_worktree"
+echo "More notes" >>notes.txt
+commit_all "chore: keep more notes"
+expect_check "git push" 0 ""
+git merge --quiet --no-edit main
+expect_check "git push" 0 ""
+echo "It waits for each builder." >>docs/loop.md
+commit_all "docs: say that the loop waits for each builder"
+expect_check "git push" 2 "$(unread_push 5 docs/loop.md)"
+# A push of a branch other than HEAD's sends the branch's commit, and the record of the folder that -C names counts.
+work_in "$clone"
+expect_check "git push origin pushed" 2 "$(unread_push 5 docs/loop.md)"
+expect_check "git -C $pushed_worktree push" 2 "$(unread_push 5 docs/loop.md)"
+
+# The base branch of the pull request counts, as gh gives it. A merge of pushed into a branch whose pull request merges
+# into pushed adds only text that the pull request doesn't add.
+git -C "$pushed_worktree" push --quiet
+git switch --quiet stacked
+git merge --quiet --ff-only pushed
+on_github "$(pull_request 5 pushed main OPEN)" "$(pull_request 7 stacked pushed OPEN)"
+expect_check "git push" 0 ""
+on_github "$(pull_request 5 pushed main OPEN)" "$(pull_request 7 stacked main OPEN)"
+expect_check "git push" 2 "$(unread_push 7 docs/loop.md)"
+git switch --quiet main
 
 # When the check can't find the pull request's commits, it has nothing to check them with: with no branch of the name
 # that --head names, in a repository without origin, and outside a git repository.
