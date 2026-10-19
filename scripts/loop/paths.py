@@ -4,6 +4,7 @@ checkout, which every worktree shares. The environment variable LOOP_DIR names a
 import os
 import re
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 
@@ -26,9 +27,10 @@ def loop_dir() -> Path:
     return main_checkout() / ".loop"
 
 
-def claude_project_folder(checkout: Path) -> Path:
-    """The folder where Claude Code keeps the transcripts of the sessions that run in a checkout."""
-    config = Path(os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude")))
+def claude_project_folder(checkout: Path, environment: Mapping[str, str] = os.environ) -> Path:
+    """The folder where Claude Code keeps the transcripts of the sessions that run in a checkout, or in a folder, with
+    this process's environment or another, such as one that selects another account."""
+    config = Path(environment.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude")))
     # Claude Code names a project's folder after its path, with a dash for each character other than a letter or digit.
     return config / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(checkout))
 

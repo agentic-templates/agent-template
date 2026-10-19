@@ -1,10 +1,14 @@
 #!/usr/bin/env -S uv run --script --quiet
 """Starts a builder for one issue with Claude Code or Codex, waits for it to end, and says where its report is.
 
-  scripts/loop/run-builder <issue> <kind> --tool claude|codex [--account NAME] [--model MODEL] [--effort EFFORT]
+  scripts/loop/run-builder <issue> <kind> --tool claude --type TYPE [--account NAME] [--test PULL_REQUEST]
+  scripts/loop/run-builder <issue> <kind> --tool codex [--account NAME]
 
 <issue> <kind> is the line that scripts/take-next-issue printed, such as 12 other. The builder runs on the account
 called NAME in .loop/accounts.json, which scripts/loop/meter --help describes, or on the tool's first account there.
+A Claude builder runs with the model, effort, instructions, tools, disallowed tools and limit on turns in the agent
+file of its type, .claude/agents/TYPE.md in the checkout that holds this script. A Codex builder runs with Codex's own
+model and effort, because the agent files name Claude's models.
 It works in .claude/worktrees/run-<issue> in the main checkout, on the issue's branch. When the run ends,
 scripts/clear-worktrees <issue> commits the changes that the builder left on the branch and removes the worktree, and
 the script pushes the branch. If the branch has a pull request, the script turns off its auto-merge and makes it a
@@ -24,7 +28,15 @@ report becomes a comment on the issue.
 
 The last line gives the issue, the tool and the account, how the run ended, its minutes, and where the builder's
 report is. The run folder, .loop/runs/<issue>-<time>, keeps the brief, the builder's events and report, and
-status.json. The script exits with code 1 when the run fails or doesn't start.
+status.json. The script also adds a line to .loop/agents.jsonl when the run starts and one when it ends, as
+scripts/loop/agent_log.py describes, with the type codex for a Codex builder. The script exits with code 1 when the run
+fails or doesn't start.
+
+With --test, the run is a test build of a retrospective, which a Claude builder makes. The builder builds the issue
+again from the commit that the pull request PULL_REQUEST started from, in .claude/worktrees/test-<issue>-<type>, on no
+branch, and changes nothing on GitHub. When it ends, the script writes the diff of its changes, committed or not, to
+changes.diff in the run folder, .loop/runs/test-<issue>-<type>-<time>, and removes the worktree. The lines in
+.loop/agents.jsonl say that the run is a test.
 """
 
 import argparse
@@ -32,6 +44,7 @@ import datetime as dt
 import json
 import os
 import re
+import resource
 import shlex
 import shutil
 import subprocess
@@ -40,6 +53,7 @@ import time
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import agent_log
 import paths
 from accounts import TOOLS, Account, AccountsError, claude_environment, load_accounts
 
@@ -58,9 +72,15 @@ CLAUDE_COMMAND = [
     "--verbose",
 ]
 COMMIT_TYPES = {"feature": "feat", "bug": "fix", "maintenance": "chore"}
-# The kinds that scripts/take-next-issue prints. A Codex builder builds only CODEX_KINDS, because the others need gh.
-KIND = re.compile(r"research|parent|other|left behind [1-9][0-9]*")
+# A Codex builder builds only these kinds, because the others need gh.
 CODEX_KINDS = ("research", "other")
+# The type of a Codex builder in agents.jsonl
+CODEX_TYPE = "codex"
+# The fields of each model's tokens in the modelUsage of claude's result event
+CLAUDE_INPUT_FIELDS = ("inputTokens", "cacheReadInputTokens", "cacheCreationInputTokens")
+CLAUDE_OUTPUT_FIELD = "outputTokens"
+# The items of a Codex run that are tool calls, as codex exec --json lists them
+CODEX_TOOL_ITEMS = ("command_execution", "file_change", "mcp_tool_call", "web_search", "todo_list")
 # Codex runs without the variables whose names match, because they can hold a credential, which it can't use in its
 # sandbox, or choose another account, such as CODEX_HOME. What it prints ends up in the run folder and on GitHub.
 CREDENTIAL_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE", re.IGNORECASE)
@@ -87,6 +107,12 @@ SHARED_BRIEF = """You build this issue, of the kind `{kind}`, for the orchestrat
 CLAUDE_BRIEF = """You work in a worktree of your own, on the issue's branch. If you can't finish the issue, give it back
 as that section describes.
 """
+TEST_BRIEF = """This build is a test, which compares your change with other builds of the issue. You work in a worktree of
+your own, at the commit that the issue's pull request started from, on no branch. Make the change as steps 3 and 4 of
+"Make a change" in AGENTS.md describe, but change nothing on GitHub: don't run scripts/start-issue, push nothing, and
+open no issue or pull request. The script that started you keeps the diff of your changes.
+"""
+CHANGES_FILE = "changes.diff"
 CODEX_BRIEF = """Your sandbox can't write the git folder or reach the network, so don't run git or gh. Edit the files in
 this worktree, which is on the issue's branch. scripts/check stops with an error where it writes to the git folder or
 to uv's cache. CI runs every check on the pull request.
@@ -102,6 +128,16 @@ need to finish the issue.
 
 class Stop(Exception):
     """Ends the run, with the reason."""
+
+
+class Outcome(NamedTuple):
+    """How a run ended, as its last line says, and what the end line in agents.jsonl takes from it."""
+
+    text: str
+    is_ok: bool = True
+    # The pull request that the script opened for a Codex builder
+    pull_request: int | None = None
+    worktree_mb: float | None = None
 
 
 class Folders(NamedTuple):
@@ -120,15 +156,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("issue", type=int)
     parser.add_argument("kind", nargs="+", help="the issue's kind, as scripts/take-next-issue printed it")
     parser.add_argument("--tool", required=True, choices=TOOLS)
+    parser.add_argument("--type", help="the agent type of a Claude builder, such as builder")
     parser.add_argument("--account", help="the account's name in .loop/accounts.json")
-    parser.add_argument("--model")
-    parser.add_argument("--effort")
+    parser.add_argument("--test", type=int, metavar="PULL_REQUEST", help="build the issue again as a test")
     options = parser.parse_args(argv)
     kind = " ".join(options.kind)
     checkout = paths.main_checkout(Path.cwd())
-    worktree = checkout / ".claude" / "worktrees" / f"run-{options.issue}"
+    run_name = f"test-{options.issue}-{options.type}" if options.test else str(options.issue)
+    worktree = checkout / ".claude" / "worktrees" / (run_name if options.test else f"run-{options.issue}")
     try:
         check_kind(kind, options.tool)
+        settings = type_settings(options.tool, options.type, options.test)
         account = pick_account(load_accounts(paths.loop_dir() / "accounts.json"), options.tool, options.account)
         check_can_start(options.tool, worktree)
         repository = github_repository(checkout)
@@ -141,15 +179,20 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     started = dt.datetime.now().astimezone()
-    folders = Folders(checkout, worktree, paths.loop_dir() / "runs" / f"{options.issue}-{started:%Y%m%d-%H%M%S}", hooks)
+    folders = Folders(checkout, worktree, paths.loop_dir() / "runs" / f"{run_name}-{started:%Y%m%d-%H%M%S}", hooks)
     folders.run.mkdir(parents=True)
+    agent_type = options.type or CODEX_TYPE
+    label = agent_log.type_label(label_names(issue))
+    is_test = options.test is not None
+    agent_log.append(agent_log.start_line(folders.run.name, agent_type, settings, options.issue, label, kind, is_test))
     begun = time.monotonic()
     try:
-        outcome = build(options, kind, account, issue, repository, folders)
-        is_ok = True
+        if is_test:
+            outcome = test_build(settings, kind, account, issue, options.test, folders)
+        else:
+            outcome = build(options.tool, settings, kind, account, issue, repository, folders)
     except Stop as stop:
-        outcome = f"failed: {stop}"
-        is_ok = False
+        outcome = Outcome(f"failed: {stop}", is_ok=False)
     minutes = (time.monotonic() - begun) / 60
     status = {
         "issue": options.issue,
@@ -157,42 +200,159 @@ def main(argv: list[str] | None = None) -> int:
         "account": account["name"],
         "started": started.isoformat(timespec="seconds"),
         "minutes": round(minutes, 1),
-        "outcome": outcome,
+        "outcome": outcome.text,
     }
     (folders.run / "status.json").write_text(json.dumps(status, indent=2) + "\n")
+    numbers = run_numbers(options.tool, account, outcome, minutes, folders)
+    agent_log.append(agent_log.end_line(folders.run.name, numbers, outcome.worktree_mb, run_usage=children_usage()))
     report = folders.run / "report.md"
     where = f"report {report}" if report.exists() else f"no report, see {folders.run}"
-    print(f"issue {options.issue} | {options.tool} {account['name']} | {outcome} | {minutes:.1f} min | {where}")
-    return 0 if is_ok else 1
+    print(f"issue {options.issue} | {options.tool} {account['name']} | {outcome.text} | {minutes:.1f} min | {where}")
+    return 0 if outcome.is_ok else 1
+
+
+def type_settings(tool: str, agent_type: str | None, test: int | None) -> agent_log.AgentSettings:
+    """The settings that the builder runs with: those of a Claude builder's type, and none for a Codex builder."""
+    if tool == "codex":
+        if agent_type or test:
+            raise Stop(
+                "a Codex builder runs with Codex's own model and effort, so it takes neither --type nor --test. Leave "
+                "them out."
+            )
+        return agent_log.AgentSettings(None, None, None)
+    if not agent_type:
+        raise Stop(
+            "a Claude builder needs the agent type whose model and effort it runs with. Add --type, such as "
+            "--type builder."
+        )
+    settings = agent_log.agent_settings(agent_type)
+    if settings.file_hash is None:
+        raise Stop(
+            f"there's no agent file .claude/agents/{agent_type}.md for the type {agent_type}. Give a type that "
+            ".claude/agents has."
+        )
+    return settings
 
 
 def build(
-    options: argparse.Namespace, kind: str, account: Account, issue: dict[str, Any], repository: str, folders: Folders
-) -> str:
+    tool: str,
+    settings: agent_log.AgentSettings,
+    kind: str,
+    account: Account,
+    issue: dict[str, Any],
+    repository: str,
+    folders: Folders,
+) -> Outcome:
     """Runs the builder in its worktree, saves the changes that it left on the issue's branch, and removes the
-    worktree. Returns how the run ended."""
+    worktree. Returns how the run ended, with the worktree's size before its removal."""
     branch = issue_branch(issue["number"], repository, folders)
-    failure: Stop | None = None
     try:
         add_worktree(branch, folders)
-        brief = brief_for(issue, kind, options.tool)
-        (folders.run / "brief.md").write_text(brief)
-        if options.tool == "claude":
-            model_options = [*option("--model", options.model), *option("--effort", options.effort)]
-            run_claude(brief, account, model_options, folders)
-            return "finished"
-        effort = f'model_reasoning_effort="{options.effort}"' if options.effort else None
-        run_codex(brief, account, [*option("--model", options.model), *option("--config", effort)], folders)
-        return finish_codex(issue, branch, folders)
+        if tool == "claude":
+            run_claude(write_brief(issue, kind, CLAUDE_BRIEF, folders), account, settings, folders)
+            outcome = Outcome("finished")
+        else:
+            run_codex(write_brief(issue, kind, CODEX_BRIEF, folders), account, folders)
+            outcome = finish_codex(issue, branch, folders)
     except Stop as stop:
-        failure = stop
-        raise
+        outcome = Outcome(f"failed: {stop}", is_ok=False)
     finally:
+        worktree_mb = agent_log.folder_megabytes(folders.worktree)
         # Another run on the issue can't start while the worktree exists, and scripts/start-issue can't check out the
         # branch while the worktree has it.
         problem = clear_worktree(issue["number"], branch, folders)
-        if problem:
-            raise Stop(f"{failure}, and {problem}" if failure else problem) from failure
+    outcome = outcome._replace(worktree_mb=worktree_mb)
+    if problem:
+        text = f"failed: {problem}" if outcome.is_ok else f"{outcome.text}, and {problem}"
+        return outcome._replace(text=text, is_ok=False)
+    return outcome
+
+
+def test_build(
+    settings: agent_log.AgentSettings,
+    kind: str,
+    account: Account,
+    issue: dict[str, Any],
+    pull_request: int,
+    folders: Folders,
+) -> Outcome:
+    """Builds the issue again from the commit that its pull request started from, writes the diff of the builder's
+    changes to the run folder, and removes the worktree. Returns how the run ended, with the worktree's size before its
+    removal."""
+    base = pull_request_base(pull_request, folders)
+    git(["worktree", "add", "--quiet", "--detach", str(folders.worktree), base], folders.checkout, folders.hooks)
+    try:
+        run_claude(write_brief(issue, kind, TEST_BRIEF, folders), account, settings, folders)
+        outcome = Outcome(f"test finished, changes in {folders.run / CHANGES_FILE}")
+    except Stop as stop:
+        outcome = Outcome(f"failed: {stop}", is_ok=False)
+    finally:
+        worktree_mb = agent_log.folder_megabytes(folders.worktree)
+        git(["add", "--all"], folders.worktree, folders.hooks)
+        changes = git(["diff", "--cached", "--binary", base], folders.worktree, folders.hooks)
+        (folders.run / CHANGES_FILE).write_text(changes)
+        git(["worktree", "remove", "--force", str(folders.worktree)], folders.checkout, folders.hooks)
+    return outcome._replace(worktree_mb=worktree_mb)
+
+
+def pull_request_base(pull_request: int, folders: Folders) -> str:
+    """The commit that a pull request started from: the parent of its first commit. GitHub keeps the commits of a pull
+    request under refs/pull/<number>/head, also after a squash merge."""
+    git(["fetch", "--quiet", "origin", f"refs/pull/{pull_request}/head"], folders.checkout, folders.hooks)
+    commits = ["gh", "pr", "view", str(pull_request), "--json", "commits", "--jq", ".commits[0].oid"]
+    first = run_ok(commits, folders.checkout).strip()
+    return git(["rev-parse", "--verify", "--quiet", f"{first}^"], folders.checkout, folders.hooks).strip()
+
+
+def run_numbers(tool: str, account: Account, outcome: Outcome, minutes: float, folders: Folders) -> agent_log.Numbers:
+    """The builder's numbers for the end line in agents.jsonl: a Codex builder's from its events, and a Claude
+    builder's from its transcript, as for an agent of a session, but with the tokens from its events. A Claude builder
+    without a transcript, such as one that never started, made no calls."""
+    events = read_events(folders.run / "events.jsonl")
+    if tool == "codex":
+        return codex_numbers(events, minutes, outcome.pull_request)
+    input_tokens, output_tokens = claude_tokens(events)
+    sessions = [event["session_id"] for event in events if "session_id" in event]
+    project = paths.claude_project_folder(folders.worktree, claude_environment(account))
+    transcript = project / f"{sessions[0]}.jsonl" if sessions else None
+    if transcript is None or not transcript.exists():
+        return agent_log.Numbers(round(minutes, 1), 0, input_tokens, output_tokens, True, None)
+    numbers = agent_log.transcript_numbers(transcript)
+    return numbers._replace(input_tokens=input_tokens, output_tokens=output_tokens, output_tokens_exact=True)
+
+
+def claude_tokens(events: list[dict[str, Any]]) -> tuple[int, int]:
+    """The input tokens, cached ones too, and the output tokens of a Claude run, from its last result event. The
+    modelUsage of a result counts the whole run until then, with the agents that the builder started, while its usage
+    counts only the builder's own replies to the last prompt."""
+    results = [event for event in events if event.get("type") == "result"]
+    models = results[-1].get("modelUsage", {}).values() if results else []
+    input_tokens = sum(model.get(field) or 0 for model in models for field in CLAUDE_INPUT_FIELDS)
+    return input_tokens, sum(model.get(CLAUDE_OUTPUT_FIELD) or 0 for model in models)
+
+
+def codex_numbers(events: list[dict[str, Any]], minutes: float, pull_request: int | None) -> agent_log.Numbers:
+    tool_calls = sum(
+        event.get("type") == "item.completed" and event.get("item", {}).get("type") in CODEX_TOOL_ITEMS
+        for event in events
+    )
+    # Codex counts the cached input tokens among the input tokens, and the reasoning tokens among the output tokens.
+    usages = [event.get("usage", {}) for event in events if event.get("type") == "turn.completed"]
+    input_tokens = sum(usage.get("input_tokens", 0) for usage in usages)
+    output_tokens = sum(usage.get("output_tokens", 0) for usage in usages)
+    return agent_log.Numbers(round(minutes, 1), tool_calls, input_tokens, output_tokens, True, pull_request)
+
+
+def read_events(file: Path) -> list[dict[str, Any]]:
+    return list(map(parse_event, file.read_text().splitlines())) if file.exists() else []
+
+
+def children_usage() -> dict[str, float]:
+    """The CPU time of the processes that the run started, and the most memory that one of them used."""
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    # macOS gives the memory in bytes, and Linux in kilobytes.
+    peak_bytes = usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024)
+    return {"cpu_seconds": round(usage.ru_utime + usage.ru_stime, 1), "peak_memory_mb": agent_log.megabytes(peak_bytes)}
 
 
 def clear_worktree(issue: int, branch: str, folders: Folders) -> str:
@@ -253,7 +413,7 @@ def option(flag: str, value: str | None) -> list[str]:
 
 
 def check_kind(kind: str, tool: str) -> None:
-    if not KIND.fullmatch(kind):
+    if not agent_log.KIND.fullmatch(kind):
         raise Stop(
             f'"{kind}" isn\'t a kind that scripts/take-next-issue prints: research, parent, left behind <pull request> '
             "or other. Give the line that it printed for the issue."
@@ -348,15 +508,28 @@ def newest_linked_branch(issue: int, repository: str, checkout: Path) -> str | N
     return newest[1] if newest else None
 
 
-def brief_for(issue: dict[str, Any], kind: str, tool: str) -> str:
+def write_brief(issue: dict[str, Any], kind: str, run_brief: str, folders: Folders) -> str:
+    """Writes the builder's brief to the run folder, and returns it: the issue, and what the builder must know about
+    its kind of run."""
     issue_text = f"Issue #{issue['number']}: {issue['title']}\n\n{issue['body']}\n\n---\n\n"
-    return issue_text + SHARED_BRIEF.format(kind=kind) + (CLAUDE_BRIEF if tool == "claude" else CODEX_BRIEF)
+    brief = issue_text + SHARED_BRIEF.format(kind=kind) + run_brief
+    (folders.run / "brief.md").write_text(brief)
+    return brief
 
 
-def run_claude(brief: str, account: Account, model_options: list[str], folders: Folders) -> None:
-    """Runs claude until it ends, and writes its result to report.md in the run folder."""
-    # The variable makes claude wait through a usage limit.
-    environment = claude_environment(account) | {"CLAUDE_CODE_RETRY_WATCHDOG": "1"}
+def run_claude(brief: str, account: Account, settings: agent_log.AgentSettings, folders: Folders) -> None:
+    """Runs claude with the type's settings until it ends, and writes its result to report.md in the run folder."""
+    # The first variable makes claude wait through a usage limit. The second keeps the hooks from logging the agents
+    # that the builder starts, because the run's tokens count theirs.
+    environment = claude_environment(account) | {"CLAUDE_CODE_RETRY_WATCHDOG": "1", agent_log.RUN_VARIABLE: "1"}
+    model_options = [
+        *option("--model", settings.model),
+        *option("--effort", settings.effort),
+        *option("--append-system-prompt", settings.instructions),
+        *option("--tools", settings.tools),
+        *option("--disallowedTools", settings.disallowed_tools),
+        *option("--max-turns", settings.max_turns),
+    ]
     result: dict[str, Any] | None = None
     with (
         (folders.run / "events.jsonl").open("w") as events,
@@ -403,7 +576,7 @@ def claude_problem(result: dict[str, Any], exit_code: int) -> str | None:
     return None
 
 
-def run_codex(brief: str, account: Account, model_options: list[str], folders: Folders) -> None:
+def run_codex(brief: str, account: Account, folders: Folders) -> None:
     """Runs codex until it ends. Codex writes its last message to report.md in the run folder."""
     command = [
         "codex",
@@ -415,7 +588,6 @@ def run_codex(brief: str, account: Account, model_options: list[str], folders: F
         "--json",
         "--output-last-message",
         str(folders.run / "report.md"),
-        *model_options,
         brief,
     ]
     with (folders.run / "events.jsonl").open("w") as events, (folders.run / "stderr.log").open("w") as errors:
@@ -428,8 +600,7 @@ def run_codex(brief: str, account: Account, model_options: list[str], folders: F
             stderr=errors,
             check=False,
         )
-    events_text = (folders.run / "events.jsonl").read_text()
-    problem = codex_problem(list(map(parse_event, events_text.splitlines())), done.returncode)
+    problem = codex_problem(read_events(folders.run / "events.jsonl"), done.returncode)
     if problem:
         raise Stop(problem)
 
@@ -470,7 +641,7 @@ def parse_event(line: str) -> dict[str, Any]:
     return event if isinstance(event, dict) else {}
 
 
-def finish_codex(issue: dict[str, Any], branch: str, folders: Folders) -> str:
+def finish_codex(issue: dict[str, Any], branch: str, folders: Folders) -> Outcome:
     """Posts what codex did: the pull request of its changes, or its report as a comment when it changed no file.
     Returns the outcome."""
     report_file = folders.run / "report.md"
@@ -484,10 +655,10 @@ def finish_codex(issue: dict[str, Any], branch: str, folders: Folders) -> str:
     if reason:
         raise Stop(f"the hooks would block codex's report as a comment on the issue: {reason}")
     run_ok(comment, folders.checkout)
-    return "comment"
+    return Outcome("comment")
 
 
-def push_changes(issue: dict[str, Any], branch: str, folders: Folders, report: str) -> str:
+def push_changes(issue: dict[str, Any], branch: str, folders: Folders, report: str) -> Outcome:
     """Commits the changes and checks the commit, pushes it, and opens a pull request if the branch has none. Returns
     the outcome."""
     title = commit_subject(issue)
@@ -504,7 +675,7 @@ def push_changes(issue: dict[str, Any], branch: str, folders: Folders, report: s
         hold_for_review(pull_request, folders.checkout)
     git(["push", "--quiet", "origin", f"{head}:refs/heads/{branch}"], folders.worktree, folders.hooks)
     if pull_request is not None:
-        return pull_request_outcome(str(pull_request["number"]), needs_review or pull_request["isDraft"])
+        return Outcome(pull_request_outcome(str(pull_request["number"]), needs_review or pull_request["isDraft"]))
     return open_pull_request(title, body, branch, head, needs_review, folders.checkout)
 
 
@@ -588,15 +759,16 @@ def hold_for_review(pull_request: dict[str, Any], checkout: Path) -> None:
         run_ok(["gh", "pr", "ready", number, "--undo"], checkout)
 
 
-def open_pull_request(title: str, body: str, branch: str, head: str, is_draft: bool, checkout: Path) -> str:
+def open_pull_request(title: str, body: str, branch: str, head: str, is_draft: bool, checkout: Path) -> Outcome:
     """Opens the pull request, as a draft or with auto-merge, and returns the outcome."""
     command = ["gh", "pr", "create", "--title", title, "--body", body, "--head", branch, "--base", "main"]
     created = run_ok([*command, "--draft"] if is_draft else command, checkout)
     # gh prints the new pull request's URL, which ends in its number.
     number = created.strip().rsplit("/", 1)[-1]
     if is_draft:
-        return pull_request_outcome(number, True)
-    return f"{pull_request_outcome(number, False)}{turn_on_auto_merge(number, head, checkout)}"
+        return Outcome(pull_request_outcome(number, True), pull_request=int(number))
+    text = f"{pull_request_outcome(number, False)}{turn_on_auto_merge(number, head, checkout)}"
+    return Outcome(text, pull_request=int(number))
 
 
 def pull_request_outcome(number: str, is_draft: bool) -> str:

@@ -9,16 +9,30 @@ The lines are:
                             to its end.
   CI jobs                   Each job's median time in those runs, leaving out the runs that skipped it. The jobs that
                             run the tests give the tests' time.
-  Builders                  How many agents of the types builder-small, builder and builder-deep ran, and the median
-                            of their minutes and of their tool calls. An agent's minutes run from each prompt or
-                            message that it received to its last call before the next one.
-  Orchestrator's share      The share of the tokens that the sessions in the main checkout used themselves, out of all
-                            that they and their agents used. Cached tokens count too.
+  Type                      A line for each type of the agents that started, from .loop/agents.jsonl, which
+                            scripts/loop/agent_log.py describes: how many started and how many ended, the median of
+                            their minutes and of their tool calls, and their share of the input tokens that all those
+                            agents used. Then their output tokens: those of the runs of scripts/loop/run-builder, and
+                            apart from them, those of the agents of a session, which leave out most. Then how many
+                            pull requests they opened, and how many of those needed a fix after review, failed a
+                            check, left the merge queue unmerged, or got a second builder. The test builds of a
+                            retrospective don't count.
+  Orchestrator's share      The share of the input tokens that the sessions in the main checkout used themselves, out
+                            of all that they and their agents used.
   Hook blocks               How many actions the before-tool hook blocked, from .loop/blocks.log, and how many each
                             rule blocked.
 
-The report counts the CI runs and the calls that started after the moment. It reads the transcripts that Claude Code
-keeps for the main checkout, and prints none of their text.
+With --issues, the report also gives a line for each agent that built an issue, of the kinds other and left behind,
+with its numbers and those of its pull request.
+
+The input tokens count the cached tokens too.
+
+An agent starts on the issue or pull request whose number starts its prompt, as docs/loop.md asks. A pull request
+needed a fix after review when it got a commit after an agent of the type reviewer started on it. It got a second
+builder when an agent of another type started on it or on its issue after the agent that opened it.
+
+The report counts the CI runs, the agents and the calls that started after the moment. It reads the transcripts that
+Claude Code keeps for the main checkout, and prints none of their text.
 """
 
 import argparse
@@ -32,14 +46,17 @@ from typing import Any, NamedTuple
 
 import paths
 from github import GitHubError, gh_api
+from transcripts import Call, read_transcript
 
 CI_WORKFLOW = "ci.yml"
-# The agent types in .claude/agents that build an issue
-BUILDER_TYPES = ("builder-small", "builder", "builder-deep")
 ORCHESTRATOR = "orchestrator"
-BUILDER = "builder"
-OTHER_AGENT = "other agent"
-USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+AGENT = "agent"
+REVIEWER = "reviewer"
+# The starts of the kinds of the issues that a builder builds, as scripts/take-next-issue prints them
+BUILD_KINDS = ("other", "left behind")
+# The conclusions of a check suite that count as a failed check. A cancelled one doesn't, because CI cancels the run
+# of a pull request's commit when a newer commit comes.
+FAILED_CONCLUSIONS = ("FAILURE", "TIMED_OUT", "STARTUP_FAILURE")
 # One query asks for the jobs of 100 runs, the most that GitHub takes, because a query for each run took 0.7 seconds,
 # as pull request #20 measured, so a week of 200 runs would take more than 2 minutes.
 RUNS_PER_QUERY = 100
@@ -51,6 +68,24 @@ query($ids: [ID!]!) {
     }
   }
 }"""
+# A query asks for 25 pull requests, because GitHub stops a query after 10 seconds, as scripts/open-pull-requests
+# found for a page of 100 pull requests.
+PULL_REQUESTS_PER_QUERY = 25
+PULL_REQUEST_QUERY = """
+query($owner: String!, $repo: String!) {
+  repository(owner: $owner, name: $repo) { %s }
+}
+fragment facts on PullRequest {
+  commits(first: 100) { nodes { commit { committedDate checkSuites(first: 20) { nodes { conclusion } } } } }
+  timelineItems(itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT], first: 100) {
+    nodes { ... on RemovedFromMergeQueueEvent { reason } }
+  }
+}"""
+# GitHub records a removal from the merge queue with this reason each time the queue merges a pull request.
+MERGED_REASON = "merged"
+# What each field of PullRequestResult says about a pull request, in the fields' order
+RESULT_WORDS = ("needed a fix after review", "failed a check", "left the merge queue unmerged", "got a second builder")
+NOTHING_HAPPENED = "no fix after review, failed check, unmerged exit from the merge queue or second builder"
 
 
 class CiRun(NamedTuple):
@@ -59,26 +94,35 @@ class CiRun(NamedTuple):
     job_minutes: dict[str, float]
 
 
-class Call(NamedTuple):
-    id: str
-    start: dt.datetime
-    end: dt.datetime
-    tokens: int
-    tool_calls: int
-
-
 class Transcript(NamedTuple):
     role: str
     modified: float
     calls: list[Call]
-    # The times of the prompts and messages that the session or agent received
-    prompts: list[dt.datetime]
 
 
 class Agent(NamedTuple):
     role: str
     calls: list[Call]
-    prompts: list[dt.datetime]
+
+
+class AgentRun(NamedTuple):
+    """An agent in .loop/agents.jsonl: its start line, and its last end line, or None if it has none."""
+
+    start: dict[str, Any]
+    end: dict[str, Any] | None
+
+
+class PullRequest(NamedTuple):
+    commit_times: list[dt.datetime]
+    has_failed_check: bool
+    has_left_merge_queue: bool
+
+
+class PullRequestResult(NamedTuple):
+    needed_fix_after_review: bool
+    failed_check: bool
+    left_merge_queue: bool
+    got_second_builder: bool
 
 
 class ReportError(Exception):
@@ -92,26 +136,42 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--since", required=True, type=moment, help="an ISO time with its zone, such as 2026-10-11T14:00:00Z"
     )
-    since: dt.datetime = parser.parse_args(argv).since
+    parser.add_argument("--issues", action="store_true", help="also give a line for each agent that built an issue")
+    options = parser.parse_args(argv)
+    since: dt.datetime = options.since
     checkout = paths.main_checkout()
+    runs = [run for run in read_agent_runs(read_log("agents.jsonl")) if not run.start["test"]]
+    recent = [run for run in runs if started(run) >= since]
     try:
         ci_runs = read_ci_runs(since, checkout)
+        pull_requests = read_pull_requests(sorted({number for run in recent if (number := opened(run))}), checkout)
         transcripts = read_transcripts(paths.claude_project_folder(checkout), checkout, since)
     except (GitHubError, ReportError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
+    results = {
+        run.start["id"]: pull_request_result(run, pull_requests[number], runs)
+        for run in recent
+        if (number := opened(run))
+    }
     agents = count_once(transcripts, since)
-    block_log = paths.loop_dir() / "blocks.log"
-    blocks = count_blocks(block_log.read_text() if block_log.exists() else "", since)
     lines = [
         f"Since {since.isoformat()}",
         *ci_lines(ci_runs),
-        builder_line(agents),
+        *type_lines(recent, results),
         orchestrator_line(agents),
-        block_line(blocks),
+        block_line(count_blocks(read_log("blocks.log"), since)),
     ]
+    if options.issues:
+        lines += issue_lines(recent, results)
     print("\n".join(lines))
     return 0
+
+
+def read_log(name: str) -> str:
+    """The text of a log in the loop folder, which is empty until something writes it."""
+    log = paths.loop_dir() / name
+    return log.read_text() if log.exists() else ""
 
 
 def moment(text: str) -> dt.datetime:
@@ -180,78 +240,13 @@ def read_transcripts(project_folder: Path, checkout: Path, since: dt.datetime) -
     found: list[tuple[Path, str]] = []
     for session in project_folder.glob("*.jsonl"):
         found.append((session, ORCHESTRATOR))
-        for agent in (project_folder / session.stem / "subagents").glob("*.jsonl"):
-            found.append((agent, agent_role(agent.with_suffix(".meta.json"))))
+        found += [(agent, AGENT) for agent in (project_folder / session.stem / "subagents").glob("*.jsonl")]
     transcripts = []
     for file, role in found:
         modified = file.stat().st_mtime
         if modified >= since.timestamp():
-            transcripts.append(Transcript(role, modified, *read_transcript(file)))
+            transcripts.append(Transcript(role, modified, read_transcript(file)[0]))
     return transcripts
-
-
-def agent_role(meta_file: Path) -> str:
-    if not meta_file.exists():
-        return OTHER_AGENT
-    agent_type = json.loads(meta_file.read_text()).get("agentType")
-    return BUILDER if agent_type in BUILDER_TYPES else OTHER_AGENT
-
-
-def read_transcript(file: Path) -> tuple[list[Call], list[dt.datetime]]:
-    """The calls in a transcript, and the times of the prompts and messages in it. A response that spans several lines
-    repeats its message's id and usage on each line, so its tokens count once. Each line holds other blocks of the
-    response, so its tool calls add up."""
-    times: dict[str, list[dt.datetime]] = {}
-    usage: dict[str, dict[str, int]] = {}
-    tool_calls: Counter[str] = Counter()
-    prompts = []
-    with file.open(errors="replace") as handle:
-        for line in handle:
-            entry = transcript_entry(line)
-            if entry is None:
-                continue
-            if is_prompt(entry):
-                prompts.append(dt.datetime.fromisoformat(entry["timestamp"]))
-            if not is_call(entry):
-                continue
-            message = entry["message"]
-            call = message["id"]
-            times.setdefault(call, []).append(dt.datetime.fromisoformat(entry["timestamp"]))
-            most = usage.setdefault(call, dict.fromkeys(USAGE_KEYS, 0))
-            for key in USAGE_KEYS:
-                most[key] = max(most[key], message.get("usage", {}).get(key) or 0)
-            content = message.get("content")
-            if isinstance(content, list):
-                tool_calls[call] += sum(1 for block in content if block.get("type") == "tool_use")
-    calls = [
-        Call(call, min(moments), max(moments), sum(usage[call].values()), tool_calls[call])
-        for call, moments in times.items()
-    ]
-    return calls, prompts
-
-
-def transcript_entry(line: str) -> dict[str, Any] | None:
-    """The entry on a transcript's line if it holds a message and its time, or None."""
-    try:
-        entry = json.loads(line)
-    except ValueError:
-        # Claude Code may be writing the last line of a running session's transcript.
-        return None
-    if not isinstance(entry.get("message"), dict) or not entry.get("timestamp"):
-        return None
-    return dict(entry)
-
-
-def is_call(entry: dict[str, Any]) -> bool:
-    return entry.get("type") == "assistant" and bool(entry["message"].get("id"))
-
-
-def is_prompt(entry: dict[str, Any]) -> bool:
-    """Whether the entry is a prompt or a message that the session or agent received, rather than a tool's result."""
-    if entry.get("type") != "user":
-        return False
-    content = entry["message"].get("content")
-    return not isinstance(content, list) or any(block.get("type") != "tool_result" for block in content)
 
 
 def count_once(transcripts: list[Transcript], since: dt.datetime) -> list[Agent]:
@@ -264,8 +259,65 @@ def count_once(transcripts: list[Transcript], since: dt.datetime) -> list[Agent]
         calls = [call for call in transcript.calls if call.id not in seen and call.start >= since]
         seen.update(call.id for call in transcript.calls)
         if calls:
-            agents.append(Agent(transcript.role, calls, transcript.prompts))
+            agents.append(Agent(transcript.role, calls))
     return agents
+
+
+def read_agent_runs(log: str) -> list[AgentRun]:
+    """The agents in the lines of agents.jsonl, in the order they started. An agent ends again each time that it gets a
+    message after it ended, so its last end line counts."""
+    starts: dict[str, dict[str, Any]] = {}
+    ends: dict[str, dict[str, Any]] = {}
+    for line in log.splitlines():
+        entry: dict[str, Any] = json.loads(line)
+        (starts if entry["event"] == "start" else ends)[entry["id"]] = entry
+    return [AgentRun(start, ends.get(agent_id)) for agent_id, start in starts.items()]
+
+
+def started(run: AgentRun) -> dt.datetime:
+    return dt.datetime.fromisoformat(run.start["at"])
+
+
+def opened(run: AgentRun) -> int | None:
+    """The pull request that the agent opened, or None."""
+    return run.end["pull_request"] if run.end else None
+
+
+def read_pull_requests(numbers: list[int], checkout: Path) -> dict[int, PullRequest]:
+    pull_requests = {}
+    for start in range(0, len(numbers), PULL_REQUESTS_PER_QUERY):
+        batch = numbers[start : start + PULL_REQUESTS_PER_QUERY]
+        fields = " ".join(f"pr{number}: pullRequest(number: {number}) {{ ...facts }}" for number in batch)
+        options = ["-F", "owner={owner}", "-F", "repo={repo}", "-f", f"query={PULL_REQUEST_QUERY % fields}"]
+        repository = json.loads(gh_api("graphql", options, checkout))["data"]["repository"]
+        for number in batch:
+            pull_requests[number] = pull_request_facts(repository[f"pr{number}"])
+    return pull_requests
+
+
+def pull_request_facts(node: dict[str, Any]) -> PullRequest:
+    commits = [entry["commit"] for entry in node["commits"]["nodes"]]
+    return PullRequest(
+        commit_times=[dt.datetime.fromisoformat(commit["committedDate"]) for commit in commits],
+        has_failed_check=any(
+            suite["conclusion"] in FAILED_CONCLUSIONS for commit in commits for suite in commit["checkSuites"]["nodes"]
+        ),
+        has_left_merge_queue=any(removal["reason"] != MERGED_REASON for removal in node["timelineItems"]["nodes"]),
+    )
+
+
+def pull_request_result(opener: AgentRun, pull_request: PullRequest, runs: list[AgentRun]) -> PullRequestResult:
+    """What happened to the pull request that an agent opened, from its facts and the agents that started later."""
+    number = opened(opener)
+    later = [run for run in runs if started(run) > started(opener)]
+    reviews = [started(run) for run in later if run.start["type"] == REVIEWER and run.start["issue"] == number]
+    subjects = {number, opener.start["issue"]} - {None}
+    return PullRequestResult(
+        needed_fix_after_review=bool(reviews) and any(time > min(reviews) for time in pull_request.commit_times),
+        failed_check=pull_request.has_failed_check,
+        left_merge_queue=pull_request.has_left_merge_queue,
+        got_second_builder=any(run.start["type"] != REVIEWER and run.start["issue"] in subjects for run in later),
+    )
 
 
 def count_blocks(log: str, since: dt.datetime) -> Counter[str]:
@@ -293,32 +345,76 @@ def ci_lines(runs: list[CiRun]) -> list[str]:
     ]
 
 
-def builder_line(agents: list[Agent]) -> str:
-    builders = [agent for agent in agents if agent.role == BUILDER]
-    if not builders:
-        return "Builders: 0"
-    minutes = statistics.median(working_minutes(builder) for builder in builders)
-    tool_calls = statistics.median(sum(call.tool_calls for call in builder.calls) for builder in builders)
-    return f"Builders: {len(builders)}, median {minutes:.1f} min and {tool_calls:g} tool calls"
+def type_lines(runs: list[AgentRun], results: dict[str, PullRequestResult]) -> list[str]:
+    if not runs:
+        return ["Types: no agent started"]
+    all_input = sum(run.end["input_tokens"] for run in runs if run.end)
+    types = sorted({run.start["type"] for run in runs})
+    return [type_line(name, [run for run in runs if run.start["type"] == name], all_input, results) for name in types]
 
 
-def working_minutes(agent: Agent) -> float:
-    """The minutes from each prompt or message that the agent received to its last call before the next one. A
-    builder that gets a message after it finished adds to the same transcript, so the time it waited doesn't count."""
-    first_start = min(call.start for call in agent.calls)
-    ends: dict[dt.datetime, dt.datetime] = {}
-    for call in agent.calls:
-        start = max((prompt for prompt in agent.prompts if prompt <= call.start), default=first_start)
-        ends[start] = max(ends.get(start, call.end), call.end)
-    return sum((end - start).total_seconds() for start, end in ends.items()) / 60
+def type_line(name: str, runs: list[AgentRun], all_input: int, results: dict[str, PullRequestResult]) -> str:
+    """The type's line. Its share is of the input tokens, which are right for every agent, unlike the output tokens."""
+    ends = [run.end for run in runs if run.end]
+    line = f"Type {name}: {len(runs)} started, {len(ends)} ended"
+    if ends:
+        minutes = statistics.median(end["minutes"] for end in ends)
+        tool_calls = statistics.median(end["tool_calls"] for end in ends)
+        share = sum(end["input_tokens"] for end in ends) / all_input if all_input else 0
+        line += f", median {minutes:.1f} min and {tool_calls:g} tool calls, {share:.0%} of the agents' input tokens"
+        line += f" | {output_tokens_part(ends)}"
+    own = [results[run.start["id"]] for run in runs if run.start["id"] in results]
+    if not own:
+        return f"{line} | pull requests: 0"
+    counts = [f"{sum(result[field] for result in own)} {words}" for field, words in enumerate(RESULT_WORDS)]
+    return f"{line} | pull requests: {len(own)}, {', '.join(counts)}"
+
+
+def output_tokens_part(ends: list[dict[str, Any]]) -> str:
+    """The output tokens of the agents that ended, those of the runs apart from those of the agents of a session."""
+    runs = [end["output_tokens"] for end in ends if end["output_tokens_exact"]]
+    session_agents = [end["output_tokens"] for end in ends if not end["output_tokens_exact"]]
+    parts = []
+    if runs:
+        parts.append(f"{sum(runs)} in runs of run-builder")
+    if session_agents:
+        parts.append(f"at least {sum(session_agents)} in agents of a session, whose transcripts leave out most")
+    return f"output tokens: {', '.join(parts)}"
+
+
+def issue_lines(runs: list[AgentRun], results: dict[str, PullRequestResult]) -> list[str]:
+    """A line for each agent that built an issue, with its numbers and what happened to its pull request."""
+    lines = []
+    for run in runs:
+        kind = run.start["kind"]
+        if not kind or not kind.startswith(BUILD_KINDS):
+            continue
+        line = f"Issue #{run.start['issue']} {run.start['label']} {kind}: {run.start['type']}"
+        if not run.end:
+            lines.append(f"{line}, not ended")
+            continue
+        end = run.end
+        line += f", {end['minutes']:.1f} min, {end['tool_calls']} tool calls, {end['input_tokens']} input tokens, "
+        if end["output_tokens_exact"]:
+            line += f"{end['output_tokens']} output tokens"
+        else:
+            line += f"at least {end['output_tokens']} output tokens, because its transcript leaves out most"
+        result = results.get(run.start["id"])
+        if result is None:
+            lines.append(f"{line} | no pull request")
+            continue
+        happened = [words for has_happened, words in zip(result, RESULT_WORDS, strict=True) if has_happened]
+        lines.append(f"{line} | pull request #{opened(run)}: {', '.join(happened) or NOTHING_HAPPENED}")
+    return lines
 
 
 def orchestrator_line(agents: list[Agent]) -> str:
-    total = sum(call.tokens for agent in agents for call in agent.calls)
+    """The orchestrator's share of the input tokens, which the transcripts give right, unlike the output tokens."""
+    total = sum(call.input_tokens for agent in agents for call in agent.calls)
     if total == 0:
-        return "Orchestrator's share of the tokens: none used"
-    own = sum(call.tokens for agent in agents if agent.role == ORCHESTRATOR for call in agent.calls)
-    return f"Orchestrator's share of the tokens: {own / total:.0%}"
+        return "Orchestrator's share of the input tokens: none used"
+    own = sum(call.input_tokens for agent in agents if agent.role == ORCHESTRATOR for call in agent.calls)
+    return f"Orchestrator's share of the input tokens: {own / total:.0%}"
 
 
 def block_line(blocks: Counter[str]) -> str:

@@ -3,6 +3,7 @@
 # It reads the fields of the tool's input that the checks use, and runs each check in this folder, the files that end
 # in .check. A check blocks the action with exit code 2 and the reason on stderr, and this script passes both on.
 # The check also adds a line to .loop/blocks.log in the main checkout, as log_block in helpers.bash describes.
+# Before an Agent call, the hook adds a line to .loop/agents.jsonl there instead, and checks nothing.
 # To add a check, add its .check file and its .test file. A check for a tool that isn't in the list below also adds
 # the tool there. Neither hook file needs a change. A check must allow the command true, because the hook files run
 # this hook on it to tell whether the hook can run.
@@ -35,9 +36,15 @@ eval "$fields"
 export HOOK_TOOL_NAME HOOK_COMMAND HOOK_FILE_PATH HOOK_CWD
 
 # The checks act only on these tools, so every other tool's action goes ahead at once. Cursor calls Bash Shell, and
-# Codex edits files with apply_patch.
+# Codex edits files with apply_patch. Claude Code's Agent call starts an agent, which scripts/loop/agent-log records.
+# The log's errors go to /dev/null, as log_block's do in helpers.bash, because an agent must start even when the log
+# can't be written.
 case $HOOK_TOOL_NAME in
   Bash | Shell | Read | Write | Edit | apply_patch) ;;
+  Agent)
+    "${BASH_SOURCE[0]%/*}/../loop/agent-log" start <<<"$input" >/dev/null 2>&1 || true
+    exit 0
+    ;;
   *) exit 0 ;;
 esac
 

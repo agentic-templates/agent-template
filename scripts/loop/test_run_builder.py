@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import agent_log
 from test_paths import GIT_ENVIRONMENT
 
 RUN_BUILDER = Path(__file__).with_name("run-builder")
@@ -81,6 +82,7 @@ GIT_HOOKS = ("post-checkout", "pre-commit", "pre-push")
 SAVE_SUBJECT = "chore: save the unfinished work of a stopped session"
 # A pull request that the branch has already, as gh pr list gives it.
 OWN_PULL_REQUEST = {"number": 6, "isCrossRepository": False, "isDraft": False, "autoMergeRequest": None}
+BUILDER_FILE = "---\nname: builder\ndescription: Builds one issue.\nmodel: opus\neffort: high\n---\n\nBuild it.\n"
 
 
 def lines(*events: object) -> str:
@@ -167,6 +169,12 @@ class RunBuilderTest(unittest.TestCase):
         os.chdir(self.repo)
         self.worktree = self.repo / ".claude" / "worktrees" / "run-12"
         (self.loop / "accounts.json").write_text(json.dumps({"accounts": ACCOUNTS}))
+        self.agents = self.root / "agents"
+        self.agents.mkdir()
+        (self.agents / "builder.md").write_text(BUILDER_FILE)
+        agents_folder = mock.patch.object(agent_log, "AGENTS_FOLDER", self.agents)
+        agents_folder.start()
+        self.addCleanup(agents_folder.stop)
         self.answers: dict[str, dict[str, list[dict[str, Any]]]] = {
             "gh": {
                 "repo view": [{"stdout": "owner/repo\n"}],
@@ -199,12 +207,20 @@ class RunBuilderTest(unittest.TestCase):
     def answer(self, tool: str, start: str, *answers: dict[str, Any]) -> None:
         self.answers[tool][start] = list(answers)
 
-    def run_builder(self, *arguments: str, kind: str = "other") -> tuple[int, str, str]:
+    def run_builder(
+        self, *arguments: str, kind: str = "other", agent_type: str | None = "builder"
+    ) -> tuple[int, str, str]:
+        """Runs the script for issue 12, with --type for a Claude builder."""
+        if "claude" in arguments and agent_type:
+            arguments = (*arguments, "--type", agent_type)
         (self.standins / "answers.json").write_text(json.dumps(self.answers))
         printed, errors = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(errors):
             status = run_builder.main(["12", *kind.split(), *arguments])
         return status, printed.getvalue(), errors.getvalue()
+
+    def agent_lines(self) -> list[dict[str, Any]]:
+        return [json.loads(line) for line in (self.loop / "agents.jsonl").read_text().splitlines()]
 
     def calls(self, tool: str, start: str | None = None) -> list[dict[str, Any]]:
         log = self.standins / "calls.jsonl"
@@ -362,14 +378,15 @@ class ClaudeTest(RunBuilderTest):
             "CLAUDE_CONFIG_DIR": "/c",
         }
         with mock.patch.dict(os.environ, caller):
-            status, printed, errors = self.run_builder("--tool", "claude", "--model", "opus", "--effort", "high")
+            status, printed, errors = self.run_builder("--tool", "claude")
         self.assertEqual((status, errors), (0, ""))
         report = self.run_folder() / "report.md"
         self.assertRegex(printed, rf"^issue 12 \| claude main \| finished \| [0-9.]+ min \| report {report}\n$")
         self.assertEqual(report.read_text(), "Opened pull request #5.")
         [call] = self.calls("claude")
         brief = (self.run_folder() / "brief.md").read_text()
-        self.assertEqual(call["args"], [*run_builder.CLAUDE_COMMAND[1:], "--model", "opus", "--effort", "high", brief])
+        settings = ["--model", "opus", "--effort", "high", "--append-system-prompt", "Build it."]
+        self.assertEqual(call["args"], [*run_builder.CLAUDE_COMMAND[1:], *settings, brief])
         self.assertTrue(brief.startswith("Issue #12: Fix the importer\n\nIt drops rows.\n"))
         self.assertIn(
             'of the kind `other`, for the orchestrator of this repository\'s loop. Read only\n"Build one issue"', brief
@@ -378,6 +395,7 @@ class ClaudeTest(RunBuilderTest):
         environment = call["env"]
         self.assertEqual(environment["CLAUDE_CONFIG_DIR"], "/claude-main")
         self.assertEqual(environment["CLAUDE_CODE_RETRY_WATCHDOG"], "1")
+        self.assertEqual(environment["LOOP_RUN"], "1")
         self.assertEqual(environment["GH_REPO"], "owner/repo")
         self.assertEqual([name for name in caller if name in environment], ["CLAUDE_CONFIG_DIR"])
         self.assertEqual(
@@ -529,15 +547,15 @@ class CodexTest(RunBuilderTest):
         self.answer("codex", "", self.codex_answer({"built.txt": "built\n", "git-hooks/pre-push": changed_hook}))
         caller = {"GH_TOKEN": "a", "OPENAI_API_KEY": "b", "SSH_AUTH_SOCK": "c", "MY_PASSWORD": "d", "CODEX_HOME": "/c"}
         with mock.patch.dict(os.environ, caller):
-            status, printed, errors = self.run_builder("--tool", "codex", "--model", "gpt-6", "--effort", "high")
+            status, printed, errors = self.run_builder("--tool", "codex")
         self.assertEqual((status, errors), (0, ""))
         report = self.run_folder() / "report.md"
         self.assertRegex(printed, rf"^issue 12 \| codex work \| pull request #7 \| [0-9.]+ min \| report {report}\n$")
         [call] = self.calls("codex")
         brief = (self.run_folder() / "brief.md").read_text()
         command = ["exec", "--sandbox", "workspace-write", "--cd", str(self.worktree), "--json"]
-        command += ["--output-last-message", str(report), "--model", "gpt-6"]
-        self.assertEqual(call["args"], [*command, "--config", 'model_reasoning_effort="high"', brief])
+        command += ["--output-last-message", str(report)]
+        self.assertEqual(call["args"], [*command, brief])
         self.assertIn("so don't run git or gh.", brief)
         self.assertEqual([name for name in caller if call["env"].get(name, "/codex-work") != "/codex-work"], [])
         self.assertEqual(self.origin_git("log", "-1", "--format=%s", BRANCH), "fix: Fix the importer")
@@ -739,7 +757,18 @@ class CommitSubjectTest(unittest.TestCase):
 class ScriptTest(RunBuilderTest):
     def test_runs_as_a_script(self) -> None:
         done = subprocess.run(
-            [sys.executable, str(RUN_BUILDER), "12", "other", "--tool", "claude", "--account", "nobody"],
+            [
+                sys.executable,
+                str(RUN_BUILDER),
+                "12",
+                "other",
+                "--tool",
+                "claude",
+                "--type",
+                "builder",
+                "--account",
+                "nobody",
+            ],
             capture_output=True,
             text=True,
             check=False,
