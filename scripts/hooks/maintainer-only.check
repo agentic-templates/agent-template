@@ -670,7 +670,8 @@ check_simple_command() {
     block_if_settings_file "$file" "$command_folder"
   done
   if prints_environment "${@:1:prefix_count}"; then
-    block "Blocked: this command prints the whole environment, which holds tokens. Print only the variables you need, by name, as in printenv PATH."
+    # bash -c, because zsh has no compgen.
+    block "Blocked: this command prints the whole environment, which holds tokens. Print only the variables you need, by name, as in printenv PATH. To list the variables' names without their values, run bash -c 'compgen -e'."
   fi
   if ((${#command_words[@]} == 0)); then
     return 0

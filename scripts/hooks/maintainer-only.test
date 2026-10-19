@@ -60,7 +60,8 @@ public() {
 other_repository() {
   echo "Blocked: this posts to $1, which isn't this repository, and only the maintainer may post to another repository. $test_repositories"
 }
-environment="Blocked: this command prints the whole environment, which holds tokens. Print only the variables you need, by name, as in printenv PATH."
+list_names="bash -c 'compgen -e'"
+environment="Blocked: this command prints the whole environment, which holds tokens. Print only the variables you need, by name, as in printenv PATH. To list the variables' names without their values, run $list_names."
 no_verify="Blocked: --no-verify skips the pre-push hook, which scans the push for leaks. Push without it. If the scan finds a leak, take it out of the commits."
 push_to_url="Blocked: this pushes to a URL instead of a remote, and only the maintainer may do that. Push to a remote that git remote -v lists, such as origin, or ask the maintainer."
 admin_merge="Blocked: --admin merges the pull request without the checks that main requires, and only the maintainer may skip them. Merge without --admin, so that the merge waits for the checks."
@@ -208,7 +209,10 @@ expect_block Bash 'env | grep TOKEN' "$environment"
 expect_block Bash 'FOO=1 env -0' "$environment"
 expect_block Bash '/usr/bin/env' "$environment"
 expect_block Bash 'printenv' "$environment"
+# cut prints the later lines of a value that spans several lines.
+expect_block Bash 'env | cut -d= -f1' "$environment"
 expect_allow Bash 'printenv HOME'
+expect_allow Bash "$list_names"
 expect_allow Bash 'env FOO=1 make test'
 expect_allow Bash 'env -u GH_TOKEN make test'
 # shellcheck disable=SC2016 # The command is the text that the agent sends, so $PATH stays as written.
