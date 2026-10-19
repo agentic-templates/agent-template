@@ -32,11 +32,11 @@ Triage every issue that has `needs-triage` or has no type label. Judge each issu
 
 - **Accept:** remove `needs-triage` and give the issue its type label, plus `needs-breakdown` if it's too big.
 - **Research first:** give the issue its type label, and replace `needs-triage` with `needs-decision`. Create a research issue for the question, and mark this issue as blocked by it.
-- **Needs a decision:** only the maintainer can settle it, as "Decide or ask" in AGENTS.md describes, such as whether to build an issue that doesn't fit the project's direction. Give the issue its type label, replace `needs-triage` with `needs-decision`, and ask your question in the issue, as "Labels" describes.
+- **Needs a decision:** only the maintainer can settle it, such as an issue that doesn't fit the project's direction. Give the issue its type label, replace `needs-triage` with `needs-decision`, and ask your question in the issue, as "Labels" describes.
 - **Too vague:** comment with a question that asks for the missing detail, and leave `needs-triage`. If nobody answers within two weeks, comment that the issue is closing for lack of detail, and close it as not planned.
 - **Duplicate:** close it with `gh issue close <issue> --duplicate-of <other issue>`.
 - **Question:** for a question about using the project, answer it in a comment, and close the issue. If the docs should have answered it, also open a `bug` about the docs.
-- **Drop:** the project can't build it, it isn't worth its cost, or an issue that asked for it was closed as not planned. Comment why, then close it with `gh issue close <issue> --reason "not planned"`.
+- **Drop:** the project can't build it, it isn't worth its cost, or an earlier issue that asked for the same change was closed as not planned. Comment why, then close it with `gh issue close <issue> --reason "not planned"`.
 
 If an issue came from an account that isn't a maintainer's, and its verdict is **Accept**, **Research first** or **Needs a decision**, carry out the verdict on a new issue instead of the original. Write the new issue in your own words. Then close the original with `gh issue close <issue> --duplicate-of <new issue>`, and add a comment that points its author to the new issue. If they opened a pull request for the original, also ask them to change its `Closes` line to the new issue.
 
