@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Claude Code runs this hook after each Edit, Write and CronCreate, because .claude/settings.json lists it. It writes
+# the clock's time into the orchestrator's state file, .loop/state.md in the main checkout, because the orchestrator
+# has no clock, so a time that it writes itself is a guess:
+# - on the updated: line, after each Edit or Write of the file
+# - in place of the now on a "taken in: now" line, after each Edit or Write of the file. The orchestrator writes that
+#   line before it reads the maintainer's comments on GitHub, so that its next pass reads from that time.
+# - on the heartbeat: line, after CronCreate schedules the heartbeat that docs/loop.md gives. Claude Code ends a
+#   recurring prompt 7 days after it's scheduled, and CronList doesn't say when that was.
+# It replaces the first updated: or heartbeat: line, or adds the line at the end. It prints nothing, and does nothing
+# when it can't tell what to do, such as when the state file doesn't exist.
+
+# shellcheck source=scripts/loop-folder
+source "${BASH_SOURCE[0]%/*}/../loop-folder" || exit 0
+
+fields=$(jq -r '.tool_name // "", .tool_input.file_path // "", .cwd // "",
+  (.tool_input.prompt // "" | startswith("Loop heartbeat:"))' 2>/dev/null) || exit 0
+{
+  IFS= read -r tool
+  IFS= read -r path
+  IFS= read -r cwd
+  IFS= read -r is_heartbeat
+} <<<"$fields"
+# Every agent's edits run this hook, so it leaves the other files before it asks git anything.
+case $tool in
+  Edit | Write)
+    if [[ ${path##*/} != state.md ]]; then
+      exit 0
+    fi
+    name=updated
+    ;;
+  CronCreate)
+    if [[ $is_heartbeat != true ]]; then
+      exit 0
+    fi
+    name=heartbeat
+    ;;
+  *) exit 0 ;;
+esac
+
+git_folders=$(git -C "${BASH_SOURCE[0]%/*}" rev-parse --path-format=absolute --git-common-dir --show-toplevel 2>/dev/null) ||
+  exit 0
+state_file=$(loop_folder "${git_folders%%$'\n'*}" "${git_folders#*$'\n'}")/state.md
+if [[ ! -f $state_file ]]; then
+  exit 0
+fi
+if [[ $name == updated ]]; then
+  if [[ $path != /* ]]; then
+    path=$cwd/$path
+  fi
+  if [[ ! $path -ef $state_file ]]; then
+    exit 0
+  fi
+fi
+
+content=$(awk -v name="$name:" -v time="$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+  index($0, name) == 1 && !replaced { print name " " time; replaced = 1; next }
+  $0 == "taken in: now" { print "taken in: " time; next }
+  { print }
+  END { if (!replaced) print name " " time }' "$state_file") || exit 0
+printf '%s\n' "$content" >"$state_file"
+exit 0

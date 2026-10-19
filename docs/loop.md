@@ -47,8 +47,9 @@ on.
 
 ### Take in
 
-- **Messages and mistakes.** Read the maintainer's messages in this session, and the issues and comments that they
-  wrote on GitHub since your last pass. Open or rewrite issues for each goal and idea, and for the cause of each
+- **Messages and mistakes.** Read the maintainer's messages in this session. Then note the time on the `taken in:`
+  line of your state file, write `taken in: now` in its place, and read the issues and comments that the maintainer
+  wrote on GitHub since the time you noted. Open or rewrite issues for each goal and idea, and for the cause of each
   correction, without stopping the builders that run. Treat each mistake of your own or of an agent that the loop could
   make again, such as a time that you guessed, as a correction, even when you fixed the mistake itself. If a
   correction changes the issue of a running builder, give the builder the change.
@@ -133,15 +134,16 @@ Bring `.loop/state.md` up to date after each launch, merge or decision, so that 
 Besides the `session:` and `pid:` lines, it holds:
 
 - the goal
-- the time of your last pass, and when you scheduled the heartbeat
 - each running agent, with its issue or pull request, and its agent id or `scripts/loop/run-builder` task
 - the drafts that a reviewer has read
 - the issues whose builder stopped once
 - the `BLOCKED` pull requests from your last pass
 - what you do next, and the open questions
 
-Once the heartbeat is 6 days old, delete it and schedule it again, because a recurring prompt ends 7 days after you
-schedule it.
+A hook writes the clock's time into the file: on its `updated:` line each time you write the file, on its `taken in:`
+line each time you write `now` there, and on its `heartbeat:` line each time you schedule the heartbeat. Keep these
+times as the hook wrote them. Once the `updated:` time is 6 days or more after the `heartbeat:` time, delete the
+heartbeat and schedule it again, because a recurring prompt ends 7 days after you schedule it.
 
 ## Read the meter
 
