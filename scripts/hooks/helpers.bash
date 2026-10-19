@@ -457,7 +457,8 @@ opens_pull_request() {
 # doesn't give the flag, and pr_has_title to yes when it gives --title, whose value can be empty. It sets pr_is_draft
 # to yes when the command opens a draft. It also records expansion syntax in the title and body, and sets the body
 # source for read_body.
-# The word after a flag that takes a value is that value, even if it starts with a dash.
+# The word after a flag that takes a value is that value, even if it starts with a dash. A short flag that takes a
+# value can also have it in the same word, as in -tTitle or -t=Title, which gh reads as the title Title.
 read_pull_request_flags() {
   local flags_with_value=$1 i word flag value
   pr_base="" pr_head="" pr_title="" pr_has_title="" pr_title_may_expand="" pr_is_draft=""
@@ -476,6 +477,10 @@ read_pull_request_flags() {
         if [[ $flags_with_value == *" $word "* ]]; then
           value=${command_words[i + 1]:-}
           i=$((i + 1))
+        elif [[ $word == -[!-]?* && $flags_with_value == *" ${word:0:2} "* ]]; then
+          flag=${word:0:2}
+          value=${word:2}
+          value=${value#=}
         fi
         ;;
       *) continue ;;
