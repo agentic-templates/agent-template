@@ -194,7 +194,7 @@ expect_block Bash "gh issue create --label feature --web" "$no_body"
 expect_block Bash "cat body.md | gh issue create --label feature --body-file -" "$no_stdin"
 # shellcheck disable=SC2016 # The commands are the text that the agent sends, so $ stays as written.
 expect_block Bash 'gh issue create --label feature --body "$(cat body.md)"' \
-  "Blocked: this hook can't run the command in \$( ) that prints the body, so it can't check the issue's headings. Write the body to a file in a command of its own first, and give the file with --body-file."
+  "Blocked: this hook can't run the command in \$( ) or backticks that prints the body, so it can't check the issue's headings. Write the body to a file in a command of its own first, and give the file with --body-file."
 
 # Help, and commands that create no issue
 expect_allow Bash 'gh issue create --help'

@@ -145,7 +145,7 @@ expect_block Bash "gh pr create --title \"\$type: skip the expenses\" --body-fil
 
 # Bodies that a command in $( ) or backticks prints. The hook asks for the body in a file, and checks neither the
 # command's text nor the title. The text of this printf would fail the checks, though the body it prints passes them.
-from_command="Blocked: this hook can't run the command in \$( ) that prints the body, so it can't check the pull request's body. Write the body to a file in a command of its own first, and give the file with --body-file."
+from_command="Blocked: this hook can't run the command in \$( ) or backticks that prints the body, so it can't check the pull request's body. Write the body to a file in a command of its own first, and give the file with --body-file."
 printf_body="\"\$(printf '%s\n' 'Closes #12.' '' '## What changed and why' '' 'The app skips the expenses.')\""
 expect_block Bash "gh pr create --title '$title' --body $printf_body" "$from_command"
 expect_block Bash "gh pr create --title 'skip the expenses that were already imported' --body=$printf_body" "$from_command"
