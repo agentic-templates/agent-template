@@ -199,6 +199,17 @@ git commit --quiet -m "feat: add the notes"
 record_pass
 expect_allow Bash "gh pr create --title '$title' --body-file ../body.md"
 
+# A copy of the scripts whose list of paths has no line break after its last pattern, imports.txt, which the branch
+# work adds
+cp -R "${hooks_folder%/*}" "$base/copy"
+printf 'AGENTS.md\nimports.txt' >"$base/copy/consequential-paths"
+git switch --quiet work
+record_pass
+hook_status=0
+hook_message=$(HOME=$test_home "$base/copy/hooks/before-tool" 2>&1 >/dev/null \
+  <<<"$(sample_input claude-code Bash "gh pr create --title '$title' --body-file ../body.md")") || hook_status=$?
+expect_result "With no line break after the last pattern, the hook" 2 "$(draft_needed imports.txt)"
+
 # A branch from a main that has moved on since the clone last fetched it. The commit on main that the clone hasn't
 # fetched changes scripts/configure-github and has a Co-authored-by trailer, and it's no part of the pull request.
 git -C "$base/seed" switch --quiet -c fresh

@@ -43,7 +43,8 @@ find_commits() {
 consequential_files() {
   local pattern file
   local -a patterns=()
-  while IFS= read -r pattern; do
+  # The test after || also reads a last line that has no line break, as scripts/loop/consequential does.
+  while IFS= read -r pattern || [[ -n $pattern ]]; do
     if [[ $pattern != '#'* ]]; then
       patterns+=("$pattern")
     fi
