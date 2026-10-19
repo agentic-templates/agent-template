@@ -244,12 +244,10 @@ check_push_to_dependabot() {
 # tags, or with a refspec that can push to a version tag. git push <remote> tag <name> pushes refs/tags/<name>.
 # Run read_push_arguments first.
 check_push_of_version_tag() {
-  local flag i refspec
-  for flag in ${flags[@]+"${flags[@]}"}; do
-    if pushes_tags "$flag"; then
-      block_release
-    fi
-  done
+  local i refspec
+  if has_git_flag --tags --follow-tags --mirror; then
+    block_release
+  fi
   for ((i = 0; i < ${#push_refspecs[@]}; i++)); do
     refspec=${push_refspecs[i]}
     if [[ $refspec == tag ]] && ((i + 1 < ${#push_refspecs[@]})); then
@@ -260,22 +258,6 @@ check_push_of_version_tag() {
       block_release
     fi
   done
-}
-
-# Succeeds if a flag of git push pushes tags: --tags, --follow-tags or --mirror, or the start of one of them, as in
-# --tag, because git takes the start of an option as the option. git fails on a start that other options have too, such
-# as --t, so such a start may count: pushes_tags <flag>
-pushes_tags() {
-  local option
-  if [[ $1 != --?* ]]; then
-    return 1
-  fi
-  for option in --tags --follow-tags --mirror; do
-    if [[ $option == "$1"* ]]; then
-      return 0
-    fi
-  done
-  return 1
 }
 
 # Succeeds if a refspec of git push, [+]<source>[:<destination>], can push to a version tag. Without a colon, the
