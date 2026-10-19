@@ -15,12 +15,14 @@ It keeps nothing else from the events, because each one also carries the account
 """
 
 import fcntl
+import http.client
 import http.server
 import json
 import subprocess
 import sys
 import threading
 import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, override
 
@@ -45,6 +47,9 @@ KEPT_ATTRIBUTES = {
     "cache_creation_tokens": "cache_creation_tokens",
 }
 TOKEN_FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")
+# The variables that would make Claude Code send more than the events: the prompts, the tools' details, the metrics or
+# the traces
+UNSET_VARIABLES = ("OTEL_LOG_USER_PROMPTS", "OTEL_LOG_TOOL_DETAILS", "OTEL_METRICS_EXPORTER", "OTEL_TRACES_EXPORTER")
 ANSWER_TIMEOUT_SECONDS = 2
 
 
@@ -155,15 +160,16 @@ def receiver_port(folder: Path) -> int:
 
 
 def answering_port(folder: Path) -> int | None:
-    """The port in the folder's port file, if the receiver for that folder answers on it, or None."""
+    """The port in the folder's port file, if the receiver for that folder answers on it, or None. Another program
+    may hold the port by now, and answer with anything."""
     port_file = folder / PORT_FILE
     if not port_file.exists():
         return None
-    port = int(port_file.read_text())
     try:
+        port = int(port_file.read_text())
         with urllib.request.urlopen(f"http://{HOST}:{port}/", timeout=ANSWER_TIMEOUT_SECONDS) as answer:
-            is_receiver = answer.read().decode() == str(folder.resolve())
-    except OSError:
+            is_receiver = answer.read() == str(folder.resolve()).encode()
+    except OSError, ValueError, http.client.HTTPException:
         return None
     return port if is_receiver else None
 
@@ -188,8 +194,15 @@ def start_receiver(folder: Path) -> int:
     return int(started.stdout)
 
 
-def telemetry_environment(port: int) -> dict[str, str]:
-    """The variables that make Claude Code send its events, and only them, to the receiver on the port."""
+def with_events(environment: Mapping[str, str], port: int) -> dict[str, str]:
+    """The environment with the variables that make Claude Code send its events, and only them, to the receiver on
+    the port."""
+    kept = {name: value for name, value in environment.items() if name not in UNSET_VARIABLES}
+    return kept | event_variables(port)
+
+
+def event_variables(port: int) -> dict[str, str]:
+    """The variables that make Claude Code send its events to the receiver on the port."""
     return {
         "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
         "OTEL_LOGS_EXPORTER": "otlp",

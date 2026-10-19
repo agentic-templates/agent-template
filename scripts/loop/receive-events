@@ -5,8 +5,8 @@ requests.jsonl in a loop folder, as scripts/loop/request_events.py describes:
   scripts/loop/receive-events <loop folder>
 
 It listens on a free port of 127.0.0.1, writes the port to receiver.port in the folder, prints it, and goes on
-listening in the background until it's stopped. scripts/loop/claude and scripts/loop/run-builder start it when it
-isn't running.
+listening in the background until it's stopped. scripts/loop/event-variables and scripts/loop/run-builder start it when
+it isn't running.
 """
 
 import argparse

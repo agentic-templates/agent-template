@@ -3,6 +3,7 @@ import importlib.machinery
 import io
 import json
 import os
+import socketserver
 import subprocess
 import sys
 import tempfile
@@ -17,10 +18,11 @@ from unittest import mock
 
 import request_events
 
-LAUNCHER = Path(__file__).with_name("claude")
+LAUNCHER = Path(__file__).with_name("claude-with-events")
+EVENT_VARIABLES = Path(__file__).with_name("event-variables")
 # The scripts' file names have no .py, so the tests load them by their paths.
-launcher = types.ModuleType("launcher")
-importlib.machinery.SourceFileLoader("launcher", str(LAUNCHER)).exec_module(launcher)
+event_variables = types.ModuleType("event_variables")
+importlib.machinery.SourceFileLoader("event_variables", str(EVENT_VARIABLES)).exec_module(event_variables)
 receive_events = types.ModuleType("receive_events")
 importlib.machinery.SourceFileLoader("receive_events", str(request_events.RECEIVER)).exec_module(receive_events)
 # The attributes of an api_request event as Claude Code sends them, with the account's ids and email address.
@@ -58,6 +60,22 @@ PROMPT_ATTRIBUTES = {
 }
 # A port where nothing listens, as the port file of a receiver that stopped gives
 CLOSED_PORT = 1
+# The variables that the receiver turns off, each set as it would send more than the events
+SET_TO_SEND_MORE = {
+    "OTEL_LOG_USER_PROMPTS": "1",
+    "OTEL_LOG_TOOL_DETAILS": "1",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_TRACES_EXPORTER": "otlp",
+}
+# The variables that bash sets itself
+BASH_VARIABLES = ("PWD", "OLDPWD", "SHLVL", "_")
+
+
+class NotHttp(socketserver.BaseRequestHandler):
+    """Answers a connection with a line that isn't HTTP, as a service other than a web server can."""
+
+    def handle(self) -> None:
+        self.request.sendall(b"220 ready\r\n")
 
 
 def record(event: str, attributes: dict[str, Any]) -> dict[str, Any]:
@@ -203,6 +221,23 @@ class ReceiverPortTest(FolderTest):
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as answer:
             self.assertEqual(answer.read().decode(), str(self.folder))
 
+    def test_starts_a_receiver_when_the_port_file_is_empty(self) -> None:
+        self.stop_receivers_at_the_end()
+        (self.folder / request_events.PORT_FILE).write_text("")
+        port = request_events.receiver_port(self.folder)
+        self.assertEqual((self.folder / request_events.PORT_FILE).read_text(), f"{port}\n")
+
+    def test_starts_a_receiver_when_a_service_that_is_not_http_holds_the_port(self) -> None:
+        self.stop_receivers_at_the_end()
+        service = socketserver.TCPServer(("127.0.0.1", 0), NotHttp)
+        threading.Thread(target=service.serve_forever, daemon=True).start()
+        self.addCleanup(service.server_close)
+        self.addCleanup(service.shutdown)
+        (self.folder / request_events.PORT_FILE).write_text(f"{service.server_address[1]}\n")
+        port = request_events.receiver_port(self.folder)
+        self.assertNotEqual(port, service.server_address[1])
+        self.assertEqual((self.folder / request_events.PORT_FILE).read_text(), f"{port}\n")
+
     def test_creates_the_folder(self) -> None:
         self.folder.rmdir()
         self.stop_receivers_at_the_end()
@@ -221,11 +256,14 @@ class ReceiverPortTest(FolderTest):
         self.assertIn("PermissionError", log.read_text())
 
 
-class TelemetryEnvironmentTest(unittest.TestCase):
+class VariablesTest(unittest.TestCase):
     def test_turns_on_only_the_events_and_sends_them_to_the_port_over_http_in_json(self) -> None:
         self.assertEqual(
-            request_events.telemetry_environment(4318),
+            request_events.with_events(
+                {"HOME": "/home/someone", "OTEL_LOGS_EXPORTER": "console", **SET_TO_SEND_MORE}, 4318
+            ),
             {
+                "HOME": "/home/someone",
                 "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
                 "OTEL_LOGS_EXPORTER": "otlp",
                 "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL": "http/json",
@@ -234,9 +272,44 @@ class TelemetryEnvironmentTest(unittest.TestCase):
         )
 
 
+class EventVariablesTest(FolderTest):
+    def test_prints_the_variables_to_unset_and_those_to_set_for_the_loops_receiver(self) -> None:
+        receiver = self.serve(self.folder)
+        printed = io.StringIO()
+        with mock.patch.dict(os.environ, {"LOOP_DIR": str(self.folder)}), contextlib.redirect_stdout(printed):
+            status = event_variables.main()
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            printed.getvalue(),
+            "OTEL_LOG_USER_PROMPTS\nOTEL_LOG_TOOL_DETAILS\nOTEL_METRICS_EXPORTER\nOTEL_TRACES_EXPORTER\n"
+            "CLAUDE_CODE_ENABLE_TELEMETRY=1\nOTEL_LOGS_EXPORTER=otlp\nOTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/json\n"
+            f"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://127.0.0.1:{receiver.port}/v1/logs\n",
+        )
+
+    def test_fails_and_prints_no_variables_when_the_receiver_does_not_start(self) -> None:
+        self.block_the_port_file()
+        printed, errors = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"LOOP_DIR": str(self.folder)}),
+            contextlib.redirect_stdout(printed),
+            contextlib.redirect_stderr(errors),
+        ):
+            status = event_variables.main()
+        log = self.folder / request_events.LOG_FILE
+        self.assertEqual(
+            (status, printed.getvalue(), errors.getvalue()),
+            (
+                1,
+                "",
+                f"error: The receiver of Claude Code's events didn't start, and ended with code 1. {log} says why.\n",
+            ),
+        )
+
+
 class LauncherTest(FolderTest):
-    """Runs scripts/loop/claude with a stand-in for claude first on PATH, which writes its arguments and the
-    variables that send events to claude.json in the loop folder."""
+    """Runs scripts/loop/claude-with-events with a stand-in for claude first on PATH, which writes its arguments and
+    its environment to claude.json in the loop folder, from the environment of a shell without the variables that uv
+    run sets."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -246,58 +319,50 @@ class LauncherTest(FolderTest):
         standin.write_text(
             f"#!{sys.executable} -S\n"
             "import json, os, sys\n"
-            "names = [name for name in os.environ if name.startswith(('OTEL_', 'CLAUDE_CODE_ENABLE'))]\n"
-            "seen = {'args': sys.argv[1:], 'env': {name: os.environ[name] for name in names}}\n"
+            "seen = {'args': sys.argv[1:], 'env': dict(os.environ)}\n"
             "open(os.path.join(os.environ['LOOP_DIR'], 'claude.json'), 'w').write(json.dumps(seen))\n"
         )
         standin.chmod(0o755)
-        environment = {"PATH": f"{bin_folder}{os.pathsep}{os.environ['PATH']}", "LOOP_DIR": str(self.folder)}
-        self.environment = {
-            name: value for name, value in os.environ.items() if not name.startswith("OTEL_")
-        } | environment
+        shell = {
+            name: value
+            for name, value in os.environ.items()
+            if name not in ("VIRTUAL_ENV", *BASH_VARIABLES) and not name.startswith("OTEL_")
+        }
+        self.environment = (
+            shell
+            | SET_TO_SEND_MORE
+            | {
+                "PATH": f"{bin_folder}{os.pathsep}{os.environ['PATH']}",
+                "LOOP_DIR": str(self.folder),
+                "OTEL_LOGS_EXPORTER": "console",
+            }
+        )
 
     def launch(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, str(LAUNCHER), *arguments],
-            env=self.environment,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=60,
+            [str(LAUNCHER), *arguments], env=self.environment, capture_output=True, text=True, check=False, timeout=60
         )
 
-    def test_runs_claude_with_its_arguments_and_sends_the_events_to_the_loops_receiver(self) -> None:
+    def test_runs_claude_with_its_arguments_and_the_shells_environment_with_only_the_events_turned_on(self) -> None:
         self.stop_receivers_at_the_end()
         done = self.launch("--resume", "a b")
         self.assertEqual((done.returncode, done.stderr), (0, ""))
         seen = json.loads((self.folder / "claude.json").read_text())
         port = int((self.folder / request_events.PORT_FILE).read_text())
-        self.assertEqual(seen, {"args": ["--resume", "a b"], "env": request_events.telemetry_environment(port)})
+        environment = {name: value for name, value in seen["env"].items() if name not in BASH_VARIABLES}
+        self.assertEqual(seen["args"], ["--resume", "a b"])
+        self.assertEqual(environment, request_events.with_events(self.environment, port))
         self.assertEqual(request_events.receiver_port(self.folder), port)
 
     def test_fails_without_running_claude_when_the_receiver_does_not_start(self) -> None:
         self.block_the_port_file()
-        errors = io.StringIO()
-        with mock.patch.dict(os.environ, self.environment), contextlib.redirect_stderr(errors):
-            status = launcher.main([])
+        done = self.launch()
         log = self.folder / request_events.LOG_FILE
         self.assertEqual(
-            (status, errors.getvalue()),
+            (done.returncode, done.stderr),
             (1, f"error: The receiver of Claude Code's events didn't start, and ended with code 1. {log} says why.\n"),
         )
         self.assertFalse((self.folder / "claude.json").exists())
-
-    def test_fails_when_claude_is_not_installed(self) -> None:
-        self.stop_receivers_at_the_end()
-        empty = self.folder.with_name("empty")
-        empty.mkdir()
-        errors = io.StringIO()
-        with mock.patch.dict(os.environ, {**self.environment, "PATH": str(empty)}), contextlib.redirect_stderr(errors):
-            status = launcher.main([])
-        self.assertEqual(
-            (status, errors.getvalue()),
-            (1, "error: claude isn't installed. Install Claude Code, and run the script again.\n"),
-        )
 
 
 class ReceiverScriptTest(FolderTest):

@@ -9,8 +9,8 @@ Find your case, from what the maintainer asks and what the session-start hook sa
   the maintainer asks you to continue its work. Take the loop over: do steps 1 to 5.
 - The hook says "You are this repository's orchestrator, in a new session or process". Compare the `pid:` line that
   it gives with the state file's. Then write the `session:` and `pid:` lines that it gives, in place of step 1:
-  - If they differ, as after `scripts/loop/claude --resume`, the old process's agents and background tasks have
-    ended. Do steps 3 to 5.
+  - If they differ, as after `scripts/loop/claude-with-events --resume`, the old process's agents and background
+    tasks have ended. Do steps 3 to 5.
   - If they match, as after `/clear`, your agents and background tasks may still run. Do step 3, because nothing
     tells you whether the meter still runs, and go on with the cycle from your state file.
 

@@ -17,7 +17,7 @@ worktree or on the local branch, and the run fails and says where they are. The 
 worktree exists already, or when the issue has needs-triage.
 
 A Claude builder builds the issue as "Build one issue" in docs/building.md describes. It sends the tokens of its
-requests to .loop/requests.jsonl, as scripts/loop/claude does.
+requests to .loop/requests.jsonl, as scripts/loop/claude-with-events does.
 
 A Codex builder runs in a sandbox that can't reach the network or write the git folder, so it only edits files, and
 it builds only the kinds research and other. When it ends, the script commits its changes and pushes them, unless a file's
@@ -539,10 +539,8 @@ def run_claude(brief: str, account: Account, settings: agent_log.AgentSettings, 
         raise Stop(str(error)) from error
     # The first variable makes claude wait through a usage limit. The second keeps the hooks from logging the agents
     # that the builder starts, because the run's tokens count theirs.
-    environment = (
-        claude_environment(account)
-        | {"CLAUDE_CODE_RETRY_WATCHDOG": "1", agent_log.RUN_VARIABLE: "1"}
-        | request_events.telemetry_environment(port)
+    environment = request_events.with_events(
+        claude_environment(account) | {"CLAUDE_CODE_RETRY_WATCHDOG": "1", agent_log.RUN_VARIABLE: "1"}, port
     )
     model_options = [
         *option("--model", settings.model),

@@ -19,8 +19,9 @@ The lines are:
                             How many of these requests have no event in .loop/requests.jsonl, which
                             scripts/loop/request_events.py describes, out of all of them. The report takes each
                             request's output tokens from its event, and for a request with no event, from the agent's
-                            transcript, which leaves out most of them. A session started without scripts/loop/claude
-                            sends no events. A run of scripts/loop/run-builder counts its own output tokens exactly.
+                            transcript, which leaves out most of them. Only a session started with
+                            scripts/loop/claude-with-events sends events. A run of scripts/loop/run-builder counts its
+                            own output tokens exactly.
   Orchestrator's share      The share of the input tokens that the sessions in the main checkout used themselves, out
                             of all that they and their agents used.
   Hook blocks               How many actions the before-tool hook blocked, from .loop/blocks.log, and how many each
@@ -396,8 +397,9 @@ def type_line(
 
 def agent_output_tokens(end: dict[str, Any], event_tokens: dict[str, int]) -> tuple[int, int]:
     """The output tokens of an agent that ended, and how many of its requests have no event. A run's own count is
-    exact. An agent of a session gets each request's count from its event, or else from its transcript."""
-    requests: dict[str, int] | None = end["requests"]
+    exact. An agent of a session gets each request's count from its event, or else from its transcript. An end line
+    written before agents.jsonl had requests gives none, so its own count counts, as for an agent with no events."""
+    requests: dict[str, int] | None = end.get("requests")
     if requests is None:
         return end["output_tokens"], 0
     tokens = sum(event_tokens.get(request, transcript_count) for request, transcript_count in requests.items())
@@ -405,7 +407,7 @@ def agent_output_tokens(end: dict[str, Any], event_tokens: dict[str, int]) -> tu
 
 
 def no_event_line(ends: list[dict[str, Any]], event_tokens: dict[str, int]) -> str:
-    requests = sum(len(end["requests"] or {}) for end in ends)
+    requests = sum(len(end.get("requests") or {}) for end in ends)
     without_event = sum(agent_output_tokens(end, event_tokens)[1] for end in ends)
     return f"Requests of the agents of a session that have no event: {without_event} of {requests}"
 

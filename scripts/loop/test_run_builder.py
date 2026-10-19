@@ -383,6 +383,7 @@ class ClaudeTest(RunBuilderTest):
             "CLAUDE_CODE_ENTRYPOINT": "cli",
             "ANTHROPIC_API_KEY": "a",
             "CLAUDE_CONFIG_DIR": "/c",
+            "OTEL_LOG_USER_PROMPTS": "1",
         }
         with mock.patch.dict(os.environ, caller):
             status, printed, errors = self.run_builder("--tool", "claude")
@@ -405,8 +406,9 @@ class ClaudeTest(RunBuilderTest):
         self.assertEqual(environment["LOOP_RUN"], "1")
         self.assertEqual(environment["GH_REPO"], "owner/repo")
         self.assertEqual([name for name in caller if name in environment], ["CLAUDE_CONFIG_DIR"])
-        telemetry = request_events.telemetry_environment(self.receiver.port)
-        self.assertEqual({name: environment.get(name) for name in telemetry}, telemetry)
+        events = request_events.event_variables(self.receiver.port)
+        self.assertEqual({name: environment.get(name) for name in events}, events)
+        self.assertEqual([name for name in request_events.UNSET_VARIABLES if name in environment], [])
         self.assertEqual(
             (self.status()["account"], self.status()["outcome"], self.status()["tool"]), ("main", "finished", "claude")
         )

@@ -344,6 +344,13 @@ class TypeTest(ReportTest):
         self.assertEqual(self.line("Type").split(" | ")[1], "output tokens: 10200")
         self.assertEqual(self.line("Requests"), "Requests of the agents of a session that have no event: 0 of 1")
 
+    def test_takes_the_output_tokens_of_an_end_line_written_before_end_lines_had_requests_from_the_line(self) -> None:
+        old_end = {key: value for key, value in end("toolu_1", 10, output_tokens=3).items() if key != "requests"}
+        self.log_agents(start("toolu_1", 1), {**old_end, "output_tokens_exact": False})
+        self.log_requests(("req_a", 1200))
+        self.assertEqual(self.line("Type").split(" | ")[1], "output tokens: 3")
+        self.assertEqual(self.line("Requests"), "Requests of the agents of a session that have no event: 0 of 0")
+
     def test_counts_only_the_agents_that_started_after_the_time(self) -> None:
         self.log_agents(start("old", -10), end("old", 5, tokens=5000), start("new", 1), end("new", 6, tokens=1000))
         self.assertEqual(
