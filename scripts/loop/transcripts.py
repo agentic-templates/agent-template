@@ -39,15 +39,20 @@ class Message(NamedTuple):
 
 
 def read_transcript(file: Path) -> tuple[list[Call], list[dt.datetime]]:
-    """The calls in a transcript, and the times of the prompts and messages in it. A response that spans several lines
-    repeats its message's id and usage on each line, so its tokens count once. Each line holds other blocks of the
-    response, so its tool calls add up."""
+    """The calls in a transcript, and the times of the prompts and messages in it."""
+    return entry_calls(transcript_entries(file))
+
+
+def entry_calls(entries: list[dict[str, Any]]) -> tuple[list[Call], list[dt.datetime]]:
+    """The calls in a transcript's entries that hold a message, in the order that they started, and the times of the
+    prompts and messages in them. A response that spans several lines repeats its message's id and usage on each line,
+    so its tokens count once. Each line holds other blocks of the response, so its tool calls add up."""
     times: dict[str, list[dt.datetime]] = {}
     usage: dict[str, dict[str, int]] = {}
     request_ids: dict[str, str] = {}
     tool_calls: Counter[str] = Counter()
     prompts = []
-    for entry in transcript_entries(file):
+    for entry in entries:
         if is_prompt(entry):
             prompts.append(dt.datetime.fromisoformat(entry["timestamp"]))
         if not is_call(entry):
@@ -78,7 +83,11 @@ def read_transcript(file: Path) -> tuple[list[Call], list[dt.datetime]]:
 
 def transcript_entries(file: Path) -> list[dict[str, Any]]:
     """The entries of a transcript that hold a message and its time."""
-    return [entry for entry in timed_entries(file) if isinstance(entry.get("message"), dict)]
+    return [entry for entry in timed_entries(file) if has_message(entry)]
+
+
+def has_message(entry: dict[str, Any]) -> bool:
+    return isinstance(entry.get("message"), dict)
 
 
 def timed_entries(file: Path) -> list[dict[str, Any]]:

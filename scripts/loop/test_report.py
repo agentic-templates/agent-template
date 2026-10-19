@@ -149,6 +149,12 @@ class ReportTest(unittest.TestCase):
             file.with_suffix(".meta.json").write_text(json.dumps({"agentType": agent_type}))
         return file
 
+    def agent_transcript(self, agent_id: str, lines: list[Any]) -> Path:
+        """Writes the transcript of the agent that the Agent call with the id started."""
+        transcript = self.transcript(f"agent-{agent_id}", lines, "session")
+        transcript.with_suffix(".meta.json").write_text(json.dumps({"toolUseId": agent_id}))
+        return transcript
+
     def run_report(self, *arguments: str) -> tuple[int, list[str], str]:
         printed, errors = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(errors):
@@ -179,6 +185,7 @@ class EmptyPeriodTest(ReportTest):
                     "Orchestrator's share of the input tokens: none used",
                     "Hook blocks: 0",
                     "Agents' time: 0.0 min, from the transcripts of 0 agents, and 0 agents have none",
+                    "Context of the orchestrator: no calls",
                     "Heavy commands: none ran",
                     "Machine: no readings",
                 ],
@@ -495,12 +502,6 @@ class TypeTest(ReportTest):
 
 
 class AgentTimeTest(ReportTest):
-    def agent_transcript(self, agent_id: str, lines: list[Any]) -> Path:
-        """Writes the transcript of the agent that the Agent call with the id started."""
-        transcript = self.transcript(f"agent-{agent_id}", lines, "session")
-        transcript.with_suffix(".meta.json").write_text(json.dumps({"toolUseId": agent_id}))
-        return transcript
-
     def test_totals_each_part_of_the_time_of_the_agents_with_a_transcript_and_counts_those_without(self) -> None:
         self.log_agents(
             start("a", 0, issue=12, kind="other", label="feature"),
@@ -545,7 +546,8 @@ class AgentTimeTest(ReportTest):
             (
                 "Issue #12 feature other: builder, 12.0 min, 1 tool calls, 1 input tokens, 1 output tokens | pull "
                 "request #57: no fix after review, failed check, unmerged exit from the merge queue or second builder "
-                "| time: model 6.0 min, scripts/check 6.0 min, waiting for the orchestrator 18.0 min"
+                "| context: peak 0.0k, no tool call measured | time: model 6.0 min, scripts/check 6.0 min, waiting for "
+                "the orchestrator 18.0 min"
             ),
         )
 
@@ -562,10 +564,10 @@ class AgentTimeTest(ReportTest):
         self.assertEqual(
             [line for line in lines if line.startswith("Issue")],
             [
-                "Issue #12 feature other: builder, not ended | time: model 1.0 min",
+                "Issue #12 feature other: builder, not ended | context: peak 0.0k, no tool call measured | time: model 1.0 min",
                 (
                     "Issue #13 bug other: builder, 2.0 min, 1 tool calls, 1 input tokens, 1 output tokens | no pull "
-                    "request | time: model 2.0 min"
+                    "request | context: peak 0.0k, no tool call measured | time: model 2.0 min"
                 ),
             ],
         )

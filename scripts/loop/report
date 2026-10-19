@@ -32,6 +32,16 @@ The lines are:
                             scripts/loop/agent_time.py describes: the model's time, the tool calls that ran
                             scripts/check, ran a single test file, waited for CI, slept, ran another command or used
                             another tool, and the waits for the agents' background tasks and for the orchestrator.
+  Context                   A line for each type of the agents in the Type lines that have a transcript, and one for
+                            the sessions in the main checkout, as scripts/loop/context_growth.py measures them: how
+                            many agents or sessions it covers, the median and the largest of their peak context, and
+                            the share of them whose peak passed the threshold at which scripts/hooks/hand-off tells a
+                            builder to hand off, or for the sessions, tells the orchestrator to compact. Then the
+                            context that the results of their tool calls added, per tool call, and how many steps it
+                            leaves out because their call has no event in .loop/requests.jsonl. Then how many of the
+                            agents the hook told to hand off, their compactions, and the three kinds of tool calls
+                            whose results added the most, by their share, as the Agents' time line groups the tool
+                            calls.
   Heavy command             A line for each command that scripts/loop/run-heavy ran, from .loop/heavy.jsonl: how many
                             runs started and ended, and the median minutes, cores and memory of those that ended.
                             Then how many runs waited, those that a signal stopped while they waited included, their
@@ -51,7 +61,8 @@ The lines are:
                             change from the first reading to the last. A number that no reading gives says so.
 
 With --issues, the report also gives a line for each agent that built an issue, of the kinds other and left behind,
-with its numbers, those of its pull request, and the minutes of each part of its time.
+with its numbers, those of its pull request, its peak context, the context added per tool call in the steps that
+have an event, and the minutes of each part of its time.
 
 With --messages, the report also gives each message that a person typed in a session in the main checkout, such as
 the maintainer's messages to the orchestrator, with its time.
@@ -77,11 +88,13 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import agent_time
+import context_growth
 import heavy_log
 import paths
 import request_events
 from agent_log import AgentRun, Period, agent_output_tokens, agent_transcripts, read_runs, started, working_periods
 from github import GitHubError, gh_api
+from hand_offs import FOLDER_NAME, hand_off_thresholds, hook_threshold, note_files
 from transcripts import Call, Message, person_messages, read_transcript
 
 CI_WORKFLOW = "ci.yml"
@@ -122,6 +135,8 @@ MERGED_REASON = "merged"
 # What each field of PullRequestResult says about a pull request, in the fields' order
 RESULT_WORDS = ("needed a fix after review", "failed a check", "left the merge queue unmerged", "got a second builder")
 NOTHING_HAPPENED = "no fix after review, failed check, unmerged exit from the merge queue or second builder"
+# How many kinds of tool calls a context line names, those whose results added the most context first
+MOST_ADDING_KINDS = 3
 
 
 class CiRun(NamedTuple):
@@ -132,13 +147,20 @@ class CiRun(NamedTuple):
 
 class Transcript(NamedTuple):
     role: str
+    file: Path
     modified: float
     calls: list[Call]
 
 
 class Agent(NamedTuple):
     role: str
+    file: Path
     calls: list[Call]
+
+
+class Context(NamedTuple):
+    growth: context_growth.Growth
+    is_told_to_hand_off: bool
 
 
 class PullRequest(NamedTuple):
@@ -209,12 +231,18 @@ def main(argv: list[str] | None = None) -> int:
     }
     agents = count_once(transcripts, since)
     transcripts_by_id = agent_transcripts(paths.claude_project_folder(checkout))
-    splits = {
-        run.start["id"]: agent_time.read_split(file)
-        for run in recent
-        if (file := transcripts_by_id.get(run.start["id"])) and file.exists()
+    files = {
+        run.start["id"]: file for run in recent if (file := transcripts_by_id.get(run.start["id"])) and file.exists()
     }
+    splits = {agent: agent_time.read_split(file) for agent, file in files.items()}
     event_tokens = request_events.output_tokens(read_log(request_events.REQUESTS_FILE))
+    told = hand_off_thresholds(note_files(paths.loop_dir() / FOLDER_NAME))
+    contexts = {agent: read_context(file, None, event_tokens, told) for agent, file in files.items()}
+    orchestrator_contexts = [
+        read_context(agent.file, {call.id for call in agent.calls}, event_tokens, told)
+        for agent in agents
+        if agent.role == ORCHESTRATOR
+    ]
     ends = [run.end for run in recent if run.end]
     lines = [
         f"Since {since.isoformat()}",
@@ -224,11 +252,12 @@ def main(argv: list[str] | None = None) -> int:
         orchestrator_line(agents),
         block_line(count_blocks(read_log("blocks.log"), since)),
         time_line(list(splits.values()), len(recent)),
+        *context_lines(contexts_by_type(recent, contexts), orchestrator_contexts),
         *heavy_lines(heavy_log.read(paths.loop_dir() / heavy_log.NAME), since),
         *machine_lines(read_machine_readings(read_log("meter.jsonl"), since), periods_of(all_runs, transcripts_by_id)),
     ]
     if options.issues:
-        lines += issue_lines(recent, results, event_tokens, splits)
+        lines += issue_lines(recent, results, event_tokens, splits, contexts)
     if options.messages:
         lines += message_lines(read_messages(paths.claude_project_folder(checkout), since))
     print("\n".join(lines))
@@ -312,7 +341,7 @@ def read_transcripts(project_folder: Path, checkout: Path, since: dt.datetime) -
     for file, role in found:
         modified = file.stat().st_mtime
         if modified >= since.timestamp():
-            transcripts.append(Transcript(role, modified, read_transcript(file)[0]))
+            transcripts.append(Transcript(role, file, modified, read_transcript(file)[0]))
     return transcripts
 
 
@@ -326,7 +355,7 @@ def count_once(transcripts: list[Transcript], since: dt.datetime) -> list[Agent]
         calls = [call for call in transcript.calls if call.id not in seen and call.start >= since]
         seen.update(call.id for call in transcript.calls)
         if calls:
-            agents.append(Agent(transcript.role, calls))
+            agents.append(Agent(transcript.role, transcript.file, calls))
     return agents
 
 
@@ -456,16 +485,17 @@ def issue_lines(
     results: dict[str, PullRequestResult],
     event_tokens: dict[str, int],
     splits: dict[str, dict[str, float]],
+    contexts: dict[str, Context],
 ) -> list[str]:
-    """A line for each agent that built an issue, with its numbers, what happened to its pull request, and the split
-    of its time."""
+    """A line for each agent that built an issue, with its numbers, what happened to its pull request, its context,
+    and the split of its time."""
     lines = []
     for run in runs:
         kind = run.start["kind"]
         if not kind or not kind.startswith(BUILD_KINDS):
             continue
         line = f"Issue #{run.start['issue']} {run.start['label']} {kind}: {run.start['type']}"
-        time = agent_time_part(splits.get(run.start["id"]))
+        time = agent_context_part(contexts.get(run.start["id"])) + agent_time_part(splits.get(run.start["id"]))
         if not run.end:
             lines.append(f"{line}, not ended{time}")
             continue
@@ -503,6 +533,88 @@ def agent_time_part(split: dict[str, float] | None) -> str:
     agent without a transcript or without time in it."""
     parts = [f"{part} {seconds / 60:.1f} min" for part, seconds in (split or {}).items() if seconds]
     return " | time: " + ", ".join(parts) if parts else ""
+
+
+def read_context(file: Path, counted: set[str] | None, event_tokens: dict[str, int], told: dict[str, int]) -> Context:
+    """How the context grew in the calls of a transcript whose ids are counted, or in all of them, and whether
+    scripts/hooks/hand-off told the agent or session to hand off its work."""
+    calls = context_growth.read_calls(file)
+    if counted is None:
+        counted = {context.call.id for context in calls}
+    growth = context_growth.growth(calls, counted, event_tokens)
+    return Context(growth, file.stem.removeprefix("agent-") in told)
+
+
+def contexts_by_type(runs: list[AgentRun], contexts: dict[str, Context]) -> dict[str, list[Context]]:
+    by_type: dict[str, list[Context]] = {}
+    for run in runs:
+        if run.start["id"] in contexts:
+            by_type.setdefault(run.start["type"], []).append(contexts[run.start["id"]])
+    return by_type
+
+
+def context_lines(by_type: dict[str, list[Context]], orchestrator: list[Context]) -> list[str]:
+    """A line for each type of the agents with a transcript, measured against the threshold at which
+    scripts/hooks/hand-off tells a builder to hand off, and one for the orchestrator's sessions, measured against the
+    threshold at which it tells the orchestrator to compact."""
+    hand_off = ("the hand-off threshold", hook_threshold("soon_tokens"))
+    compaction = ("the compaction threshold", hook_threshold("compact_tokens"))
+    lines = [context_line(f"type {name}", "agents", by_type[name], hand_off, True) for name in sorted(by_type)]
+    # The hook never tells the orchestrator to hand off.
+    return [*lines, context_line("the orchestrator", "sessions", orchestrator, compaction, False)]
+
+
+def context_line(
+    whose: str, unit: str, contexts: list[Context], threshold: tuple[str, int], has_hand_offs: bool
+) -> str:
+    if not contexts:
+        return f"Context of {whose}: no calls"
+    growths = [context.growth for context in contexts]
+    peaks = [growth.peak for growth in growths]
+    threshold_name, threshold_tokens = threshold
+    past = sum(peak > threshold_tokens for peak in peaks) / len(peaks)
+    added: Counter[str] = Counter()
+    for growth in growths:
+        added.update(growth.added)
+    # The kinds whose results added nothing, such as those whose step shrank the context, stay out.
+    added = +added
+    told = sum(context.is_told_to_hand_off for context in contexts)
+    compactions = sum(growth.compactions for growth in growths)
+    without_event = sum(growth.steps_without_event for growth in growths)
+    parts = [
+        (
+            f"Context of {whose}: {len(contexts)} {unit}, peak median {thousands(statistics.median(peaks))}, largest "
+            f"{thousands(max(peaks))}, {past:.0%} past {threshold_name} of {thousands(threshold_tokens)}"
+        ),
+        f"{per_tool_call(growths)}, {without_event} steps without an event left out",
+        f"{told} told to hand off, {compactions} compactions" if has_hand_offs else f"{compactions} compactions",
+    ]
+    total = added.total()
+    if total:
+        most = ", ".join(f"{kind} {tokens / total:.0%}" for kind, tokens in added.most_common(MOST_ADDING_KINDS))
+        parts.append(f"added most by {most}")
+    return " | ".join(parts)
+
+
+def agent_context_part(context: Context | None) -> str:
+    """An agent's peak context and the context added per tool call, for its issue line, or nothing for an agent
+    without a transcript."""
+    if context is None:
+        return ""
+    return f" | context: peak {thousands(context.growth.peak)}, {per_tool_call([context.growth])}"
+
+
+def per_tool_call(growths: list[context_growth.Growth]) -> str:
+    """The context added per tool call, in the steps that have an event."""
+    tool_calls = sum(growth.tool_calls for growth in growths)
+    if not tool_calls:
+        return "no tool call measured"
+    added = sum(sum(growth.added.values()) for growth in growths)
+    return f"{thousands(added / tool_calls)} added per tool call"
+
+
+def thousands(tokens: float) -> str:
+    return f"{tokens / 1000:.1f}k"
 
 
 def orchestrator_line(agents: list[Agent]) -> str:
