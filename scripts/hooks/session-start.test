@@ -458,6 +458,49 @@ for record_kind in empty unreadable; do
   expect_no_records "After a compaction of the orchestrator, with an $record_kind record"
 done
 
+# The orchestrator asks the maintainer's compaction sender for a compaction with a request, which names its session on
+# the first line: write_request <loop folder> <session id>
+write_request() {
+  printf '%s\nResume from .loop/state.md.\n' "$2" >"$1/compact-request.txt"
+}
+
+# Checks whether the hook left the request in place: expect_request <description> <loop folder> <kept|deleted>
+expect_request() {
+  local found=deleted
+  case_count=$((case_count + 1))
+  if [[ -f $2/compact-request.txt ]]; then
+    found=kept
+  fi
+  if [[ $found != "$3" ]]; then
+    echo "error: $1, the hook must have $3 the compaction request, but it $found it" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+new_state_file
+write_request "$work/.loop" owner-1
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_request "After a compaction of the orchestrator, which asked for it" "$work/.loop" deleted
+
+new_state_file
+write_request "$work/.loop" someone-else
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_request "After a compaction of the orchestrator, with a request of another session" "$work/.loop" kept
+
+new_state_file
+write_request "$work/.loop" owner-1
+session_input clear owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_request "After /clear in the orchestrator, which asked for a compaction" "$work/.loop" kept
+
+new_state_file
+write_request "$work/.loop" owner-1
+echo '{"source": "compact", "session_id": "owner-1", "agent_id": "agent-7"}' >"$input_file"
+run_session_start CLAUDE_PID="$running_process"
+expect_request "After a compaction of a subagent of the orchestrator, which asked for one" "$work/.loop" kept
+
 new_state_file
 session_input clear new-2
 run_session_start CLAUDE_PID="$running_process"
@@ -538,6 +581,12 @@ session_input compact owner-1
 run_session_start CLAUDE_PID="$running_process"
 expect_output "After a compaction of a builder in a worktree, whose input has no agent_id" "$builder_note"
 expect_output_without "After a compaction of a builder in a worktree, whose input has no agent_id" "$state_text"
+
+new_worktree "$running_process"
+write_request "$main_checkout/.loop" owner-1
+session_input compact owner-1
+run_session_start CLAUDE_PID="$running_process"
+expect_request "After a compaction of a builder in a worktree, whose input has no agent_id" "$main_checkout/.loop" kept
 
 # Runs a function of these cases with another working folder: in_folder <folder> <function> [<argument>...]
 in_folder() {
