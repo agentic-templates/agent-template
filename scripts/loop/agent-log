@@ -1,0 +1,85 @@
+#!/usr/bin/env -S uv run --script --quiet
+"""Adds a line about an agent of a Claude Code session to agents.jsonl in the main checkout's .loop folder, from what
+Claude Code sends a hook on standard input:
+
+  scripts/loop/agent-log start   before an Agent call, which scripts/hooks/before-tool passes on
+  scripts/loop/agent-log end     when an agent ends, from the SubagentStop command in .claude/settings.json
+
+scripts/loop/agent_log.py describes the lines. An agent that no Agent call started, such as one that a skill or Claude
+Code itself starts, gets no line. The SubagentStop command exits with code 1 when the script fails, because Claude Code
+keeps an agent running when that command exits with code 2, as argparse and uv do on some errors.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import agent_log
+
+# The type that Claude Code gives an Agent call without a subagent_type
+DEFAULT_TYPE = "general-purpose"
+GH_TIMEOUT_SECONDS = 10
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="scripts/loop/agent-log", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("event", choices=("start", "end"))
+    event = parser.parse_args(argv).event
+    hook_input: dict[str, Any] = json.load(sys.stdin)
+    line = start_line(hook_input) if event == "start" else end_line(hook_input)
+    if line is not None:
+        agent_log.append(line)
+    return 0
+
+
+def start_line(hook_input: dict[str, Any]) -> dict[str, Any]:
+    call = hook_input["tool_input"]
+    agent_type = call.get("subagent_type") or DEFAULT_TYPE
+    in_file = agent_log.agent_settings(agent_type)
+    settings = in_file._replace(model=call.get("model") or in_file.model, effort=call.get("effort") or in_file.effort)
+    issue, kind = agent_log.prompt_subject(call.get("prompt", ""))
+    label = agent_log.type_label(issue_labels(issue)) if issue else None
+    is_test = bool(os.environ.get(agent_log.TEST_VARIABLE))
+    return agent_log.start_line(hook_input["tool_use_id"], agent_type, settings, issue, label, kind, is_test)
+
+
+def issue_labels(issue: int) -> list[str]:
+    """The labels of an issue or a pull request. Without an answer from GitHub, the line goes without a label, because
+    the agent's start must not wait longer for it."""
+    try:
+        done = subprocess.run(
+            ["gh", "issue", "view", str(issue), "--json", "labels", "--jq", ".labels[].name"],
+            cwd=agent_log.CHECKOUT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=GH_TIMEOUT_SECONDS,
+        )
+    except OSError, subprocess.TimeoutExpired:
+        return []
+    return done.stdout.split() if done.returncode == 0 else []
+
+
+def end_line(hook_input: dict[str, Any]) -> dict[str, Any] | None:
+    # Claude Code's own agents, such as the one that suggests prompts, end with an empty type.
+    if not hook_input.get("agent_type"):
+        return None
+    transcript = Path(hook_input["agent_transcript_path"]).expanduser()
+    # Claude Code keeps the id of the Agent call that started the agent, and the agent's own worktree, next to the
+    # agent's transcript.
+    meta = json.loads(transcript.with_suffix(".meta.json").read_text())
+    if "toolUseId" not in meta:
+        return None
+    worktree = meta.get("worktreePath")
+    worktree_mb = agent_log.folder_megabytes(Path(worktree)) if worktree else None
+    return agent_log.end_line(meta["toolUseId"], agent_log.transcript_numbers(transcript), worktree_mb)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

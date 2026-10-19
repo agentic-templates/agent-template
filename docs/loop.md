@@ -40,6 +40,10 @@ To give a builder something, such as a correction or a reviewer's errors, send i
 `scripts/loop/run-builder` started can't take messages. Wait until its run ends, and then start a new agent of the
 type `builder` on its pull request instead, or on its issue if it opened none.
 
+Start the prompt of each agent with a line that names its work: for an issue, the line that `scripts/take-next-issue`
+printed, and for a pull request, its number alone. `scripts/loop/report` reads that line to tell which issue or pull
+request each agent worked on.
+
 ### Take in
 
 - **Messages.** Read the maintainer's messages in this session, and the issues and comments that they wrote on GitHub
@@ -84,8 +88,7 @@ Start an agent for each ready issue, as far as "Read the meter" allows:
    in AGENTS.md describes.
 3. Otherwise, start a background agent of the type that fits the issue: `researcher` for a `research` issue, and
    otherwise the builder type whose description fits the change. Don't give it a model, so that it runs at its type's
-   model and effort. Its prompt is the line that `scripts/take-next-issue` printed, and the files to start from if
-   you know them.
+   model and effort. After its prompt's first line, name the files to start from if you know them.
 
 After each issue, go back to step 1. Start an auditor too when "Start a retrospective" says so.
 
@@ -158,8 +161,8 @@ agent's report is.
 
 - `scripts/loop/run-builder <issue> <kind> --tool codex --account <name>` for a Codex account, which builds only the
   kinds `research` and `other`
-- `scripts/loop/run-builder <issue> <kind> --tool claude --account <name> --model <model> --effort <effort>` for a
-  Claude account, with the model and effort in the agent file in `.claude/agents/` for the type that you chose
+- `scripts/loop/run-builder <issue> <kind> --tool claude --account <name> --type <type>` for a Claude account, with
+  the type that fits the issue, as step 3 of "Launch" chooses it
 
 If no account can take the issue that `scripts/take-next-issue` gave you, remove your assignment from it. Then run
 the script again, followed by the number of each issue that no account can take, such as

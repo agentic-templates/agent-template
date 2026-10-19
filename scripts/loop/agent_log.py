@@ -1,0 +1,178 @@
+"""Writes the lines of agents.jsonl in the loop folder: one when an agent starts, and one each time it ends.
+scripts/loop/agent-log writes them for the agents of a Claude Code session, and scripts/loop/run-builder for its runs.
+Nothing trims the file, because Claude Code deletes the transcripts that hold some of the numbers after 30 days.
+
+Each line is a JSON object. A start line holds:
+
+  at              the time
+  event           "start"
+  id              the id of the Agent call that started the agent, or the name of the run's folder in .loop/runs
+  type            the agent's type, such as builder, or codex for a run of Codex
+  model, effort   the model and effort that the Agent call gave, or else those in the type's agent file, or null
+  agent_file      git's hash of the type's agent file, .claude/agents/<type>.md, or null if the type has none
+  issue           the number at the start of the prompt's first line, of an issue or a pull request, or null
+  label           the issue's type label, such as feature, or null
+  kind            the kind after the number, as scripts/take-next-issue prints it, or null
+  test            true for a test build of a retrospective, and for the agents that it starts, which run with the
+                  environment variable LOOP_TEST_BUILD set
+
+An end line holds at, "end" as its event, the start line's id, and:
+
+  minutes         the agent's minutes, from each prompt or message that it received to its last call before the next
+                  one, or a Codex run's minutes
+  tool_calls      the agent's tool calls
+  tokens          the tokens that the agent used, cached tokens too. For an agent of a session, the transcript gives
+                  each reply's output tokens as of the reply's start, so the count leaves out most output tokens. Its
+                  input and cached tokens are right. A run of scripts/loop/run-builder gives the final count.
+  pull_request    the number of the pull request that the agent opened, or null
+  worktree_mb     the size of the agent's worktree in megabytes, or null if it had none
+  cpu_seconds     a run's CPU time, which only scripts/loop/run-builder gives
+  peak_memory_mb  the most memory that a process of the run used, which only scripts/loop/run-builder gives
+
+An agent that gets a message after it ended ends again, so its last end line counts.
+"""
+
+import datetime as dt
+import json
+import re
+import subprocess
+from pathlib import Path
+from typing import Any, NamedTuple
+
+import paths
+import transcripts
+
+# The checkout that holds this file. Its agent files are those that the agents run with.
+CHECKOUT = Path(__file__).resolve().parents[2]
+AGENTS_FOLDER = CHECKOUT / ".claude" / "agents"
+# The kinds that scripts/take-next-issue prints.
+KIND = re.compile(r"research|parent|other|left behind [1-9][0-9]*")
+# The line that scripts/take-next-issue printed, such as 12 other, or a pull request's number alone.
+SUBJECT = re.compile(rf"([1-9][0-9]*)(?: ({KIND.pattern}))?")
+BYTES_IN_A_MEGABYTE = 1_000_000
+TEST_VARIABLE = "LOOP_TEST_BUILD"
+
+
+class AgentSettings(NamedTuple):
+    model: str | None
+    effort: str | None
+    file_hash: str | None
+    # The text after the front matter
+    instructions: str = ""
+
+
+class Numbers(NamedTuple):
+    minutes: float
+    tool_calls: int
+    tokens: int
+    pull_request: int | None
+
+
+def agent_settings(agent_type: str) -> AgentSettings:
+    """The model, effort and instructions in the type's agent file, and git's hash of the file. A type without a file,
+    such as Claude Code's Explore, has none of them."""
+    file = AGENTS_FOLDER / f"{agent_type}.md"
+    if not file.is_file():
+        return AgentSettings(None, None, None)
+    fields, instructions = split_agent_file(file.read_text())
+    file_hash = subprocess.run(
+        ["git", "hash-object", str(file)], cwd=file.parent, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    return AgentSettings(fields.get("model"), fields.get("effort"), file_hash, instructions)
+
+
+def split_agent_file(text: str) -> tuple[dict[str, str], str]:
+    """The fields of the front matter at the start of an agent file, the lines of name: value between two lines of
+    ---, and the text after it."""
+    lines = text.splitlines()
+    if not lines or lines[0] != "---":
+        return {}, text.strip()
+    fields: dict[str, str] = {}
+    for index, line in enumerate(lines[1:], start=2):
+        if line == "---":
+            return fields, "\n".join(lines[index:]).strip()
+        name, _, value = line.partition(":")
+        fields[name.strip()] = value.strip()
+    return fields, ""
+
+
+def prompt_subject(prompt: str) -> tuple[int | None, str | None]:
+    """The number and the kind that the first line of an agent's prompt gives, or None for each that it lacks."""
+    found = SUBJECT.fullmatch(prompt.split("\n", 1)[0].strip())
+    if not found:
+        return None, None
+    return int(found[1]), found[2]
+
+
+def type_label(labels: list[str]) -> str | None:
+    """The first of an issue's labels that is a type label, as scripts/issue-labels lists them, or None."""
+    listed = subprocess.run(
+        ["bash", "-c", 'source "$0" && printf "%s\\n" "${type_labels[@]}"', CHECKOUT / "scripts" / "issue-labels"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    type_labels = listed.stdout.split()
+    return next((label for label in labels if label in type_labels), None)
+
+
+def transcript_numbers(transcript: Path) -> Numbers:
+    calls, prompts = transcripts.read_transcript(transcript)
+    return Numbers(
+        minutes=round(transcripts.working_minutes(calls, prompts), 1),
+        tool_calls=sum(call.tool_calls for call in calls),
+        tokens=sum(call.tokens for call in calls),
+        pull_request=transcripts.opened_pull_request(transcript),
+    )
+
+
+def folder_megabytes(folder: Path) -> float | None:
+    """The disk space that a folder takes, or None if it doesn't exist."""
+    if not folder.is_dir():
+        return None
+    done = subprocess.run(["du", "-sk", str(folder)], capture_output=True, text=True, check=True)
+    return megabytes(int(done.stdout.split()[0]) * 1024)
+
+
+def megabytes(size: int) -> float:
+    return round(size / BYTES_IN_A_MEGABYTE, 1)
+
+
+def start_line(
+    agent_id: str,
+    agent_type: str,
+    settings: AgentSettings,
+    issue: int | None,
+    label: str | None,
+    kind: str | None,
+    is_test: bool,
+) -> dict[str, Any]:
+    return {
+        "at": now(),
+        "event": "start",
+        "id": agent_id,
+        "type": agent_type,
+        "model": settings.model,
+        "effort": settings.effort,
+        "agent_file": settings.file_hash,
+        "issue": issue,
+        "label": label,
+        "kind": kind,
+        "test": is_test,
+    }
+
+
+def end_line(agent_id: str, numbers: Numbers, worktree_mb: float | None, **run: float) -> dict[str, Any]:
+    """The end line, with a run's CPU time and peak memory when they're given."""
+    return {"at": now(), "event": "end", "id": agent_id, **numbers._asdict(), "worktree_mb": worktree_mb, **run}
+
+
+def append(line: dict[str, Any]) -> None:
+    folder = paths.loop_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    with (folder / "agents.jsonl").open("a") as handle:
+        handle.write(json.dumps(line) + "\n")
+
+
+def now() -> str:
+    return dt.datetime.now().astimezone().isoformat(timespec="seconds")

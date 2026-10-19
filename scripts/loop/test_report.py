@@ -14,21 +14,23 @@ from typing import Any
 from unittest import mock
 
 import paths
+from test_transcripts import START, at, call_line
 
 REPORT = Path(__file__).with_name("report")
 # The report's file name has no .py, so the tests load it by its path.
 report = types.ModuleType("report")
 importlib.machinery.SourceFileLoader("report", str(REPORT)).exec_module(report)
 
-SINCE = dt.datetime(2026, 10, 11, 14, 0, tzinfo=dt.UTC)
+SINCE = START
 
 # A stand-in for gh. It writes each call's arguments to calls.jsonl in STANDIN_DIR. For a list of runs it prints the
-# lines under "runs" in gh.json. For a GraphQL query it gives the jobs under "jobs" for each id that the query names,
-# and no node for an id that "jobs" doesn't hold.
+# lines under "runs" in gh.json. For a GraphQL query of runs it gives the jobs under "jobs" for each id that the query
+# names, and no node for an id that "jobs" doesn't hold. For a query of pull requests it gives the facts under
+# "pull_requests" for each number that the query names.
 # An answer under "fail" makes each call print it to stderr and exit with code 1. -S keeps coverage, which starts in
 # each Python process of the tests, out of the stand-in.
 STANDIN = f"""#!{sys.executable} -S
-import json, os, sys
+import json, os, re, sys
 folder = os.environ["STANDIN_DIR"]
 with open(os.path.join(folder, "calls.jsonl"), "a") as log:
     log.write(json.dumps(sys.argv[1:]) + "\\n")
@@ -36,7 +38,12 @@ answers = json.load(open(os.path.join(folder, "gh.json")))
 if "fail" in answers:
     sys.stderr.write(answers["fail"])
     sys.exit(1)
-if sys.argv[2] == "graphql":
+query = next((argument for argument in sys.argv if argument.startswith("query=")), "")
+if "pullRequest(" in query:
+    numbers = re.findall(r"pr([0-9]+): pullRequest", query)
+    facts = {{"pr" + number: answers["pull_requests"][number] for number in numbers}}
+    print(json.dumps({{"data": {{"repository": facts}}}}))
+elif sys.argv[2] == "graphql":
     ids = [argument.removeprefix("ids[]=") for argument in sys.argv if argument.startswith("ids[]=")]
     jobs = answers["jobs"]
     nodes = [{{"checkSuite": {{"checkRuns": {{"nodes": jobs[id]}}}}}} if id in jobs else None for id in ids]
@@ -46,25 +53,8 @@ else:
 """
 
 
-def at(minutes: float) -> str:
-    """The time that many minutes after SINCE."""
-    return (SINCE + dt.timedelta(minutes=minutes)).isoformat()
-
-
 def job(name: str, minutes: float, conclusion: str = "SUCCESS") -> dict[str, str]:
     return {"name": name, "startedAt": at(0), "completedAt": at(minutes), "conclusion": conclusion}
-
-
-def prompt_line(minute: float, content: Any = "Build the issue.") -> dict[str, Any]:
-    """A transcript's line for a prompt or a message that a session or an agent received."""
-    return {"type": "user", "timestamp": at(minute), "message": {"role": "user", "content": content}}
-
-
-def call_line(call: str, minute: float, tokens: int = 0, tool_calls: int = 0) -> dict[str, Any]:
-    """A transcript's line for a call, with the tokens as its input."""
-    content: list[dict[str, str]] = [{"type": "text"}] + [{"type": "tool_use"}] * tool_calls
-    usage = {"input_tokens": tokens, "output_tokens": None}
-    return {"type": "assistant", "timestamp": at(minute), "message": {"id": call, "usage": usage, "content": content}}
 
 
 class ReportTest(unittest.TestCase):
@@ -94,10 +84,32 @@ class ReportTest(unittest.TestCase):
         self.project.mkdir(parents=True)
         self.runs: list[dict[str, str]] = []
         self.jobs: dict[str, list[dict[str, str]]] = {}
+        self.pull_requests: dict[str, dict[str, Any]] = {}
         self.answer()
 
     def answer(self) -> None:
-        (self.standins / "gh.json").write_text(json.dumps({"runs": self.runs, "jobs": self.jobs}))
+        answers = {"runs": self.runs, "jobs": self.jobs, "pull_requests": self.pull_requests}
+        (self.standins / "gh.json").write_text(json.dumps(answers))
+
+    def add_pull_request(
+        self,
+        number: int,
+        commit_minutes: tuple[float, ...] = (1,),
+        conclusions: tuple[str | None, ...] = (),
+        removals: int = 0,
+    ) -> None:
+        """Gives GitHub's facts about a pull request: its commits, each with check suites of the conclusions, and the
+        number of times that the merge queue removed it."""
+        suites = {"nodes": [{"conclusion": conclusion} for conclusion in conclusions]}
+        commits = [{"commit": {"committedDate": at(minute), "checkSuites": suites}} for minute in commit_minutes]
+        self.pull_requests[str(number)] = {
+            "commits": {"nodes": commits},
+            "timelineItems": {"filteredCount": removals},
+        }
+        self.answer()
+
+    def log_agents(self, *lines: dict[str, Any]) -> None:
+        (self.loop / "agents.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
 
     def add_run(self, minutes: float, *jobs: dict[str, str]) -> None:
         node = f"run-{len(self.runs)}"
@@ -145,7 +157,7 @@ class EmptyPeriodTest(ReportTest):
                 [
                     "Since 2026-10-11T14:00:00+00:00",
                     "CI runs that passed: 0",
-                    "Builders: 0",
+                    "Types: no agent started",
                     "Orchestrator's share of the tokens: none used",
                     "Hook blocks: 0",
                 ],
@@ -196,45 +208,195 @@ class CiTest(ReportTest):
         self.assertEqual(self.run_report(), (1, [], error))
 
 
-class BuilderTest(ReportTest):
-    def test_gives_the_number_of_builders_and_the_median_of_their_minutes_and_tool_calls(self) -> None:
-        self.transcript("session", [])
-        builders = {"builder-small": (10, 4), "builder": (20, 6), "builder-deep": (60, 30)}
-        for agent_type, (minutes, tool_calls) in builders.items():
-            lines = [call_line(f"{agent_type}-1", 1, tool_calls=tool_calls), call_line(f"{agent_type}-2", 1 + minutes)]
-            self.transcript(agent_type, lines, session="session", agent_type=agent_type)
-        self.transcript("reviewer", [call_line("r", 1, tool_calls=99)], session="session", agent_type="reviewer")
-        self.transcript("unnamed", [call_line("u", 1, tool_calls=99)], session="session")
-        self.assertEqual(self.line("Builders"), "Builders: 3, median 20.0 min and 6 tool calls")
+def start(
+    agent_id: str,
+    minute: float,
+    agent_type: str = "builder",
+    issue: int | None = None,
+    kind: str | None = None,
+    label: str | None = None,
+) -> dict[str, Any]:
+    """A start line of agents.jsonl."""
+    return {
+        "at": at(minute),
+        "event": "start",
+        "id": agent_id,
+        "type": agent_type,
+        "model": "opus",
+        "effort": "high",
+        "agent_file": None,
+        "issue": issue,
+        "label": label,
+        "kind": kind,
+        "test": False,
+    }
 
-    def test_counts_the_minutes_from_each_message_to_the_last_call_before_the_next(self) -> None:
-        self.transcript("session", [])
-        lines = [
-            prompt_line(0),
-            call_line("a", 1),
-            {"type": "user", "timestamp": at(2), "message": {"content": [{"type": "tool_result"}]}},
-            call_line("b", 10),
-            prompt_line(70, [{"type": "text", "text": "Fix the review's findings."}]),
-            call_line("c", 71),
-            call_line("d", 75),
-        ]
-        self.transcript("builder", lines, session="session", agent_type="builder")
-        self.assertEqual(self.line("Builders"), "Builders: 1, median 15.0 min and 0 tool calls")
 
-    def test_adds_up_the_tool_calls_on_each_line_of_a_response(self) -> None:
-        self.transcript("session", [])
-        lines = [call_line("a", 1, tool_calls=1), call_line("a", 2, tool_calls=2), call_line("b", 3, tool_calls=1)]
-        self.transcript("builder", lines, session="session", agent_type="builder")
-        self.assertEqual(self.line("Builders"), "Builders: 1, median 2.0 min and 4 tool calls")
+def end(
+    agent_id: str,
+    minute: float,
+    minutes: float = 1,
+    tool_calls: int = 1,
+    tokens: int = 1,
+    pull_request: int | None = None,
+) -> dict[str, Any]:
+    """An end line of agents.jsonl."""
+    numbers = {"minutes": minutes, "tool_calls": tool_calls, "tokens": tokens, "pull_request": pull_request}
+    return {"at": at(minute), "event": "end", "id": agent_id, **numbers, "worktree_mb": 1.5}
 
-    def test_counts_only_the_calls_that_started_after_the_time(self) -> None:
-        self.transcript("session", [])
-        lines = [call_line("before", -30, tool_calls=5), call_line("after", 1, tool_calls=1), call_line("last", 11)]
-        self.transcript("builder", lines, session="session", agent_type="builder")
-        old = self.transcript("old", [call_line("old", 1, tool_calls=7)], session="session", agent_type="builder")
-        modified = (SINCE - dt.timedelta(minutes=1)).timestamp()
-        os.utime(old, (modified, modified))
-        self.assertEqual(self.line("Builders"), "Builders: 1, median 10.0 min and 1 tool calls")
+
+class TypeTest(ReportTest):
+    def test_gives_how_many_of_each_type_started_and_ended_and_the_medians_of_those_that_ended(self) -> None:
+        self.log_agents(
+            start("a", 1),
+            start("b", 2),
+            start("c", 3),
+            start("d", 4),
+            start("r", 5, agent_type="reviewer"),
+            end("a", 11, minutes=10, tool_calls=4, tokens=1000),
+            end("b", 22, minutes=20, tool_calls=6, tokens=2000),
+            end("c", 63, minutes=60, tool_calls=30, tokens=3000),
+            end("r", 6, minutes=1, tool_calls=99, tokens=2000),
+        )
+        self.add_pull_request(57)
+        status, lines, errors = self.run_report()
+        self.assertEqual((status, errors), (0, ""))
+        self.assertEqual(
+            [line for line in lines if line.startswith("Type")],
+            [
+                (
+                    "Type builder: 4 started, 3 ended, median 20.0 min and 6 tool calls, 75% of the agents' tokens "
+                    "| pull requests: 0"
+                ),
+                (
+                    "Type reviewer: 1 started, 1 ended, median 1.0 min and 99 tool calls, 25% of the agents' tokens "
+                    "| pull requests: 0"
+                ),
+            ],
+        )
+
+    def test_counts_only_the_agents_that_started_after_the_time(self) -> None:
+        self.log_agents(start("old", -10), end("old", 5, tokens=5000), start("new", 1), end("new", 6, tokens=1000))
+        self.assertEqual(
+            self.line("Type"),
+            "Type builder: 1 started, 1 ended, median 1.0 min and 1 tool calls, 100% of the agents' tokens "
+            "| pull requests: 0",
+        )
+
+    def test_leaves_out_the_test_builds_of_a_retrospective(self) -> None:
+        test_build = {**start("t", 1, issue=12, kind="other"), "test": True}
+        self.log_agents(test_build, end("t", 9, pull_request=57), start("ra", 20, agent_type="reviewer", issue=57))
+        status, lines, errors = self.run_report("--since", SINCE.isoformat(), "--issues")
+        self.assertEqual((status, errors), (0, ""))
+        self.assertEqual(
+            [line for line in lines if line.startswith(("Type", "Issue"))],
+            ["Type reviewer: 1 started, 0 ended | pull requests: 0"],
+        )
+
+    def test_counts_the_last_end_of_an_agent_that_ended_again_after_a_message(self) -> None:
+        self.log_agents(start("a", 1), end("a", 10, minutes=9, tool_calls=5), end("a", 30, minutes=15, tool_calls=8))
+        self.assertIn("1 started, 1 ended, median 15.0 min and 8 tool calls", self.line("Type"))
+
+    def test_gives_a_type_whose_agents_have_not_ended_and_one_whose_agents_used_no_tokens(self) -> None:
+        self.log_agents(start("a", 1), start("x", 2, agent_type="Explore"), end("x", 3, tokens=0))
+        status, lines, errors = self.run_report()
+        self.assertEqual((status, errors), (0, ""))
+        self.assertEqual(
+            [line for line in lines if line.startswith("Type")],
+            [
+                (
+                    "Type Explore: 1 started, 1 ended, median 1.0 min and 1 tool calls, 0% of the agents' tokens "
+                    "| pull requests: 0"
+                ),
+                "Type builder: 1 started, 0 ended | pull requests: 0",
+            ],
+        )
+
+    def test_counts_what_happened_to_the_pull_requests_that_the_agents_of_a_type_opened(self) -> None:
+        self.log_agents(
+            # #57 got a commit after a reviewer started on it.
+            start("a", 0, issue=12, kind="other"),
+            end("a", 9, pull_request=57),
+            start("ra", 20, agent_type="reviewer", issue=57),
+            # #58 got its commits before its reviewer started, failed a check, and left the merge queue.
+            start("b", 0, issue=13, kind="other"),
+            end("b", 9, pull_request=58),
+            start("rb", 20, agent_type="reviewer", issue=58),
+            # #59 got a second builder on its issue, and #60 one on the pull request.
+            start("c", 0, issue=14, kind="other"),
+            end("c", 9, pull_request=59),
+            start("c2", 40, issue=14, kind="other"),
+            start("d", 0, issue=15, kind="other"),
+            end("d", 9, pull_request=60),
+            start("rd", 20, agent_type="reviewer", issue=60),
+            start("d2", 40, agent_type="builder-deep", issue=60),
+            # A builder of the issue that started before the one that opened the pull request isn't a second one.
+            start("e1", 0, issue=16, kind="other"),
+            start("e", 5, issue=16, kind="other"),
+            end("e", 9, pull_request=61),
+        )
+        self.add_pull_request(57, commit_minutes=(8, 30))
+        self.add_pull_request(58, commit_minutes=(8, 10), conclusions=("CANCELLED", "FAILURE", None), removals=2)
+        self.add_pull_request(59, commit_minutes=(8, 50), conclusions=("CANCELLED", "SUCCESS"))
+        self.add_pull_request(60, commit_minutes=(8, 50), conclusions=("TIMED_OUT",))
+        self.add_pull_request(61, conclusions=("STARTUP_FAILURE",), removals=1)
+        self.assertEqual(
+            self.line("Type builder:"),
+            "Type builder: 7 started, 5 ended, median 1.0 min and 1 tool calls, 100% of the agents' tokens "
+            "| pull requests: 5, 2 needed a fix after review, 3 failed a check, 2 left the merge queue, "
+            "2 got a second builder",
+        )
+
+    def test_asks_for_the_facts_of_25_pull_requests_at_a_time(self) -> None:
+        lines = []
+        for number in range(1, 27):
+            lines += [start(f"a{number}", 1), end(f"a{number}", 2, pull_request=number)]
+            self.add_pull_request(number)
+        self.log_agents(*lines)
+        self.assertIn("| pull requests: 26, 0 needed a fix after review", self.line("Type"))
+        queries = [call for call in self.calls() if any("pullRequest(" in argument for argument in call)]
+        self.assertEqual([sum(argument.count("pullRequest(") for argument in query) for query in queries], [25, 1])
+        self.assertIn("owner={owner}", queries[0])
+
+    def test_lists_each_agent_that_built_an_issue_with_the_issues_option(self) -> None:
+        self.log_agents(
+            start("a", 0, issue=12, kind="other", label="feature"),
+            end("a", 9, minutes=8.5, tool_calls=40, tokens=1200, pull_request=57),
+            start("ra", 20, agent_type="reviewer", issue=57),
+            start("b", 1, agent_type="builder-small", issue=13, kind="left behind 31", label="bug"),
+            end("b", 9, minutes=3, tool_calls=10, tokens=300, pull_request=58),
+            start("c", 2, issue=14, kind="other", label="maintenance"),
+            end("c", 9, minutes=4, tool_calls=11, tokens=400),
+            start("d", 3, issue=15, kind="other", label="feature"),
+            start("research", 4, agent_type="researcher", issue=16, kind="research", label="research"),
+            end("research", 9),
+        )
+        self.add_pull_request(57, commit_minutes=(8, 30), conclusions=("FAILURE",))
+        self.add_pull_request(58)
+        status, lines, errors = self.run_report("--since", SINCE.isoformat(), "--issues")
+        self.assertEqual((status, errors), (0, ""))
+        self.assertEqual(
+            [line for line in lines if line.startswith("Issue")],
+            [
+                (
+                    "Issue #12 feature other: builder, 8.5 min, 40 tool calls, 1200 tokens "
+                    "| pull request #57: needed a fix after review, failed a check"
+                ),
+                (
+                    "Issue #13 bug left behind 31: builder-small, 3.0 min, 10 tool calls, 300 tokens "
+                    "| pull request #58: no fix after review, failed check, removal from the merge queue or second builder"
+                ),
+                "Issue #14 maintenance other: builder, 4.0 min, 11 tool calls, 400 tokens | no pull request",
+                "Issue #15 feature other: builder, not ended",
+            ],
+        )
+
+    def test_fails_with_what_gh_printed_when_gh_cannot_give_a_pull_request(self) -> None:
+        self.log_agents(start("a", 1), end("a", 2, pull_request=45))
+        (self.standins / "gh.json").write_text(json.dumps({"fail": "Could not resolve to a PullRequest\n"}))
+        status, lines, errors = self.run_report()
+        self.assertEqual((status, lines), (1, []))
+        self.assertIn("Could not resolve to a PullRequest", errors)
 
 
 class OrchestratorTest(ReportTest):
@@ -262,6 +424,14 @@ class OrchestratorTest(ReportTest):
         os.utime(earlier, (modified, modified))
         self.transcript("resumed", [call_line("s", 1, tokens=1000), call_line("t", 6, tokens=1000)])
         self.transcript("builder", [call_line("b", 1, tokens=2000)], session="resumed", agent_type="builder")
+        self.assertEqual(self.line("Orchestrator"), "Orchestrator's share of the tokens: 50%")
+
+    def test_counts_only_the_calls_that_started_after_the_time(self) -> None:
+        self.transcript("session", [call_line("before", -30, tokens=5000), call_line("after", 1, tokens=1000)])
+        self.transcript("builder", [call_line("b", 1, tokens=1000)], session="session", agent_type="builder")
+        old = self.transcript("old", [call_line("old", 1, tokens=7000)], session="session", agent_type="builder")
+        modified = (SINCE - dt.timedelta(minutes=1)).timestamp()
+        os.utime(old, (modified, modified))
         self.assertEqual(self.line("Orchestrator"), "Orchestrator's share of the tokens: 50%")
 
     def test_skips_the_lines_that_hold_no_call(self) -> None:

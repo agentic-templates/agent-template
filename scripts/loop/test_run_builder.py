@@ -1,9 +1,12 @@
 import contextlib
+import datetime as dt
 import functools
+import hashlib
 import importlib.machinery
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -14,7 +17,9 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import agent_log
 from test_paths import GIT_ENVIRONMENT
+from test_transcripts import call_line, command_line, prompt_line, result_line
 
 RUN_BUILDER = Path(__file__).with_name("run-builder")
 SCRIPTS = RUN_BUILDER.parents[1]
@@ -81,6 +86,7 @@ GIT_HOOKS = ("post-checkout", "pre-commit", "pre-push")
 SAVE_SUBJECT = "chore: save the unfinished work of a stopped session"
 # A pull request that the branch has already, as gh pr list gives it.
 OWN_PULL_REQUEST = {"number": 6, "isCrossRepository": False, "isDraft": False, "autoMergeRequest": None}
+BUILDER_FILE = "---\nname: builder\ndescription: Builds one issue.\nmodel: opus\neffort: high\n---\n\nBuild it.\n"
 
 
 def lines(*events: object) -> str:
@@ -167,6 +173,12 @@ class RunBuilderTest(unittest.TestCase):
         os.chdir(self.repo)
         self.worktree = self.repo / ".claude" / "worktrees" / "run-12"
         (self.loop / "accounts.json").write_text(json.dumps({"accounts": ACCOUNTS}))
+        self.agents = self.root / "agents"
+        self.agents.mkdir()
+        (self.agents / "builder.md").write_text(BUILDER_FILE)
+        agents_folder = mock.patch.object(agent_log, "AGENTS_FOLDER", self.agents)
+        agents_folder.start()
+        self.addCleanup(agents_folder.stop)
         self.answers: dict[str, dict[str, list[dict[str, Any]]]] = {
             "gh": {
                 "repo view": [{"stdout": "owner/repo\n"}],
@@ -199,12 +211,20 @@ class RunBuilderTest(unittest.TestCase):
     def answer(self, tool: str, start: str, *answers: dict[str, Any]) -> None:
         self.answers[tool][start] = list(answers)
 
-    def run_builder(self, *arguments: str, kind: str = "other") -> tuple[int, str, str]:
+    def run_builder(
+        self, *arguments: str, kind: str = "other", agent_type: str | None = "builder"
+    ) -> tuple[int, str, str]:
+        """Runs the script for issue 12, with --type for a Claude builder."""
+        if "claude" in arguments and agent_type:
+            arguments = (*arguments, "--type", agent_type)
         (self.standins / "answers.json").write_text(json.dumps(self.answers))
         printed, errors = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(errors):
             status = run_builder.main(["12", *kind.split(), *arguments])
         return status, printed.getvalue(), errors.getvalue()
+
+    def agent_lines(self) -> list[dict[str, Any]]:
+        return [json.loads(line) for line in (self.loop / "agents.jsonl").read_text().splitlines()]
 
     def calls(self, tool: str, start: str | None = None) -> list[dict[str, Any]]:
         log = self.standins / "calls.jsonl"
@@ -362,14 +382,15 @@ class ClaudeTest(RunBuilderTest):
             "CLAUDE_CONFIG_DIR": "/c",
         }
         with mock.patch.dict(os.environ, caller):
-            status, printed, errors = self.run_builder("--tool", "claude", "--model", "opus", "--effort", "high")
+            status, printed, errors = self.run_builder("--tool", "claude")
         self.assertEqual((status, errors), (0, ""))
         report = self.run_folder() / "report.md"
         self.assertRegex(printed, rf"^issue 12 \| claude main \| finished \| [0-9.]+ min \| report {report}\n$")
         self.assertEqual(report.read_text(), "Opened pull request #5.")
         [call] = self.calls("claude")
         brief = (self.run_folder() / "brief.md").read_text()
-        self.assertEqual(call["args"], [*run_builder.CLAUDE_COMMAND[1:], "--model", "opus", "--effort", "high", brief])
+        settings = ["--model", "opus", "--effort", "high", "--append-system-prompt", "Build it."]
+        self.assertEqual(call["args"], [*run_builder.CLAUDE_COMMAND[1:], *settings, brief])
         self.assertTrue(brief.startswith("Issue #12: Fix the importer\n\nIt drops rows.\n"))
         self.assertIn(
             'of the kind `other`, for the orchestrator of this repository\'s loop. Read only\n"Build one issue"', brief
@@ -422,6 +443,213 @@ class ClaudeTest(RunBuilderTest):
         self.assertEqual(status, 1)
         self.assertIn("| failed: claude's result is error_during_execution: Disk full |", printed)
         self.assertFalse((self.run_folder() / "report.md").exists())
+
+
+class TypeTest(RunBuilderTest):
+    def test_stops_a_claude_builder_without_a_type(self) -> None:
+        status, printed, errors = self.run_builder("--tool", "claude", agent_type=None)
+        self.assertEqual((status, printed), (1, ""))
+        self.assertEqual(
+            errors,
+            "error: a Claude builder needs the agent type whose model and effort it runs with. Add --type, such as "
+            "--type builder.\n",
+        )
+        self.assertEqual((self.calls("claude"), (self.loop / "agents.jsonl").exists()), ([], False))
+
+    def test_stops_a_claude_builder_whose_type_has_no_agent_file(self) -> None:
+        status, _, errors = self.run_builder("--tool", "claude", agent_type="builder-huge")
+        self.assertEqual(status, 1)
+        self.assertEqual(
+            errors,
+            "error: there's no agent file .claude/agents/builder-huge.md for the type builder-huge. Give a type that "
+            ".claude/agents has.\n",
+        )
+
+    def test_stops_a_codex_builder_that_gets_a_type_or_a_test(self) -> None:
+        message = (
+            "error: a Codex builder runs with Codex's own model and effort, so it takes neither --type nor --test. "
+            "Leave them out.\n"
+        )
+        for options in (["--type", "builder"], ["--test", "7"]):
+            with self.subTest(options=options):
+                self.assertEqual(self.run_builder("--tool", "codex", *options), (1, "", message))
+
+    def test_runs_claude_without_the_settings_that_the_agent_file_lacks(self) -> None:
+        (self.agents / "builder-small.md").write_text("---\nname: builder-small\nmodel: sonnet\n---\n")
+        status, _, _ = self.run_builder("--tool", "claude", agent_type="builder-small")
+        self.assertEqual(status, 0)
+        [call] = self.calls("claude")
+        self.assertEqual(call["args"][len(run_builder.CLAUDE_COMMAND) - 1 : -1], ["--model", "sonnet"])
+
+
+class AgentLinesTest(RunBuilderTest):
+    """The lines that a run adds to agents.jsonl."""
+
+    def start_and_end(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        start, end = self.agent_lines()
+        for line in (start, end):
+            moment = dt.datetime.fromisoformat(line.pop("at"))
+            self.assertLess(abs(dt.datetime.now(dt.UTC) - moment), dt.timedelta(minutes=1))
+        self.assertEqual((start.pop("event"), end.pop("event")), ("start", "end"))
+        self.assertEqual(start.pop("id"), self.run_folder().name)
+        self.assertEqual(end.pop("id"), self.run_folder().name)
+        return start, end
+
+    def assert_run_usage(self, end: dict[str, Any]) -> None:
+        """Checks the CPU time and peak memory, which differ from one run to the next."""
+        self.assertGreaterEqual(end.pop("cpu_seconds"), 0)
+        self.assertGreater(end.pop("peak_memory_mb"), 0)
+
+    def test_gives_a_claude_builders_numbers_from_its_transcript(self) -> None:
+        config = self.root / "claude-config"
+        (self.loop / "accounts.json").write_text(
+            json.dumps({"accounts": [{"name": "main", "tool": "claude", "env": {"CLAUDE_CONFIG_DIR": str(config)}}]})
+        )
+        # Claude Code names a project's folder after its path, with a dash for each character other than a letter or a
+        # digit.
+        transcript = config / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(self.worktree)) / "s1.jsonl"
+        entries = [
+            prompt_line(0),
+            call_line("a", 1, tokens=1000, tool_calls=3),
+            command_line("b", 5, "toolu_9", "gh pr create --fill"),
+            result_line(6, "toolu_9", "https://github.com/owner/repo/pull/5\n"),
+            call_line("c", 12, tokens=500),
+        ]
+        written = {str(transcript): lines(*entries), "big.bin": "x" * 300_000}
+        # A run with a background agent gives a result for each prompt.
+        first = {
+            **RESULT,
+            "usage": {"input_tokens": 4, "cache_creation_input_tokens": 900, "cache_read_input_tokens": 30000},
+        }
+        second = {**RESULT, "usage": {"input_tokens": 2, "cache_read_input_tokens": 1000, "output_tokens": 594}}
+        self.answer("claude", "", {"stdout": lines({**INIT, "session_id": "s1"}, first, second), "write": written})
+        status, _, _ = self.run_builder("--tool", "claude")
+        self.assertEqual(status, 0)
+        start, end = self.start_and_end()
+        self.assertEqual(
+            start,
+            {
+                "type": "builder",
+                "model": "opus",
+                "effort": "high",
+                "agent_file": hashlib.sha1(b"blob %d\0" % len(BUILDER_FILE) + BUILDER_FILE.encode()).hexdigest(),
+                "issue": 12,
+                "label": "bug",
+                "kind": "other",
+                "test": False,
+            },
+        )
+        self.assert_run_usage(end)
+        self.assertGreaterEqual(end.pop("worktree_mb"), 0.3)
+        self.assertEqual(end, {"minutes": 12.0, "tool_calls": 4, "tokens": 32500, "pull_request": 5})
+
+    def test_gives_a_claude_builder_without_a_transcript_no_calls(self) -> None:
+        status, _, _ = self.run_builder("--tool", "claude", kind="left behind 31")
+        self.assertEqual(status, 0)
+        start, end = self.start_and_end()
+        self.assertEqual(start["kind"], "left behind 31")
+        self.assertGreaterEqual(end.pop("minutes"), 0)
+        self.assertEqual(
+            {name: end[name] for name in ("tool_calls", "tokens", "pull_request")},
+            {"tool_calls": 0, "tokens": 0, "pull_request": None},
+        )
+
+    def test_gives_a_codex_builders_numbers_from_its_events(self) -> None:
+        events = [
+            {"type": "thread.started"},
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"type": "reasoning"}},
+            {"type": "item.started", "item": {"type": "command_execution"}},
+            {"type": "item.completed", "item": {"type": "command_execution"}},
+            {"type": "item.completed", "item": {"type": "command_execution"}},
+            {"type": "item.completed", "item": {"type": "file_change"}},
+            {"type": "item.completed", "item": {"type": "agent_message"}},
+            {
+                "type": "turn.completed",
+                "usage": {"input_tokens": 24763, "cached_input_tokens": 24448, "output_tokens": 122},
+            },
+        ]
+        self.answer("codex", "", {"stdout": lines(*events), "write": {"built.txt": "built\n"}, "report": REPORT})
+        status, _, _ = self.run_builder("--tool", "codex")
+        self.assertEqual(status, 0)
+        start, end = self.start_and_end()
+        self.assertEqual(
+            start,
+            {
+                "type": "codex",
+                "model": None,
+                "effort": None,
+                "agent_file": None,
+                "issue": 12,
+                "label": "bug",
+                "kind": "other",
+                "test": False,
+            },
+        )
+        self.assert_run_usage(end)
+        self.assertGreaterEqual(end.pop("minutes"), 0)
+        self.assertGreaterEqual(end.pop("worktree_mb"), 0)
+        self.assertEqual(end, {"tool_calls": 3, "tokens": 24885, "pull_request": 7})
+
+    def test_gives_no_pull_request_to_a_codex_builder_that_pushed_to_the_branchs_own(self) -> None:
+        self.answer("gh", "pr list", {"stdout": json.dumps([OWN_PULL_REQUEST])})
+        status, printed, _ = self.run_builder("--tool", "codex")
+        self.assertEqual(status, 0)
+        self.assertIn("| pull request #6 |", printed)
+        self.assertIsNone(self.agent_lines()[1]["pull_request"])
+
+    def test_ends_a_run_that_failed_before_it_had_a_worktree(self) -> None:
+        self.answer("gh", "issue develop --list", {"stdout": ""})
+        self.answer("gh", "issue develop", {})
+        status, _, _ = self.run_builder("--tool", "claude")
+        self.assertEqual(status, 1)
+        _, end = self.start_and_end()
+        self.assertEqual((end["worktree_mb"], end["pull_request"]), (None, None))
+
+
+class TestBuildTest(RunBuilderTest):
+    """A test build of issue 12, from the commit that its pull request #7 started from."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.base = self.git("rev-parse", "HEAD")
+        (self.repo / "first.txt").write_text("the pull request's first change\n")
+        self.git("add", "first.txt")
+        self.git("commit", "--quiet", "-m", "feat: start the importer")
+        first = self.git("rev-parse", "HEAD")
+        self.git("push", "--quiet", str(self.origin), "HEAD:refs/pull/7/head")
+        self.git("reset", "--quiet", "--hard", self.base)
+        self.answer("gh", "pr view", {"stdout": f"{first}\n"})
+        self.answer("claude", "", {"stdout": lines(INIT, RESULT), "write": {"built.txt": "built\n"}})
+        self.worktree = self.repo / ".claude" / "worktrees" / "test-12-builder"
+
+    def test_builds_the_issue_from_the_commit_that_its_pull_request_started_from_and_keeps_the_diff(self) -> None:
+        status, printed, errors = self.run_builder("--tool", "claude", "--test", "7")
+        self.assertEqual((status, errors), (0, ""))
+        run = self.run_folder()
+        self.assertTrue(run.name.startswith("test-12-builder-"))
+        changes = run / "changes.diff"
+        self.assertRegex(printed, rf"^issue 12 \| claude main \| test finished, changes in {changes} \| [0-9.]+ min \|")
+        [call] = self.calls("claude")
+        self.assertEqual((call["cwd"], call["head"]), (str(self.worktree), self.base))
+        self.assertEqual(call["env"]["LOOP_TEST_BUILD"], "1")
+        self.assertIn("This build is a test", call["args"][-1])
+        self.assertIn("+++ b/built.txt\n@@ -0,0 +1 @@\n+built\n", changes.read_text())
+        self.assertNotIn("first.txt", changes.read_text())
+        self.assertFalse(self.worktree.exists())
+        self.assertEqual(self.git("worktree", "list", "--porcelain").count("worktree "), 1)
+        self.assertEqual(self.origin_git("rev-parse", BRANCH), self.origin_git("rev-parse", "main"))
+        self.assertEqual([call["start"] for call in self.calls("gh")], ["repo view", "issue view", "pr view"])
+        start, end = self.agent_lines()
+        self.assertEqual((start["id"], start["test"], end["id"]), (run.name, True, run.name))
+
+    def test_keeps_the_diff_of_a_test_build_that_failed(self) -> None:
+        self.answer("claude", "", {"stdout": lines(INIT), "status": 1, "write": {"half.txt": "half\n"}})
+        status, printed, _ = self.run_builder("--tool", "claude", "--test", "7")
+        self.assertEqual(status, 1)
+        self.assertIn("| failed: claude ended with code 1 and gave no result.", printed)
+        self.assertIn("+half", (self.run_folder() / "changes.diff").read_text())
+        self.assertFalse(self.worktree.exists())
 
 
 class UnsavedWorkTest(RunBuilderTest):
@@ -529,15 +757,15 @@ class CodexTest(RunBuilderTest):
         self.answer("codex", "", self.codex_answer({"built.txt": "built\n", "git-hooks/pre-push": changed_hook}))
         caller = {"GH_TOKEN": "a", "OPENAI_API_KEY": "b", "SSH_AUTH_SOCK": "c", "MY_PASSWORD": "d", "CODEX_HOME": "/c"}
         with mock.patch.dict(os.environ, caller):
-            status, printed, errors = self.run_builder("--tool", "codex", "--model", "gpt-6", "--effort", "high")
+            status, printed, errors = self.run_builder("--tool", "codex")
         self.assertEqual((status, errors), (0, ""))
         report = self.run_folder() / "report.md"
         self.assertRegex(printed, rf"^issue 12 \| codex work \| pull request #7 \| [0-9.]+ min \| report {report}\n$")
         [call] = self.calls("codex")
         brief = (self.run_folder() / "brief.md").read_text()
         command = ["exec", "--sandbox", "workspace-write", "--cd", str(self.worktree), "--json"]
-        command += ["--output-last-message", str(report), "--model", "gpt-6"]
-        self.assertEqual(call["args"], [*command, "--config", 'model_reasoning_effort="high"', brief])
+        command += ["--output-last-message", str(report)]
+        self.assertEqual(call["args"], [*command, brief])
         self.assertIn("so don't run git or gh.", brief)
         self.assertEqual([name for name in caller if call["env"].get(name, "/codex-work") != "/codex-work"], [])
         self.assertEqual(self.origin_git("log", "-1", "--format=%s", BRANCH), "fix: Fix the importer")
@@ -739,7 +967,18 @@ class CommitSubjectTest(unittest.TestCase):
 class ScriptTest(RunBuilderTest):
     def test_runs_as_a_script(self) -> None:
         done = subprocess.run(
-            [sys.executable, str(RUN_BUILDER), "12", "other", "--tool", "claude", "--account", "nobody"],
+            [
+                sys.executable,
+                str(RUN_BUILDER),
+                "12",
+                "other",
+                "--tool",
+                "claude",
+                "--type",
+                "builder",
+                "--account",
+                "nobody",
+            ],
             capture_output=True,
             text=True,
             check=False,

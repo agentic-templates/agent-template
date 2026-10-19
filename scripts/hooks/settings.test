@@ -4,6 +4,7 @@
 # when they fail on their own, so a broken file or command turns them off in every agent without an error.
 # Also tests that the commands in .claude/settings.json run the hooks of the git worktree that the agent works in,
 # and that the PreToolUse commands in both files run the main checkout's before-tool when the worktree's can't run.
+# The SubagentStop command runs scripts/loop/agent-log, which the tests of scripts/loop test.
 set -euo pipefail
 # shellcheck source=scripts/hooks/testing.bash
 source "${BASH_SOURCE[0]%/*}/testing.bash"
@@ -94,13 +95,13 @@ other=$checkouts/other
 settings=$PWD/.claude/settings.json
 for checkout in "$repository" "$other"; do
   git init --quiet --initial-branch=main "$checkout"
-  mkdir -p "$checkout/scripts/hooks"
-  for hook in before-tool after-tool after-edit session-start; do
+  mkdir -p "$checkout/scripts/hooks" "$checkout/scripts/loop"
+  for hook in hooks/before-tool hooks/after-tool hooks/after-edit hooks/session-start loop/agent-log; do
     # The stand-in reads its input before it prints its path. Otherwise it could exit before the command's printf
     # writes the input, and where SIGPIPE is ignored, as in CI, printf would print an I/O error.
     # shellcheck disable=SC2016 # $0 expands when the hook runs.
-    printf '#!/bin/sh\ncat >/dev/null\necho "$0"\n' >"$checkout/scripts/hooks/$hook"
-    chmod +x "$checkout/scripts/hooks/$hook"
+    printf '#!/bin/sh\ncat >/dev/null\necho "$0"\n' >"$checkout/scripts/$hook"
+    chmod +x "$checkout/scripts/$hook"
   done
   git -C "$checkout" add scripts
   git -C "$checkout" commit --quiet -m "Add the hooks"
@@ -110,14 +111,17 @@ mkdir "$checkouts/plain"
 
 # Checks which hook the commands for an event in .claude/settings.json run from the repository's main checkout:
 # expect_hook <event> <tool> <folder the agent works in> <checkout whose hook must run> [<matcher>]
-# The tool is claude-code, copilot-cli or cursor. For SessionStart, only Claude Code counts, because the hook
-# does nothing in the other tools. For PostToolUse, the matcher picks the commands: Bash or Edit|Write.
+# The tool is claude-code, copilot-cli or cursor. For SessionStart and SubagentStop, only Claude Code counts, because
+# the other tools send no such event. For PostToolUse, the matcher picks the commands: Bash or Edit|Write.
 expect_hook() {
   local event=$1 tool=$2 checkout=$4 matcher=${5:-} input expected encoded_command command output commands=0
   test_cwd=$3
   if [[ $event == SessionStart ]]; then
     input=$(jq -n --arg cwd "$test_cwd" '{session_id: "abc123", cwd: $cwd, hook_event_name: "SessionStart", source: "startup"}')
     expected=$checkout/scripts/hooks/session-start
+  elif [[ $event == SubagentStop ]]; then
+    input=$(jq -n --arg cwd "$test_cwd" '{session_id: "abc123", cwd: $cwd, hook_event_name: "SubagentStop", agent_type: "builder"}')
+    expected=$checkout/scripts/loop/agent-log
   elif [[ $event == PostToolUse && $matcher == Bash ]]; then
     input=$(sample_input "$tool" Bash ls)
     expected=$checkout/scripts/hooks/after-tool
@@ -151,12 +155,14 @@ expect_hook PreToolUse claude-code "$worktree" "$worktree"
 expect_hook PreToolUse copilot-cli "$worktree" "$worktree"
 expect_hook PreToolUse claude-code "$worktree/scripts" "$worktree"
 expect_hook SessionStart claude-code "$worktree" "$worktree"
+expect_hook SubagentStop claude-code "$worktree" "$worktree"
 expect_hook PostToolUse claude-code "$worktree" "$worktree" Bash
 expect_hook PostToolUse claude-code "$worktree" "$worktree" "Edit|Write"
 
 # The main checkout
 expect_hook PreToolUse claude-code "$repository" "$repository"
 expect_hook SessionStart claude-code "$repository" "$repository"
+expect_hook SubagentStop claude-code "$repository" "$repository"
 
 # Cursor doesn't send the folder the agent works in, so the hooks of the folder it runs the command in run.
 expect_hook PreToolUse cursor "$worktree" "$repository"
@@ -164,12 +170,25 @@ expect_hook PreToolUse cursor "$worktree" "$repository"
 # A hook never runs another repository's code, so the hooks of the folder the command runs in run.
 expect_hook PreToolUse claude-code "$other" "$repository"
 expect_hook SessionStart claude-code "$other" "$repository"
+expect_hook SubagentStop claude-code "$other" "$repository"
 expect_hook PostToolUse claude-code "$other" "$repository" Bash
 expect_hook PostToolUse claude-code "$other" "$repository" "Edit|Write"
 
 # A folder outside any repository, and a folder that doesn't exist
 expect_hook PreToolUse claude-code "$checkouts/plain" "$repository"
 expect_hook PreToolUse claude-code "$checkouts/missing" "$repository"
+
+# Claude Code keeps an agent running when the SubagentStop command exits with code 2, so the command turns a failure of
+# scripts/loop/agent-log with that code, as from argparse, into code 1.
+printf '#!/bin/sh\ncat >/dev/null\necho "usage: agent-log" >&2\nexit 2\n' >"$repository/scripts/loop/agent-log"
+subagent_stop_status=0
+(cd "$repository" && HOME=$test_home sh -c "$(jq -r '.hooks.SubagentStop[0].hooks[0].command' "$settings")" \
+  <<<'{"agent_type": "builder"}' >/dev/null 2>&1) || subagent_stop_status=$?
+case_count=$((case_count + 1))
+if ((subagent_stop_status != 1)); then
+  echo "error: When scripts/loop/agent-log exits with code 2, the SubagentStop command in .claude/settings.json must exit with code 1, but it exited with code $subagent_stop_status." >&2
+  failed_cases=$((failed_cases + 1))
+fi
 
 # A before-tool that can't run. bash exits with code 2 when it can't parse a file, such as one with a conflict marker
 # that a merge left, and the tools read code 2 as a block. The stand-ins run stand-in checks in order, as before-tool
