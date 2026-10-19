@@ -33,6 +33,10 @@ background: true
    - the pull requests that needed a fix after their builder first pushed them, such as for a failed check, an error
      that a reviewer found, or a conflict with main
    - the issues that the orchestrator planned again after a builder took them, which lost `ready` then
+   - the maintainer's messages to the orchestrator, which `scripts/loop/report --since <time> --messages` prints, and
+     the issues and comments that they wrote on GitHub. For each one that corrects the loop, or asks for something
+     that the loop should have done without being asked, check that an issue fixed its cause, or fix the cause
+     yourself. The messages aren't public, so describe them in your own words where others read them.
 7. Test the agent types, as "Test the agent types" below describes.
 8. Set `HOURS_PER_RETROSPECTIVE` in `scripts/loop/meter`, the hours of the agents' work that make the next
    retrospective due. Change it only when this retrospective and the one before it point the same way, so that one

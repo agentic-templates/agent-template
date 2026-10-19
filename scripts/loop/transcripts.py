@@ -13,6 +13,9 @@ OUTPUT_KEY = "output_tokens"
 # gh pr new is another name for gh pr create, which prints the new pull request's URL. The URL ends in its number.
 PR_CREATE = re.compile(r"\bgh pr (create|new)\b")
 PULL_REQUEST_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/([1-9][0-9]*)")
+# Claude Code gives each message that a person typed this origin. A task notification, an agent's message, a scheduled
+# prompt such as the loop's heartbeat, a hook's output and a compaction's summary have another origin or none.
+PERSON_ORIGIN = "human"
 
 
 class Call(NamedTuple):
@@ -26,6 +29,11 @@ class Call(NamedTuple):
     tool_calls: int
     # The id of the request to the API, which Claude Code's events give too, or None if the transcript has none
     request_id: str | None = None
+
+
+class Message(NamedTuple):
+    at: dt.datetime
+    text: str
 
 
 def read_transcript(file: Path) -> tuple[list[Call], list[dt.datetime]]:
@@ -99,6 +107,18 @@ def is_prompt(entry: dict[str, Any]) -> bool:
         return False
     content = entry["message"].get("content")
     return not isinstance(content, list) or any(block.get("type") != "tool_result" for block in content)
+
+
+def person_messages(file: Path) -> list[Message]:
+    """The messages that a person typed in a session, in the transcript's order."""
+    messages = []
+    for entry in transcript_entries(file):
+        if entry.get("type") != "user" or (entry.get("origin") or {}).get("kind") != PERSON_ORIGIN:
+            continue
+        content = entry["message"].get("content")
+        text = content if isinstance(content, str) else "\n".join(block["text"] for block in blocks(entry, "text"))
+        messages.append(Message(dt.datetime.fromisoformat(entry["timestamp"]), text))
+    return messages
 
 
 def blocks(entry: dict[str, Any], kind: str) -> list[dict[str, Any]]:
