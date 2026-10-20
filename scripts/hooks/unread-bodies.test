@@ -63,10 +63,19 @@ forget_readings() {
   rm -f "$(git rev-parse --git-path pages-read)"
 }
 
+# Prints the line of the message for gh pr edit that says how to give the reader the posted description:
+# posted_version_step <command>
+posted_version_step() {
+  if [[ $1 == "gh pr edit" ]]; then
+    echo "Save the posted description first with gh pr view <number> --json body --jq .body ><posted file>, and give the reader <posted file> as a third argument."
+  fi
+}
+
 # Prints the message that blocks a command whose body file no reader has read: unread_file <command> <reader> <file>
 unread_file() {
   echo "Blocked: no fresh reader has read this body as it is now. Give the body file to a reader, and change the body as the reader's answer shows, as steps 1 and 2 of \"Review a changed page with a fresh reader\" in docs/pages.md describe:"
   echo "scripts/fresh-reader \"$2\" $3"
+  posted_version_step "$1"
   echo "If you change the body after the reader read it, run the reader again. Then run $1 again."
 }
 
@@ -74,6 +83,7 @@ unread_file() {
 unread_text() {
   echo "Blocked: no fresh reader has read this body as it is now. Write the body to a file, give the file to a reader, and change the body as the reader's answer shows, as steps 1 and 2 of \"Review a changed page with a fresh reader\" in docs/pages.md describe:"
   echo "scripts/fresh-reader \"$2\" <file>"
+  posted_version_step "$1"
   echo "If you change the body after the reader read it, run the reader again. Then run $1 again with --body-file <file>."
 }
 
