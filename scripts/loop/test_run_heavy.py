@@ -278,8 +278,8 @@ class StartTest(RunHeavyTest):
 
         self.clock.actions = [lambda: None, end_build]
         self.write_log(end_line([PYTHON, "-c", "pass"], need(2.0)))
-        seen = self.root / "seen.json"
-        copy_state = f"import shutil, time; time.sleep(0.5); shutil.copy({str(self.heavy / 'state.json')!r}, {str(seen)!r})"
+        state, seen = str(self.heavy / "state.json"), self.root / "seen.json"
+        copy_state = f"import shutil, time; time.sleep(0.5); shutil.copy({state!r}, {str(seen)!r})"
         with mock.patch.object(run_heavy, "SAMPLE_SECONDS", 0.05):
             self.assertEqual(self.run_heavy(PYTHON, "-c", copy_state)[0], 0)
         [waiting] = before_sample
