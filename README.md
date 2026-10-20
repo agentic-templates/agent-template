@@ -59,7 +59,7 @@ You need:
    ```
 
 2. Ask it: **"Start the loop. The goal: the first version of expense-tracker, which adds an expense, lists the expenses and shows the total for each month."** Include your notes or spec again.
-3. The orchestrator splits the goal into issues of one pull request each, and links each issue to the issues it needs first. It adds the `ready` label to each issue that is clear enough to build. It starts agents on the ready issues whose blocking issues are closed, as many as your accounts' usage limits and your machine have room for. Each agent opens a pull request, which merges through the merge queue. When a usage limit stops the work, the orchestrator waits for the reset and goes on.
+3. The orchestrator splits the goal into issues of one pull request each, and links each issue to the issues it needs first. It adds the `ready` label to each issue that is clear enough to build. It starts agents on the ready issues whose blocking issues are closed, as many as your accounts' usage limits have room for. Each agent opens a pull request, which merges through the merge queue. When a usage limit stops the work, the orchestrator waits for the reset and goes on.
 4. When the orchestrator needs your decision, it writes the question in an issue with the `needs-decision` label, with the option it recommends, and sends you a push notification if you set them up. Answer in a comment on the issue. To list the questions that wait for you, run:
 
    ```bash
