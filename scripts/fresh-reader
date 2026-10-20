@@ -8,11 +8,13 @@
 # skills, plugins, hooks and MCP servers, and with no tools. If claude fails, the script runs it once more. If that run
 # fails too, it prints claude's error and exits with code 1. Once the reader answers, the script adds git's hash of the
 # page to the record of the pages read, in the git folder of the current folder's worktree, as
-# scripts/hooks/pages-read.bash describes. Outside a git repository, it records nothing. "Review a changed page with a
-# fresh reader" in docs/pages.md runs it, and a hook blocks gh pr create until the record has each page that the pull
-# request adds or rewrites text in, as the pull request has it. The hook blocks each later git push to the pull
-# request's branch that adds or rewrites text in a page in the same way. Another hook blocks gh issue create,
-# gh issue edit, gh pr create and gh pr edit with a body until the record has the body.
+# scripts/hooks/pages-read.bash describes, and saves the answer in the folder fresh-reader-answers there. A later run
+# that would give the same reader the same text prints the saved answer and records the page again, without claude.
+# Outside a git repository, it records and saves nothing. "Review a changed page with a fresh reader" in docs/pages.md
+# runs it, and a hook blocks gh pr create until the record has each page that the pull request adds or rewrites text in,
+# as the pull request has it. The hook blocks each later git push to the pull request's branch that adds or rewrites
+# text in a page in the same way. Another hook blocks gh issue create, gh issue edit, gh pr create and gh pr edit with a
+# body until the record has the body.
 set -euo pipefail
 # shellcheck source=scripts/hooks/pages-read.bash
 source "$(dirname "$0")/hooks/pages-read.bash"
@@ -63,31 +65,44 @@ fi
 # Outside a git repository, git has no folder for the record, and prints an error that the reader of the answer
 # doesn't need.
 record=""
+answers=""
 if record=$(pages_read_path 2>/dev/null); then
   hashes=$(git hash-object -- "$page")
   hash_as_body=$(body_hash "$(<"$page")")
   if [[ $hash_as_body != "$hashes" ]]; then
     hashes+=$'\n'$hash_as_body
   fi
+  answers=$(git rev-parse --path-format=absolute --git-path fresh-reader-answers)
+  answer_file=$answers/$(git hash-object --stdin <<<"$input")
 fi
 
-folder=$(mktemp -d)
-trap 'rm -rf "$folder"' EXIT
-cd "$folder"
-
-# Runs claude once, and prints what it prints on its output and its error output. claude gets the prompt on its input,
-# because --tools takes each argument after it as the name of a tool.
+# Runs claude once, in an empty temporary folder, and prints what it prints on its output and its error output. claude
+# gets the prompt on its input, because --tools takes each argument after it as the name of a tool.
 ask_reader() {
-  claude -p --safe-mode --tools "" <<<"$input" 2>&1
+  (cd "$folder" && claude -p --safe-mode --tools "" <<<"$input" 2>&1)
 }
 
-# claude fails with an API error now and then, and a second run usually works.
-status=0
-answer=$(ask_reader) || answer=$(ask_reader) || status=$?
-if ((status != 0)); then
-  stop "can't get the reader's answer, because claude failed twice. The second time, it exited with code $status and printed: $answer"
+# A run that would give the same reader the same text prints the saved answer, because agents ran the script again on
+# a page that they hadn't changed, such as when a filter on the output hid the answer, and each run cost a new reader,
+# as issue #310 found.
+if [[ -n $answers && -f $answer_file ]]; then
+  echo "A reader already read this page as it is now, and answered:"
+  cat -- "$answer_file"
+else
+  folder=$(mktemp -d)
+  trap 'rm -rf "$folder"' EXIT
+  # claude fails with an API error now and then, and a second run usually works.
+  status=0
+  answer=$(ask_reader) || answer=$(ask_reader) || status=$?
+  if ((status != 0)); then
+    stop "can't get the reader's answer, because claude failed twice. The second time, it exited with code $status and printed: $answer"
+  fi
+  printf '%s\n' "$answer"
 fi
-printf '%s\n' "$answer"
 if [[ -n $record ]] && ! printf '%s\n' "$hashes" >>"$record"; then
   stop "the reader answered, but scripts/fresh-reader can't record in $record that the reader read $page, and the hooks block a pull request that adds or rewrites text in the page, and an issue or pull request with the page as its body, without that record. Fix the error above, and run scripts/fresh-reader again."
+fi
+if [[ -n $answers && ! -f $answer_file ]] &&
+  ! { mkdir -p -- "$answers" && printf '%s\n' "$answer" >"$answer_file"; }; then
+  stop "the reader answered, but scripts/fresh-reader can't save the answer in $answers, so the next run on the page as it is now would ask a new reader. Fix the error above."
 fi

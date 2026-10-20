@@ -625,6 +625,24 @@ expect_block Bash 'gh repo archive someone/else --yes' "$(other_repository someo
 expect_block Bash 'gh pr comment --body Thanks https://github.com/someone/else/pull/5' "$(other_repository someone/else)"
 expect_block Bash 'gh issue close --comment Done https://github.com/someone/else/issues/5' \
   "$(other_repository someone/else)"
+# -c and --comment of gh pr review, and -c of gh issue develop, take no value, so the URL after them names the
+# repository. -ac of gh pr review is -a and -c, and -ab is -a and -b, which takes the word after it.
+for command in 'gh pr review -c https://github.com/someone/else/pull/5' \
+  'gh pr review --comment https://github.com/someone/else/pull/5' \
+  'gh pr review -b Thanks -ac https://github.com/someone/else/pull/5' \
+  'gh issue develop -c https://github.com/someone/else/issues/5'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+expect_allow Bash 'gh issue close 5 -c https://github.com/someone/else/issues/9'
+expect_allow Bash 'gh pr close 5 --comment https://github.com/someone/else/pull/9'
+expect_allow Bash 'gh pr review 5 -ab https://github.com/someone/else/pull/9'
+# The hooks list no flags of gh project create, whose -t and --template take a value, or of gh project link, whose -T
+# does.
+for command in 'gh project create -t https://github.com/someone/else/issues/9' \
+  'gh project create --template https://github.com/someone/else/issues/9' \
+  'gh project link 5 -T https://github.com/someone/else/issues/9'; do
+  expect_allow Bash "$command"
+done
 expect_block Bash 'gh pr close 5 -R someone/else' "$(other_repository someone/else)"
 expect_block Bash 'GH_REPO=someone/else gh issue comment 5 --body Hello' "$(other_repository someone/else)"
 expect_block Bash 'env GH_REPO=someone/else gh pr comment 5 --body Hello' "$(other_repository someone/else)"
