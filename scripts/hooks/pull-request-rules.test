@@ -464,10 +464,11 @@ expect_allow Bash "cd $worktree && gh pr create --draft --title '$title' --body-
 expect_allow Bash "(cd $worktree) && gh pr create --title '$title' --body-file ../body.md"
 expect_allow Bash "echo \"\$(cd $worktree)\" && gh pr create --title '$title' --body-file ../body.md"
 # After a cd to a folder that a variable names, the hook can't tell the branch, even when the folder that the agent
-# works in is on rules.
+# works in is on rules. The body file has its absolute path, because unpublished-advisories.check can't tell which
+# file a relative path names there.
 git switch --quiet rules
 record_pass
-expect_allow Bash "cd \"\$folder\" && gh pr create --title '$title' --body-file ../body.md"
+expect_allow Bash "cd \"\$folder\" && gh pr create --title '$title' --body-file $base/body.md"
 
 # A branch from a main that has moved on since the clone last fetched it. The commit on main that the clone hasn't
 # fetched changes scripts/configure-github and has a Co-authored-by trailer, and it's no part of the pull request.

@@ -5,49 +5,14 @@
 # - the title and body of gh issue create, its alias gh issue new, and gh issue edit
 # - the body of gh issue comment, gh pr comment and gh pr review
 # - the comment that -c or --comment gives to gh issue close, gh issue reopen, gh pr close and gh pr reopen
-# It reads the title from --title, the comment from --comment, and the body as read_body in helpers.bash reads it, as
-# the command writes them, without running $( ) or filling in variables. It allows a command that gives none of them,
+# It reads the title, the comment and the body as read_text and read_body in helpers.bash read them, as the command
+# writes them, without running $( ) or filling in variables. It allows a command that gives none of them,
 # such as gh issue edit 7 --add-label ready. scripts/hooks/pull-request-rules.check checks the text of gh pr create and
 # gh pr edit.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 # shellcheck source=scripts/text-rules
 source "${BASH_SOURCE[0]%/*}/../text-rules"
-
-# Reads the text that a gh command gives from command_words, from its fourth word on: read_text <flags that take a value>
-# It sets title to the value of --title, and has_title to yes when the command gives --title, whose value can be empty.
-# It sets body_source, body_word and body_file for read_body, from --body, --body-file or --comment, and records
-# expansion syntax in each checked field. It fails when the command asks for help, because gh then posts nothing.
-# Only a flag that takes a value gives text, so the -c of gh pr review, which takes none, gives none.
-read_text() {
-  local flags_with_value=$1 i word flag value value_is_next_word flags_before asks_for_help=""
-  title="" has_title="" title_may_expand="" body_source="" body_word="" body_file="" body_may_expand=""
-  for ((i = 3; i < ${#command_words[@]}; i++)); do
-    word=${command_words[i]}
-    case $word in
-      -*) split_flag_word "$word" "$flags_with_value" ;;
-      *) continue ;;
-    esac
-    if stops_for_help; then
-      return 1
-    fi
-    read_help_flag
-    if [[ $flags_with_value != *" $flag "* ]]; then
-      continue
-    fi
-    if [[ -n $value_is_next_word ]]; then
-      i=$((i + 1))
-      value=${command_words[i]:-}
-    fi
-    case $flag in
-      -t | --title) title=$value has_title=yes title_may_expand=${command_word_may_expand[i]:-} ;;
-      -b | --body) body_source=text body_word=$value body_may_expand=${command_word_may_expand[i]:-} ;;
-      -c | --comment) body_source=comment body_word=$value body_may_expand=${command_word_may_expand[i]:-} ;;
-      -F | --body-file) body_source=file body_file=$value ;;
-    esac
-  done
-  [[ -z $asks_for_help ]]
-}
 
 # Blocks a gh command whose text has a problem, with a message that lists every problem: check_text <flags that take a value>
 check_text() {
