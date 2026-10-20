@@ -196,12 +196,16 @@ read_tool_paths() {
 # command_folder is the folder that the next simple command runs in, and visit_simple_commands keeps a cd in a subshell
 # inside it. A check sets it to ${cwd:-$PWD} before the first simple command, because Cursor doesn't send the folder
 # the agent works in, and then the hook's own folder counts. A cd that another program runs, as after env or timeout,
-# changes only that program's folder. Run drop_command_prefixes first.
+# changes only that program's folder. Blocks a cd that the shell may run itself or as a program, as after time, because
+# the checks would allow more in a folder they can't tell than in either of the two. Run drop_command_prefixes first.
 follow_cd() {
   if [[ ${command_words[0]} != cd || $shell_runs_command == no ]]; then
     return 0
   fi
-  if ((${#command_words[@]} != 2)) || [[ ${command_words[1]} == -* || $shell_runs_command == maybe ]]; then
+  if [[ $shell_runs_command == maybe ]]; then
+    block "Blocked: the hooks can't tell which folder this cd leaves the shell in, because after time, command or noglob the shell may run the program cd, which changes no folder, instead of its own. Run cd without the word before it."
+  fi
+  if ((${#command_words[@]} != 2)) || [[ ${command_words[1]} == -* ]]; then
     command_folder=""
     return 0
   fi

@@ -222,11 +222,14 @@ expect_allow Bash 'folder=$(cd /usr && pwd); rm -rf build'
 expect_allow Bash 'echo "`cd /usr && pwd`" && rm -rf build'
 expect_allow Bash '(cd /usr) && rm -rf build'
 # A cd that the shell runs itself, as after builtin, changes its folder, and one that another program runs, as after
-# timeout, doesn't. After time, the hooks can't tell the folder, because the shell runs the program time for a quoted
-# 'time', as for \time, and the hooks see the word without its quotes.
+# timeout, doesn't. The hooks block a cd after time, command or noglob, because the shell may run either. It runs the
+# program time for a quoted 'time', as for \time, and the hooks see the word without its quotes. Without the block, the
+# checks wouldn't know the folder after the cd, and would allow more than in either folder.
 expect_block Bash 'builtin cd /usr && rm -rf share' "$(deleting rm share)"
-expect_allow Bash 'time cd /usr && rm -rf share'
-expect_allow Bash "'time' cd /usr && rm -rf share"
+for wrapper in time "'time'" "time -p" command noglob; do
+  expect_block Bash "$wrapper cd /tmp && rm -rf share" "$cd_after_wrapper"
+  expect_block Bash "cd /usr && $wrapper cd /tmp && rm -rf share" "$cd_after_wrapper"
+done
 expect_allow Bash 'timeout 10 cd /usr && rm -rf build'
 expect_allow Bash 'env cd /usr && rm -rf build'
 # env -C runs only the command after it in another folder.
@@ -592,6 +595,14 @@ local_clone=$base/local-clone
 git init --quiet "$local_clone"
 git -C "$local_clone" remote add origin "$base/origin.git"
 expect_allow Bash "cd '$local_clone' && gh issue comment 5 --body Hello"
+# A cd after time, command or noglob, as in the cases of deleting above, also when it follows a cd to a folder outside
+# the repository and comes before a post with gh or a write to a settings file
+for wrapper in time "'time'" command noglob; do
+  expect_block Bash "cd '$other_clone' && $wrapper cd '$base' && gh issue comment 5 --body Hello" "$cd_after_wrapper"
+  test_home=$base
+  expect_block Bash "cd ~ && $wrapper cd /tmp && echo 'export DEBUG=1' >>.zshrc" "$cd_after_wrapper"
+  test_home=/home-for-tests/someone
+done
 
 # A worktree reads the list in the main checkout.
 worktree=$base/worktree

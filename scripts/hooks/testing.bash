@@ -138,6 +138,9 @@ expect_allow() {
 # takes them
 wrappers=("timeout -k 5 --signal=TERM 10m" "time -p" "nice -n 5" nohup "stdbuf -oL -e 0" "command -p" builtin noglob xargs)
 
+# The message that blocks a cd after time, command or noglob, as follow_cd in helpers.bash describes it
+cd_after_wrapper="Blocked: the hooks can't tell which folder this cd leaves the shell in, because after time, command or noglob the shell may run the program cd, which changes no folder, instead of its own. Run cd without the word before it."
+
 # Checks that the hook blocks a command behind each wrapper in wrappers: expect_block_behind_wrappers <command> <message>
 expect_block_behind_wrappers() {
   local wrapper

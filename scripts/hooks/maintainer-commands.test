@@ -248,15 +248,13 @@ for rulesets in "main none" "none main"; do
   expect_block Bash 'cd "`cat folder.txt`" && scripts/configure-github' "$cannot_tell"
   expect_block Bash 'cd && scripts/configure-github' "$cannot_tell"
   expect_block Bash "cd -P '$other_clone' && scripts/configure-github" "$cannot_tell"
-  # bash runs its own cd after command, and zsh runs the program cd. zsh runs the cd after noglob, and bash has no
-  # noglob.
-  expect_block Bash "command cd '$other_clone' && scripts/configure-github" "$cannot_tell"
-  expect_block Bash "noglob cd '$other_clone' && scripts/configure-github" "$cannot_tell"
-  # The shell runs its own time only for the word time unquoted, and the program time for 'time', but the hook sees the
-  # word without its quotes.
-  for wrapper in time "time -p" "'time'"; do
-    expect_block Bash "$wrapper cd '$other_clone' && scripts/configure-github" "$cannot_tell"
-  done
+done
+# The hooks block a cd that the shell may run as a program. bash runs its own cd after command, and zsh runs the
+# program cd. zsh runs the cd after noglob, and bash has no noglob. The shell runs its own time only for the word time
+# unquoted, and the program time for 'time', but the hook sees the word without its quotes.
+TEST_RULESETS=main TEST_OTHER_RULESETS=none
+for wrapper in command noglob time "time -p" "'time'"; do
+  expect_block Bash "$wrapper cd '$other_clone' && scripts/configure-github" "$cd_after_wrapper"
 done
 
 # A run of scripts/configure-github by the orchestrator, the session that the state file names, once the settings were
