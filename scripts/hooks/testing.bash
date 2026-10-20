@@ -134,6 +134,21 @@ expect_allow() {
   expect_result "In ${tools%% *}, the hook for $1 \"$2\"" 0 ""
 }
 
+# Each wrapper that drop_command_prefixes in command-prefixes.bash drops before a command, with options where it
+# takes them
+wrappers=("timeout -k 5 --signal=TERM 10m" "time -p" "nice -n 5" nohup "stdbuf -oL -e 0" "command -p" builtin noglob xargs)
+
+# The message that blocks a cd after time, command or noglob, as follow_cd in helpers.bash describes it
+cd_after_wrapper="Blocked: the hooks can't tell which folder this cd leaves the shell in, because after time, command or noglob the shell may run the program cd, which changes no folder, instead of its own. Run cd without the word before it."
+
+# Checks that the hook blocks a command behind each wrapper in wrappers: expect_block_behind_wrappers <command> <message>
+expect_block_behind_wrappers() {
+  local wrapper
+  for wrapper in "${wrappers[@]}"; do
+    expect_block Bash "$wrapper $1" "$2"
+  done
+}
+
 # Runs the hook on a command of a session, or of a subagent of it, and checks its result:
 # expect_from <session> <agent id or ""> <command> <exit code> <message>
 # A subagent's input has the id of its session, and its own in agent_id.

@@ -64,6 +64,10 @@ list_names="bash -c 'compgen -e'"
 env_option() {
   echo "Blocked: the hooks can't tell which command env runs after its option $1, so they can't check that command. Run the command without that option. The hooks read only env's options -i, -0, -u, -C, -P and -v, and their long forms."
 }
+# wrapper_option <wrapper> <option> [<the options that the hooks read>]
+wrapper_option() {
+  echo "Blocked: the hooks can't tell which command $1 runs after its option $2, so they can't check that command. Run the command without that option${3:+, or with one that the hooks read: $3}."
+}
 environment="Blocked: this command prints the whole environment, which holds tokens. Print only the variables you need, by name, as in printenv PATH. To list the variables' names without their values, run $list_names."
 no_verify="Blocked: --no-verify skips the pre-push hook, which scans the push for leaks. Push without it. If the scan finds a leak, take it out of the commits."
 # The messages that block a push whose git hooks aren't the repository's: other_hooks <folder that git names>,
@@ -217,6 +221,17 @@ expect_allow Bash 'folder=$(cd /usr && pwd); rm -rf build'
 # shellcheck disable=SC2016
 expect_allow Bash 'echo "`cd /usr && pwd`" && rm -rf build'
 expect_allow Bash '(cd /usr) && rm -rf build'
+# A cd that the shell runs itself, as after builtin, changes its folder, and one that another program runs, as after
+# timeout, doesn't. The hooks block a cd after time, command or noglob, because the shell may run either. It runs the
+# program time for a quoted 'time', as for \time, and the hooks see the word without its quotes. Without the block, the
+# checks wouldn't know the folder after the cd, and would allow more than in either folder.
+expect_block Bash 'builtin cd /usr && rm -rf share' "$(deleting rm share)"
+for wrapper in time "'time'" "time -p" command noglob; do
+  expect_block Bash "$wrapper cd /tmp && rm -rf share" "$cd_after_wrapper"
+  expect_block Bash "cd /usr && $wrapper cd /tmp && rm -rf share" "$cd_after_wrapper"
+done
+expect_allow Bash 'timeout 10 cd /usr && rm -rf build'
+expect_allow Bash 'env cd /usr && rm -rf build'
 # env -C runs only the command after it in another folder.
 expect_block Bash 'env -C /usr rm -rf share' "$(deleting rm share)"
 expect_block Bash 'env -C / rm -rf usr/share' "$(deleting rm usr/share)"
@@ -262,6 +277,34 @@ expect_block Bash 'env -u CLAUDECODE git push --no-verify' "$no_verify"
 expect_block Bash '/usr/bin/env -C build git push --no-verify' "$no_verify"
 # env reads each word with = before the command as a variable to set.
 expect_block Bash 'env x.y=1 git push --no-verify' "$no_verify"
+# The wrappers that run the command after them, with each way to write their options and timeout's duration
+expect_block_behind_wrappers 'git push --no-verify' "$no_verify"
+for wrapper in "timeout 10" "/usr/bin/timeout -k5 10" "timeout -fk 5 10" "timeout --kill-after 5 --preserve-status 1h" \
+  "timeout -s KILL -v 10" "timeout -pvsKILL 10" "timeout --foreground --verbose -- 10" time "/usr/bin/time -l" \
+  "/usr/bin/time -ao times.txt" "time --format=%e --output times.txt --append --portability --quiet --verbose" \
+  "time -hqv -f %e" nice "nice -10" "nice --10" "nice -+10" "nice -n5" "nice -n -5" "nice --adjustment=5" \
+  "nice --adjustment 5" "nohup --" "stdbuf -o L" "stdbuf -i0 -e0" "stdbuf --input=0 --output L --error=0" command \
+  "command -p --" "builtin --" "nohup nice -n 5 timeout 10" "env FOO=1 timeout 10" "timeout 10 env -u CLAUDECODE" \
+  "time nohup"; do
+  expect_block Bash "$wrapper git push --no-verify" "$no_verify"
+done
+# The hooks can't tell which word is the command after an option that they don't read. GNU's timeout reads --sig as
+# --signal.
+timeout_options="-f -p -v -k -s --foreground --preserve-status --verbose --kill-after --signal"
+expect_block Bash 'timeout --sig KILL 10 git push --no-verify' "$(wrapper_option timeout --sig "$timeout_options")"
+expect_block Bash 'timeout -x 10 git status' "$(wrapper_option timeout -x "$timeout_options")"
+expect_block Bash 'timeout --foreground=yes 10 git status' "$(wrapper_option timeout --foreground=yes "$timeout_options")"
+expect_block Bash 'nice -x git status' "$(wrapper_option nice -x "-n --adjustment")"
+expect_block Bash 'stdbuf -oL -x git status' "$(wrapper_option stdbuf -x "-i -o -e --input --output --error")"
+expect_block Bash 'command -px git status' "$(wrapper_option command -px "-p -v -V")"
+expect_block Bash 'nohup -x git status' "$(wrapper_option nohup -x)"
+expect_block Bash 'builtin --help' "$(wrapper_option builtin --help)"
+expect_allow Bash 'timeout 10 git push origin HEAD'
+# command -v and command -V look a command up instead of running it, and Claude Code doesn't drop xargs with an option.
+expect_allow Bash 'command -v uv'
+expect_allow Bash 'command -V uv'
+expect_allow Bash 'command -pv git'
+expect_allow Bash 'xargs -n1 echo'
 # git takes the start of a long option as the option, unless another option starts the same way, as with --no-ver,
 # which could be --no-verbose too.
 expect_block Bash 'git push --no-veri origin main' "$no_verify"
@@ -309,6 +352,8 @@ expect_block Bash "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG
   "$(other_hooks "$hooks_elsewhere")"
 expect_block Bash "env GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='$hooks_elsewhere'\" git push" "$(other_hooks "$hooks_elsewhere")"
 expect_block Bash "GIT_DIR=$project/.git git -C $elsewhere push" "$(other_hooks "$elsewhere/scripts/git-hooks")"
+# The value of a wrapper's option sets no variable, as with time -o, which names the file that time writes to.
+expect_allow Bash "time -o GIT_DIR=$elsewhere/.git git push"
 expect_allow Bash 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=color.ui GIT_CONFIG_VALUE_0=never git push'
 printf '[core]\n\thooksPath = %s\n' "$hooks_elsewhere" >"$base/hooks.gitconfig"
 expect_block Bash "git -c include.path=$base/hooks.gitconfig push" "$(other_hooks "$hooks_elsewhere")"
@@ -517,6 +562,8 @@ expect_allow Bash 'gh issue comment 5 --body "The same bug: https://github.com/s
 expect_allow Bash 'gh issue comment 5 --body https://github.com/someone/else/issues/9'
 expect_allow Bash 'GH_REPO=jtmpl/project gh pr comment 5 --body Hello'
 expect_allow Bash 'GH_REPO=someone/else gh pr comment 5 -R jtmpl/project --body Hello'
+# time -o names the file that time writes to, so GH_REPO=someone/else sets no variable there.
+expect_allow Bash 'time -o GH_REPO=someone/else gh pr comment 5 --body Hello'
 expect_allow Bash 'gh api -X POST "repos/{owner}/{repo}/issues/5/comments" -f body=Thanks'
 expect_allow Bash 'gh pr list --repo someone/else'
 expect_allow Bash 'gh pr view 42 -R someone/else'
@@ -569,6 +616,14 @@ local_clone=$base/local-clone
 git init --quiet "$local_clone"
 git -C "$local_clone" remote add origin "$base/origin.git"
 expect_allow Bash "cd '$local_clone' && gh issue comment 5 --body Hello"
+# A cd after time, command or noglob, as in the cases of deleting above, also when it follows a cd to a folder outside
+# the repository and comes before a post with gh or a write to a settings file
+for wrapper in time "'time'" command noglob; do
+  expect_block Bash "cd '$other_clone' && $wrapper cd '$base' && gh issue comment 5 --body Hello" "$cd_after_wrapper"
+  test_home=$base
+  expect_block Bash "cd ~ && $wrapper cd /tmp && echo 'export DEBUG=1' >>.zshrc" "$cd_after_wrapper"
+  test_home=/home-for-tests/someone
+done
 
 # A worktree reads the list in the main checkout.
 worktree=$base/worktree
