@@ -9,6 +9,7 @@ import re
 from typing import Any
 from unittest import mock
 
+import paths
 from test_run_builder import (
     BRANCH,
     BUILDER_FILE,
@@ -296,6 +297,7 @@ class TestBuildTest(RunBuilderTest):
         self.assertRegex(printed, rf"^issue 12 \| claude main \| test finished, changes in {changes} \| [0-9.]+ min \|")
         [call] = self.calls("claude")
         self.assertEqual((call["cwd"], call["head"], call["lock"]), (str(self.worktree), self.base, RUN_LOCK))
+        self.assertIn(paths.RETROSPECTIVE_MARK, call["git_files"])
         self.assertEqual(call["env"]["LOOP_RUN"], "1")
         self.assertNotIn("LOOP_HAND_OFF", call["env"])
         self.assertIn("This build is a test", call["args"][-1])

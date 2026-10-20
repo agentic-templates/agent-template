@@ -1,6 +1,6 @@
 """Finds the loop folder, where the loop keeps the files that stay on this machine: the .loop folder of the main
 checkout, which every worktree shares. The environment variable LOOP_DIR names another folder. Tells whether a process
-runs in Codex's sandbox, which can't write the loop folder."""
+runs in Codex's sandbox, which can't write the loop folder. Finds the file that marks a worktree as a retrospective's."""
 
 import os
 import re
@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 CODEX_SANDBOX_VARIABLE = "CODEX_SANDBOX_NETWORK_DISABLED"
+RETROSPECTIVE_MARK = "loop-retrospective"
 
 
 def main_checkout(folder: Path | None = None) -> Path:
@@ -34,6 +35,12 @@ def is_in_codex_sandbox() -> bool:
     """Whether this process runs in Codex's sandbox, which sets CODEX_SANDBOX_VARIABLE to 1, as scripts/check checks
     too."""
     return os.environ.get(CODEX_SANDBOX_VARIABLE) == "1"
+
+
+def retrospective_mark(folder: Path) -> Path:
+    """The file in the git folder of the worktree that holds a folder, which marks the worktree as a retrospective's:
+    the worktree of its auditor or of one of its test builds."""
+    return folder / git(["rev-parse", "--git-path", RETROSPECTIVE_MARK], folder).strip()
 
 
 def claude_project_folder(checkout: Path, environment: Mapping[str, str] = os.environ) -> Path:

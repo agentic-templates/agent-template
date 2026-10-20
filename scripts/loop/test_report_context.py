@@ -83,7 +83,7 @@ class ContextTest(ReportTest):
                 ),
                 (
                     "Context of the orchestrator: 1 sessions, peak median 70.0k, largest 70.0k, 100% past the "
-                    "compaction threshold of 50.0k | 15.0k added per tool call, 1 steps without an event left out | 1 "
+                    "/clear threshold of 50.0k | 15.0k added per tool call, 1 steps without an event left out | 1 "
                     "compactions | added most by other tools 100%"
                 ),
             ],
@@ -120,7 +120,7 @@ class ContextTest(ReportTest):
         self.assertEqual(
             self.line("Context of the orchestrator"),
             (
-                "Context of the orchestrator: 2 sessions, peak median 33.0k, largest 36.0k, 0% past the compaction "
+                "Context of the orchestrator: 2 sessions, peak median 33.0k, largest 36.0k, 0% past the /clear "
                 "threshold of 50.0k | 8.0k added per tool call, 0 steps without an event left out | 0 compactions | "
                 "added most by other tools 100%"
             ),

@@ -499,7 +499,26 @@ run_parts CLAUDE_PID="$running_process"
 expect_parts "After /clear and a compaction, before the orchestrator wrote both lines" \
   .loop/state.md docs/loop.md docs/writing.md
 
-for source in startup resume clear; do
+# docs/loop.md and docs/writing.md, after a /clear of the orchestrator, which gives it a new session id in its process
+new_state_file
+write_guides
+long_state_file
+session_input clear new-2
+run_parts CLAUDE_PID="$running_process"
+expect_parts "After /clear in the orchestrator's process" .loop/state.md docs/loop.md docs/writing.md
+run_session_start CLAUDE_PID="$running_process"
+expect_output "After /clear in the orchestrator's process" "You are this repository's orchestrator, in a new session or process. Write \"session: new-2\" and \"pid: $running_process\" as the session and pid lines of your state file, $state_file. Then continue the loop from the file, which this hook shows you, with docs/loop.md and docs/writing.md, in $part_count parts."
+expect_output_without "After /clear in the orchestrator's process" "This conversation was just compacted"
+state_lines new-2 "$running_process" >"$state_file"
+session_input clear new-3
+run_parts CLAUDE_PID="$running_process"
+expect_parts "After a second /clear in the orchestrator's process, once it wrote both lines" \
+  .loop/state.md docs/loop.md docs/writing.md
+session_input clear new-4
+run_parts CLAUDE_PID="$new_process"
+expect_no_parts "After /clear in another process in the main checkout, while the orchestrator's process runs"
+
+for source in startup resume; do
   new_state_file
   write_guides
   session_input "$source" owner-1
@@ -680,10 +699,10 @@ for record_kind in empty unreadable; do
   expect_no_records "After a compaction of the orchestrator, with an $record_kind record"
 done
 
-# The orchestrator asks the maintainer's compaction sender for a compaction with a request, which names its session on
-# the first line: write_request <loop folder> <session id>
+# The orchestrator asks the maintainer's /clear sender for a /clear with a request, which names its session on the
+# first line: write_request <loop folder> <session id>
 write_request() {
-  printf '%s\nResume from .loop/state.md.\n' "$2" >"$1/compact-request.txt"
+  printf '%s\nResume the loop from .loop/state.md.\n' "$2" >"$1/compact-request.txt"
 }
 
 # Checks whether the hook left the request in place: expect_request <description> <loop folder> <kept|deleted>
@@ -694,7 +713,7 @@ expect_request() {
     found=kept
   fi
   if [[ $found != "$3" ]]; then
-    echo "error: $1, the hook must have $3 the compaction request, but it $found it" >&2
+    echo "error: $1, the hook must have $3 the request for a /clear, but it $found it" >&2
     failed_cases=$((failed_cases + 1))
   fi
 }
@@ -713,9 +732,21 @@ expect_request "After a compaction of the orchestrator, with a request of anothe
 
 new_state_file
 write_request "$work/.loop" owner-1
-session_input clear owner-1
+session_input clear new-2
 run_session_start CLAUDE_PID="$running_process"
-expect_request "After /clear in the orchestrator, which asked for a compaction" "$work/.loop" kept
+expect_request "After /clear in the orchestrator's process, which asked for it" "$work/.loop" deleted
+
+new_state_file
+write_request "$work/.loop" someone-else
+session_input clear new-2
+run_session_start CLAUDE_PID="$running_process"
+expect_request "After /clear in the orchestrator's process, with a request of another session" "$work/.loop" kept
+
+new_state_file
+write_request "$work/.loop" owner-1
+session_input clear new-4
+run_session_start CLAUDE_PID="$new_process"
+expect_request "After /clear in another process, while the orchestrator's process runs" "$work/.loop" kept
 
 new_state_file
 write_request "$work/.loop" owner-1

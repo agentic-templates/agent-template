@@ -49,7 +49,8 @@ With --test, the run is a test build of a retrospective, which a Claude builder 
 again from the commit that the pull request PULL_REQUEST started from, in .claude/worktrees/test-<issue>-<type>, on no
 branch, and changes nothing on GitHub. When it ends, the script writes the diff of its changes, committed or not, to
 changes.diff in the run folder, .loop/runs/test-<issue>-<type>-<time>, and removes the worktree. The lines in
-.loop/agents.jsonl say that the run is a test.
+.loop/agents.jsonl say that the run is a test. scripts/loop/run-heavy starts the heavy commands of the worktree only
+when no other agent's command waits, as it does for the auditor's.
 
 With --review, the script starts a Claude agent of the type reviewer for the pull request PULL_REQUEST, instead of a
 builder for an issue. The reviewer works in .claude/worktrees/review-<pull request>, detached at the pull request's
@@ -385,6 +386,7 @@ def test_build(
     removal."""
     base = pull_request_base(pull_request, folders)
     add_locked_worktree(base, folders, detach=True)
+    paths.retrospective_mark(folders.worktree).touch()
     try:
         # A hand-off posts a comment on the issue, and a test build changes nothing on GitHub.
         brief = write_brief(issue, kind, message, TEST_BRIEF, folders)

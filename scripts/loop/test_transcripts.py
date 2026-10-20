@@ -159,62 +159,23 @@ class OpenedPullRequestTest(TranscriptTest):
         self.assertIsNone(transcripts.opened_pull_request(self.file))
 
 
-def typed_line(minute: float, content: Any) -> dict[str, Any]:
-    """A transcript's line for a message that a person typed."""
-    return prompt_line(minute, content) | {"origin": {"kind": "human"}}
+class InterruptedTest(TranscriptTest):
+    def test_says_that_the_user_interrupted_the_agent_when_the_last_message_says_so(self) -> None:
+        interruption = prompt_line(2, [{"type": "text", "text": "[Request interrupted by user for tool use]"}])
+        lines = [prompt_line(0), call_line("a", 1), interruption, '{"type": "last-prompt"}', '{"cut off']
+        self.assertTrue(transcripts.is_interrupted(self.write(*lines)))
 
+    def test_says_no_when_a_message_or_a_call_came_after_the_interruption_or_there_was_none(self) -> None:
+        interruption = prompt_line(2, "[Request interrupted by user]")
+        cases: dict[str, list[Any]] = {
+            "message": [prompt_line(0), interruption, prompt_line(3, "Go on.")],
+            "call": [prompt_line(0), interruption, call_line("b", 3)],
+            "no interruption": [prompt_line(0), call_line("a", 1)],
+            "no message": ['{"type": "last-prompt"}'],
+        }
+        for case, lines in cases.items():
+            with self.subTest(case=case):
+                self.assertFalse(transcripts.is_interrupted(self.write(*lines)))
 
-def queued_line(minute: float, prompt: Any, kind: str = "human") -> dict[str, Any]:
-    """A transcript's line for a message that arrived while a turn ran, such as one that a person typed then."""
-    attachment = {"type": "queued_command", "prompt": prompt, "origin": {"kind": kind}, "timestamp": at(minute)}
-    return {"type": "attachment", "timestamp": at(minute), "attachment": attachment | {"humanTurn": kind == "human"}}
-
-
-class PersonMessagesTest(TranscriptTest):
-    def test_gives_the_time_and_text_of_each_message_that_a_person_typed(self) -> None:
-        self.write(
-            typed_line(1, "Why is the meter stopped?"),
-            call_line("a", 2),
-            typed_line(
-                3, [{"type": "text", "text": "Look at this."}, {"type": "image"}, {"type": "text", "text": "It"}]
-            ),
-        )
-        self.assertEqual(
-            transcripts.person_messages(self.file),
-            [
-                transcripts.Message(START + dt.timedelta(minutes=1), "Why is the meter stopped?"),
-                transcripts.Message(START + dt.timedelta(minutes=3), "Look at this.\nIt"),
-            ],
-        )
-
-    def test_gives_the_messages_that_a_person_typed_while_a_turn_ran(self) -> None:
-        self.write(
-            prompt_line(0),
-            queued_line(1, "Read the clock instead."),
-            queued_line(2, [{"type": "image"}, {"type": "text", "text": "This one."}]),
-            queued_line(3, "<task-notification>done</task-notification>", kind="task-notification"),
-            {"type": "attachment", "timestamp": at(4), "attachment": {"type": "hook_success", "content": "ok"}},
-        )
-        self.assertEqual(
-            transcripts.person_messages(self.file),
-            [
-                transcripts.Message(START + dt.timedelta(minutes=1), "Read the clock instead."),
-                transcripts.Message(START + dt.timedelta(minutes=2), "This one."),
-            ],
-        )
-
-    def test_leaves_out_the_lines_that_no_person_typed(self) -> None:
-        notification = prompt_line(1, "<task-notification>done</task-notification>")
-        agent_message = prompt_line(2, "The pull request is open.")
-        self.write(
-            result_line(1, "toolu_1", "output"),
-            notification | {"origin": {"kind": "task-notification"}},
-            agent_message | {"isMeta": True, "origin": {"kind": "peer", "from": "a1"}},
-            prompt_line(3, "Loop heartbeat: resume the loop.") | {"isMeta": True},
-            prompt_line(4, "<local-command-stdout>hook output</local-command-stdout>"),
-            prompt_line(5, "This session is being continued.") | {"isCompactSummary": True},
-            prompt_line(6, "/compact Resume from .loop/state.md."),
-            prompt_line(7, "Build the issue."),
-            {key: value for key, value in typed_line(8, "A line without its time.").items() if key != "timestamp"},
-        )
-        self.assertEqual(transcripts.person_messages(self.file), [])
+    def test_says_no_without_a_transcript(self) -> None:
+        self.assertFalse(transcripts.is_interrupted(self.file))

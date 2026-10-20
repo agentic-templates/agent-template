@@ -27,6 +27,11 @@ def waiting(name: str, cores: float | None, arrived: float = 0.0, memory_gb: flo
     return Command(name, NOW + arrived, need)
 
 
+def retrospectives(name: str, cores: float | None, arrived: float = 0.0) -> Command:
+    """A waiting command of a retrospective's test build or auditor."""
+    return waiting(name, cores, arrived)._replace(is_retrospective=True)
+
+
 def running(name: str, cores: float | None, arrived: float = -100.0, memory_gb: float = 1.0) -> Command:
     return waiting(name, cores, arrived, memory_gb)._replace(started=NOW)
 
@@ -218,3 +223,23 @@ class CommandsToStartTest(unittest.TestCase):
     def test_starts_no_first_run_ahead_of_the_line(self) -> None:
         line = [waiting("large", 6.0, arrived=1), waiting("new", None, arrived=2)]
         self.assertEqual(room.commands_to_start(line, [running("build", 5.0)], Use(9.0, 28.0, 90.0)), [])
+
+    def test_starts_another_agents_command_ahead_of_a_retrospectives_that_came_earlier(self) -> None:
+        line = [retrospectives("test build", 6.0, arrived=1), waiting("check", 6.0, arrived=2)]
+        self.assertEqual(room.commands_to_start(line, [], Use(9.0, 28.0, 90.0)), ["check"])
+
+    def test_keeps_a_retrospectives_command_that_fits_waiting_while_another_agents_command_waits(self) -> None:
+        line = [retrospectives("test build", 1.0, arrived=1), waiting("large", 8.0, arrived=2)]
+        self.assertEqual(room.commands_to_start(line, [running("build", 3.0)], Use(9.0, 28.0, 90.0)), [])
+
+    def test_starts_a_retrospectives_command_while_no_other_agents_command_waits(self) -> None:
+        line = [retrospectives("test build", 4.0)]
+        self.assertEqual(room.commands_to_start(line, [running("build", 3.0)], Use(9.0, 28.0, 90.0)), ["test build"])
+
+    def test_starts_a_retrospectives_command_in_the_room_that_the_other_agents_commands_leave(self) -> None:
+        line = [retrospectives("test build", 4.0, arrived=1), waiting("check", 4.0, arrived=2)]
+        self.assertEqual(room.commands_to_start(line, [], Use(9.0, 28.0, 90.0)), ["check", "test build"])
+
+    def test_takes_a_retrospectives_commands_in_the_order_in_which_they_came(self) -> None:
+        line = [retrospectives("later", 5.0, arrived=2), retrospectives("earlier", 5.0, arrived=1)]
+        self.assertEqual(room.commands_to_start(line, [], Use(9.0, 28.0, 90.0)), ["earlier"])
