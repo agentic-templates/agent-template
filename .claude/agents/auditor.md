@@ -92,7 +92,8 @@ describes.
 Leave out a test that an earlier retrospective's description records, unless its numbers changed since. Run the test
 with the largest expected saving first. Start each build on the account that `scripts/loop/meter --start-on <type>`
 prints, where `<type>` is the type that the tested version is a version of, and start none while it prints
-`no account`.
+`no account`. Start no build either while the `machine` line of `scripts/loop/meter` names the limit on the agents
+that build, because the meter counts the test builds among them.
 
 A version can differ from its type in its model, effort, instructions, tools, disallowed tools or limit on turns.
 Write each version as an agent file in `.claude/agents/` in your worktree, such as `builder-cheaper.md`. In a test,

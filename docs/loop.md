@@ -114,9 +114,11 @@ Start an agent for each ready issue, as far as "Read the meter" allows:
 2. If you know that the issue's change is one line, make it yourself, in a worktree of your own, as "Make a change"
    in AGENTS.md describes.
 3. Otherwise, choose the agent's type: `researcher` for a `research` issue, and otherwise the builder type whose
-   description fits the change. Choose its account as "Read the meter" describes. If that's your own account, start a
-   background agent of that type. Don't give it a model, so that it runs at its type's model and effort. After its
-   prompt's first line, name the files to start from if you know them.
+   description fits the change. If it's a builder type and the meter's `machine` line says
+   `start no builder or test build`, start none on any account, and skip the issue as "Read the meter" describes for
+   an issue that no account can take. Otherwise, choose its account as "Read the meter" describes. If that's your own
+   account, start a background agent of that type. Don't give it a model, so that it runs at its type's model and
+   effort. After its prompt's first line, name the files to start from if you know them.
 
 After each issue, go back to step 1. Start an auditor too when "Start a retrospective" says so, and a focused audit
 when "Start a focused audit" says so.
@@ -186,8 +188,10 @@ heartbeat and schedule it again, because a recurring prompt ends 7 days after yo
 For each account in `.loop/accounts.json`, `scripts/loop/meter` prints a line that ends with the account's advice.
 The meter's last line starts with `machine`, and gives your context size and whether a retrospective is due. Of the
 parts that ` | ` separates on the line, each one that starts with `audit due:` names a finding for a focused audit.
-The line before it starts with `agents`, and gives the context size of each agent that runs. Run the meter once in
-each pass, before you launch.
+Once as many agents build as the machine has room for, the line has a part that gives their number and the limit,
+and ends with `start no builder or test build`. Reviewers and researchers still start then, because they rarely run
+`scripts/check`. The line before the `machine` line starts with `agents`, and gives the context size of each agent
+that runs. Run the meter once in each pass, before you launch.
 
 `scripts/loop/meter --wake` ends, and so wakes you, when an account's advice changes, when a reading has a finding for
 a focused audit whose subject wasn't on the last `machine` line that the meter printed, and when a hook tells an agent
@@ -212,15 +216,18 @@ The line after the accounts starts with `start on`, and names the Claude account
 Choose the account of each builder and researcher, and of each reviewer of a pull request, with
 `scripts/loop/meter --start-on <type>`, and start the agent on the account that it prints. It names the account as
 the `start on` line does, from the same reading, but it counts each agent that it named an account for since then.
-So one pass starts only as many agents on each account as fit. If it prints `no account`, start no agent of that type
-on a Claude account. Start the auditor, and each reviewer that reviews no pull request, such as the reviewer of a
-release, on your own account, as an agent of your session.
+So one pass starts only as many agents on each account as fit. For a builder type, it also prints `no account` once
+the agents that build at the reading, with each builder that it named an account for since then, reach the limit, and
+then says so on its next line. If it prints `no account`, start no agent of that type on a Claude account. Start the
+auditor, and each reviewer that reviews no pull request, such as the reviewer of a release, on your own account, as an
+agent of your session.
 
 A Codex account builds only the kinds `research` and `other`, and only while its advice is `go`. Start a builder or
 researcher on such a Codex account without running `--start-on`, when the Codex account's `week` percentage of use is
 lower than that of the account that the `start on` line names for the agent's type. Also start it on such a Codex
-account when `--start-on` prints `no account`. Each builder of the type `builder-deep`, and each builder or researcher
-that takes over a hand-off, can run only on a Claude account.
+account when `--start-on` prints `no account`. But start no builder on a Codex account while the `machine` line names
+the limit, or once `--start-on` said in this pass that the agents that build reached it. Each builder of the type
+`builder-deep`, and each builder or researcher that takes over a hand-off, can run only on a Claude account.
 
 To start an agent on another account, run one of these commands as a background task. For an issue, give the line
 that `scripts/take-next-issue` printed in place of `<issue> <kind>`. The command's last line says how the run ended,
