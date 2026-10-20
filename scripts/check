@@ -459,7 +459,19 @@ if [[ -z "${CHECK_UNDER_TEST:-}" || ${CHECK_UNDER_TEST:-} == python ]]; then
       if has shfmt https://github.com/mvdan/sh#shfmt "the complexity check of the bash files"; then
         has_shfmt=yes
       fi
+      # The linux job in .github/workflows/ci.yml sets SKIP_PYTHON_TESTS when the change needs no Python tests. A run
+      # with it records no pass. Elsewhere, scripts/python-tests-needed decides from the branch's changes.
+      runs_python_tests=""
       if ((${#python_files[@]} > 0)); then
+        if [[ -n ${SKIP_PYTHON_TESTS:-} ]]; then
+          echo "Skipped the Python tests and their coverage report because SKIP_PYTHON_TESTS is set." >&2
+        elif scripts/python-tests-needed --branch; then
+          runs_python_tests=yes
+        else
+          echo "Skipped the Python tests and their coverage report, because this branch changes none of the files that they read, as scripts/python-tests-needed decides." >&2
+        fi
+      fi
+      if [[ -n $runs_python_tests ]]; then
         # Each Python process of the tests writes its own coverage data, which combine merges. The data go to a folder
         # of their own, which Codex's sandbox can write, unlike the git folder. mktemp -d alone ignores TMPDIR on macOS.
         coverage_folder=$(mktemp -d "${TMPDIR:-/tmp}/check-coverage.XXXXXX")
@@ -507,6 +519,8 @@ else
   fi
   if [[ -n $is_in_codex_sandbox ]]; then
     echo "The checks ran in Codex's sandbox, so scripts/check records no pass." >&2
+  elif [[ -n "${SKIP_PYTHON_TESTS:-}" ]]; then
+    echo "SKIP_PYTHON_TESTS is set, so scripts/check records no pass." >&2
   else
     record=$(pass_record_path)
     if [[ -z $checked_tree ]] || ! printf '%s\n' "$checked_tree" > "$record"; then

@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Tests scripts/python-tests-needed, with paths on standard input, and with --branch in repositories of its own.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+script=$PWD/scripts/python-tests-needed
+
+case_count=0
+failed_cases=0
+
+# Checks the script's exit code: expect_status <description> <exit code> <command>...
+expect_status() {
+  local description=$1 expected=$2 status=0
+  shift 2
+  "$@" >/dev/null 2>&1 || status=$?
+  case_count=$((case_count + 1))
+  if [[ $status != "$expected" ]]; then
+    echo "error: $description, scripts/python-tests-needed must exit with code $expected, but it exited with code $status." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Runs the script on paths given as arguments, one to a line on its standard input: with_paths [<path>...]
+with_paths() {
+  if (($# == 0)); then
+    "$script" </dev/null
+  else
+    printf '%s\n' "$@" | "$script"
+  fi
+}
+
+expect_status "When the change touches only text" 1 with_paths README.md AGENTS.md docs/code.md LICENSE
+expect_status "When the change touches no file" 1 with_paths
+expect_status "When the change touches only a workflow and the Codex hooks" 1 with_paths .github/workflows/ci.yml .codex/hooks.json
+expect_status "When the change touches a Python script" 0 with_paths docs/code.md scripts/loop/meter
+expect_status "When the change touches a script that a Python test runs" 0 with_paths scripts/leak-scan
+expect_status "When the change touches an agent type" 0 with_paths .claude/agents/builder.md
+expect_status "When the change touches the Python version" 0 with_paths .python-version
+expect_status "When the change touches the Python packages" 0 with_paths pyproject.toml
+expect_status "When the change touches the lockfile" 0 with_paths uv.lock
+expect_status "When a file's name only starts like a folder" 1 with_paths scripts.md docs/scripts/notes.md
+expect_status "When it gets an argument other than --branch" 2 "$script" --all
+expect_status "When it gets two arguments" 2 "$script" --branch --branch
+
+# Cases for --branch, each in a repository whose origin/main holds a docs page and a Python test.
+# mktemp -d alone ignores TMPDIR on macOS.
+cases=$(mktemp -d "${TMPDIR:-/tmp}/python-tests-needed.XXXXXX")
+trap 'rm -rf "$cases"' EXIT
+
+# Makes a repository for a case, on a branch from origin/main, and sets repository to it: new_repository <name>
+new_repository() {
+  repository=$cases/$1
+  mkdir -p "$repository/docs" "$repository/scripts/loop"
+  git -C "$repository" init --quiet
+  echo "A page" >"$repository/docs/page.md"
+  echo "import unittest" >"$repository/scripts/loop/test_a.py"
+  git -C "$repository" add .
+  git -C "$repository" -c user.name=Tester -c user.email=tester@example.com commit --quiet -m "the first commit"
+  git -C "$repository" update-ref refs/remotes/origin/main HEAD
+}
+
+# Commits all changes in the case's repository: commit_all
+commit_all() {
+  git -C "$repository" add -A
+  git -C "$repository" -c user.name=Tester -c user.email=tester@example.com commit --quiet -m "a change"
+}
+
+# Runs the script with --branch in the case's repository.
+on_branch() {
+  (cd "$repository" && "$script" --branch)
+}
+
+new_repository docs-only
+echo "A change" >>"$repository/docs/page.md"
+commit_all
+echo "A new page" >"$repository/docs/new.md"
+expect_status "With --branch, when the branch changes only docs pages" 1 on_branch
+
+new_repository committed-test
+echo "import os" >>"$repository/scripts/loop/test_a.py"
+commit_all
+expect_status "With --branch, when the branch commits a change to a Python test" 0 on_branch
+
+new_repository uncommitted-test
+echo "import os" >>"$repository/scripts/loop/test_a.py"
+expect_status "With --branch, when a change to a Python test isn't committed" 0 on_branch
+
+new_repository new-script
+echo "import os" >"$repository/scripts/loop/b.py"
+expect_status "With --branch, when the branch adds a file that git doesn't track yet" 0 on_branch
+
+new_repository moved-test
+git -C "$repository" mv scripts/loop/test_a.py docs/test_a.py
+commit_all
+expect_status "With --branch, when the branch moves a Python test out of scripts/" 0 on_branch
+
+new_repository without-origin-main
+git -C "$repository" update-ref -d refs/remotes/origin/main
+echo "A change" >>"$repository/docs/page.md"
+expect_status "With --branch, when the repository has no origin/main" 0 on_branch
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/python-tests-needed.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/python-tests-needed.test passed. Cases: $case_count."
