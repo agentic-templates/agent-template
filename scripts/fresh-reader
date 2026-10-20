@@ -38,10 +38,11 @@ if [[ ! -f $page ]]; then
   stop "$page isn't a file. Give the page's path, such as README.md."
 fi
 if [[ -n $posted && ! -f $posted ]]; then
-  stop "$posted isn't a file. Give the path of a file with the posted version, such as the one that gh pr view <number> --json body --jq .body writes."
+  stop "$posted isn't a file. Give the path of a file with the posted version, such as one that gh pr view <number> --json body --jq .body >file writes."
 fi
 
-# Outside a clone with origin/main, or for a page that git doesn't track, the reader gets the whole page and no lines.
+# Without a posted version, outside a clone with origin/main, or for a page that git doesn't track, the reader gets the
+# whole page and no lines.
 # Until the resolution of a merge conflict in the page is staged, git lists the page once for each stage of the
 # conflict, up to three times, and --deduplicate lists it once.
 new_lines=""

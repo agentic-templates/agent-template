@@ -274,7 +274,7 @@ expect_calls "When it gets four arguments" ""
 new_case 0
 run_fresh_reader "$reader" docs/expenses.md posted.md
 expect_result "When the posted version doesn't exist" fails \
-  "error: posted.md isn't a file. Give the path of a file with the posted version, such as the one that gh pr view <number> --json body --jq .body writes."
+  "error: posted.md isn't a file. Give the path of a file with the posted version, such as one that gh pr view <number> --json body --jq .body >file writes."
 expect_calls "When the posted version doesn't exist" ""
 expect_record "When the posted version doesn't exist"
 
