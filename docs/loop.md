@@ -305,5 +305,5 @@ without waiting for the next retrospective:
 4. Add the audit to the state file's list of focused audits, with the time it started.
 
 A focused audit doesn't count as a retrospective, so the meter goes on counting toward the next one. When an
-auditor's pull request merges, empty the state file's list of focused audits, because the retrospective looks back on
-the work that their findings came from.
+auditor's pull request merges, empty the state file's list of focused audits, because the meter then compares the time
+of `scripts/check` with the new retrospective.
