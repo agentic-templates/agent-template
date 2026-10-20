@@ -216,6 +216,27 @@ run_remove_ended_worktrees
 expect_result 0 "Left $worktrees/agent-1, because it has commits that are on no branch of origin and in no merged pull request."
 expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" yes
 
+begin_case "When a worktree's commit is only on a branch of a remote other than origin"
+new_case
+add_worktree agent-1 12-fix-totals
+commit_line agent-1 "February: 80"
+git init --quiet --bare "$case_dir/fork.git"
+git -C "$case_dir/main" remote add fork "$case_dir/fork.git"
+git -C "$worktrees/agent-1" push --quiet fork 12-fix-totals
+git -C "$case_dir/main" fetch --quiet fork
+run_remove_ended_worktrees
+expect_result 0 "Left $worktrees/agent-1, because it has commits that are on no branch of origin and in no merged pull request."
+expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" yes
+
+begin_case "When a worktree's commit is only in a ref under refs/remotes that is no branch of origin"
+new_case
+add_worktree agent-1 12-fix-totals
+commit_line agent-1 "February: 80"
+git -C "$case_dir/main" update-ref refs/remotes/pr342 "$(git -C "$worktrees/agent-1" rev-parse HEAD)"
+run_remove_ended_worktrees
+expect_result 0 "Left $worktrees/agent-1, because it has commits that are on no branch of origin and in no merged pull request."
+expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" yes
+
 begin_case "When a worktree's commits are on no branch of origin, and its last commit is the head of a merged pull request"
 new_case
 add_worktree agent-1 12-fix-totals

@@ -98,6 +98,13 @@ merged_heads() {
   done
 }
 
+# Prints the number of commits of a worktree that are on no branch of origin and aren't the given commits or their
+# ancestors: count_commits_off_origin <path> [<commit>...]
+count_commits_off_origin() {
+  # Other refs under refs/remotes, such as a fork's branches, hold commits that may be on no branch of origin.
+  git -C "$1" rev-list --count HEAD --not --remotes=origin "${@:2}"
+}
+
 # Sets reason and fails if a worktree has work that isn't on GitHub: check_work <path> <branch>
 check_work() {
   local path=$1 branch=$2 changes local_commits heads
@@ -109,7 +116,7 @@ check_work() {
     reason="it has changes that aren't committed."
     return 1
   fi
-  if ! local_commits=$(git -C "$path" rev-list --count HEAD --not --remotes 2>&1); then
+  if ! local_commits=$(count_commits_off_origin "$path" 2>&1); then
     reason="git can't list its commits: $local_commits"
     return 1
   fi
@@ -124,7 +131,7 @@ check_work() {
     fi
     # $heads holds one commit to a line, and git takes each as an argument.
     # shellcheck disable=SC2086
-    local_commits=$(git -C "$path" rev-list --count HEAD --not --remotes $heads)
+    local_commits=$(count_commits_off_origin "$path" $heads)
   fi
   if [[ $local_commits != 0 ]]; then
     reason="it has commits that are on no branch of origin and in no merged pull request."
