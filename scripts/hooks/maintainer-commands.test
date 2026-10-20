@@ -294,9 +294,6 @@ done
 # redirections or other commands that could run other code or change the files that the run reads after the hook
 # compared them, such as BASH_ENV, which bash runs first, and PATH, which can swap gh, jq or git
 test_cwd=$worktree expect_from "$orchestrator" "" scripts/configure-github 2 "$not_alone"
-for wrapper in "${wrappers[@]}"; do
-  test_cwd=$worktree expect_from "$orchestrator" "" "$wrapper scripts/configure-github" 2 "$not_alone"
-done
 for command in "cd '$worktree' && scripts/configure-github" "'$worktree/scripts/configure-github'" \
   "env -C '$worktree' scripts/configure-github" "GH_REPO=jtmpl/project scripts/configure-github" \
   "GH_REPO=jtmpl/other scripts/configure-github" "cd '$other_clone' && scripts/configure-github" \
@@ -308,6 +305,10 @@ for command in "cd '$worktree' && scripts/configure-github" "'$worktree/scripts/
   "scripts/configure-github | tail -n 5" "scripts/configure-github & git switch --quiet work" \
   "timeout 10m scripts/configure-github"; do
   expect_from "$orchestrator" "" "$command" 2 "$not_alone"
+done
+for wrapper in "${wrappers[@]}"; do
+  expect_from "$orchestrator" "" "$wrapper scripts/configure-github" 2 "$not_alone"
+  test_cwd=$worktree expect_from "$orchestrator" "" "$wrapper scripts/configure-github" 2 "$not_alone"
 done
 
 # The orchestrator's run while the main checkout's scripts folder differs from the one on main on GitHub: a file
