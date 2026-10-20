@@ -520,6 +520,15 @@ for command in 'gh pr review 5 -$b -Rsomeone/else' 'gh pr review 5 -${M}b -R som
   'gh issue close 5 -${X}c --repo=someone/else'; do
   expect_block Bash "$command" "$(other_repository someone/else)"
 done
+# An earlier word with an expansion can also become nothing, become a flag that takes a value, or leave the flag in its
+# own word without a value, as -b$X does when X is empty. Then the flag before a -R takes another word as its value.
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so the expansions stay as written.
+for command in 'gh pr comment 5 -b $EMPTY -b -Rsomeone/else' 'gh issue close 5 -c $EMPTY -c -Rsomeone/else' \
+  'gh pr review 5 -b $EMPTY -b --repo=someone/else' 'gh pr review 5 -b $EMPTY -b -R someone/else' \
+  'gh pr comment 5 $X -b -Rsomeone/else' 'gh pr comment 5 "$X" -b -Rsomeone/else' \
+  'gh pr comment 5 -b$X -b -Rsomeone/else' 'gh pr comment 5 -$X -b -Rsomeone/else'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
 expect_allow Bash 'gh run rerun 12 -dRjtmpl/listed'
 # gh repo edit, delete, archive and unarchive take no -R, so a -R there is part of the value of a flag before it, such
 # as the -d of gh repo edit, which takes a description.
