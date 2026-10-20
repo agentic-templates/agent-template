@@ -117,7 +117,7 @@ TRANSCRIPT_TAIL_BYTES = 400_000
 # How often meter --wake looks for a new note of scripts/hooks/hand-off between two readings
 HAND_OFF_CHECK_SECONDS = 60
 # .claude/agents/auditor.md says when a retrospective sets this.
-OUTPUT_TOKENS_PER_RETROSPECTIVE = 2_690_562
+OUTPUT_TOKENS_PER_RETROSPECTIVE = 4_543_090
 # A retrospective doesn't look back on the work of an earlier one.
 AUDITOR = "auditor"
 # The subjects of the findings of scripts/loop/waste.py that the meter printed last, so that meter --wake wakes only
