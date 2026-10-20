@@ -179,4 +179,3 @@ class InterruptedTest(TranscriptTest):
 
     def test_says_no_without_a_transcript(self) -> None:
         self.assertFalse(transcripts.is_interrupted(self.file))
-
