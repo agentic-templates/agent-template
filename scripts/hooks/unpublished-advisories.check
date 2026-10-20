@@ -24,13 +24,10 @@
 # It allows a gh command whose -R or --repo names the advisory's private fork, because the fork is private too. A commit
 # message counts in any repository, because step 3 of "Fix a security vulnerability" in docs/releasing.md pushes the
 # fork's commits to origin before the advisory is published. A command that posts to the advisory itself, such as gh api
-# with the advisory's endpoint, goes ahead, because the hook reads no gh api command. It doesn't read the text that git
-# takes from the repository for the message of a merge commit: the branch that the merge goes into, the URL and the
-# branch of FETCH_HEAD, the branch that @{-1} or - names, the upstream branch, when the command names no commit or names
-# the branch with @{upstream}, the URL of the remote that git pull pulls from when the command names a remote, the URL
-# that a url.<base>.insteadOf setting puts in place of the one the command gives, the message of an annotated tag that
-# git merges, and with --log or the setting merge.log, the subjects of the merged commits and the descriptions of their
-# branches.
+# with the advisory's endpoint, goes ahead, because the hook reads no gh api command. It doesn't read any text that git
+# takes from the repository or its settings for the message of a merge commit, such as the branch that the merge goes
+# into, the upstream branch, a remote's URL, the message of an annotated tag, and the subjects of the merged commits
+# that --log or the setting merge.log adds.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 
