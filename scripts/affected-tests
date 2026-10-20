@@ -6,7 +6,8 @@ gets, one to a line and in the order that it gets them. Run it from the reposito
 
 scripts/test-scripts --branch runs the test files that it prints. A test file is affected when the branch changes the
 test file, a file that it tests, a file that it sources, or a file that one of those names, and so on. The script
-follows no other names in the test file itself, because a test names many files only as sample input. A test file
+follows no other names in the test file itself, because a test names many files only as sample input. Nor does it
+follow the names in the files in EVERY_TEST or NAMES_AS_DATA, such as this script, which names files only as data. A test file
 tests the file of its name without .test, or with .check or .bash in place of .test, such as scripts/start-issue for
 scripts/start-issue.test, and the files that TESTED_FILES gives it. A file names another file in scripts/, .claude/,
 .codex/ or .github/:
