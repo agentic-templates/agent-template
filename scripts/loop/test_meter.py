@@ -455,6 +455,7 @@ class AccountLineTest(MeterTest):
         line = self.run_meter()[1][0]
         self.assertIn(" | per agent-minute session 0.4%, week 0.02% | ", line)
         self.assertTrue(line.endswith(" | stop"))
+        self.assertEqual(json.loads(self.log_lines()[-1])["orchestrator_share"], 0.75)
 
     def test_gives_the_weekly_meter_of_each_model(self) -> None:
         self.answer("claude", [usage_output(8, week=40, model_week=100)])
@@ -487,6 +488,7 @@ class AccountLineTest(MeterTest):
                     "week": {"used": 30.0, "resets": "2026-10-24T17:00:00-04:00"},
                 },
                 "per_agent_minute": {},
+                "orchestrator_share": 0.0,
             },
         )
 

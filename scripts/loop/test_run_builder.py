@@ -484,7 +484,7 @@ class ClaudeTest(RunBuilderTest):
         environment = call["env"]
         self.assertEqual(environment["CLAUDE_CONFIG_DIR"], "/claude-main")
         self.assertEqual(environment["CLAUDE_CODE_RETRY_WATCHDOG"], "1")
-        self.assertEqual(environment["LOOP_RUN"], "1")
+        self.assertEqual(environment["LOOP_RUN"], self.run_folder().name)
         self.assertEqual(environment["LOOP_HAND_OFF"], "builder")
         self.assertEqual(environment["GH_REPO"], "owner/repo")
         self.assertEqual([name for name in caller if name in environment], ["CLAUDE_CONFIG_DIR"])
