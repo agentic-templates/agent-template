@@ -26,10 +26,10 @@
 # fork's commits to origin before the advisory is published. A command that posts to the advisory itself, such as gh api
 # with the advisory's endpoint, goes ahead, because the hook reads no gh api command. It doesn't read the text that git
 # takes from the repository for the message of a merge commit: the branch that the merge goes into, the URL and the
-# branch of FETCH_HEAD, the branch that @{-1} or - names, the upstream branch, which git merges when the command names
-# no commit and which a name such as @{upstream} stands for, the URL of the remote that git pull pulls from when the
-# command gives no URL, the message of an annotated tag that git merges, and with --log, the subjects of the merged
-# commits and the descriptions of their branches.
+# branch of FETCH_HEAD, the branch that @{-1} or - names, the upstream branch, when the command names no commit or names
+# the branch with @{upstream}, the URL of the remote that git pull pulls from when the command gives no URL, the message
+# of an annotated tag that git merges, and with --log, the subjects of the merged commits and the descriptions of their
+# branches.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 
