@@ -46,12 +46,13 @@ each with its type and the number of its issue or pull request. It leaves out an
 run of scripts/loop/run-builder has ended, such as a builder of an orchestrator that was restarted. It gives each
 agent's context size, and the threshold at which scripts/hooks/hand-off told the agent to hand off its work, if it did.
 
-The last line gives the machine's free disk, free memory, swap in use, GPU use and GPU memory in use, its load, the
-orchestrator's context size, and whether a retrospective is due. One is due once the output tokens of the agents that
-started since the last retrospective, reasoning tokens included, reach OUTPUT_TOKENS_PER_RETROSPECTIVE in this
-script. The last retrospective is the newest merged pull request with the label retrospective, or the start of
-.loop/agents.jsonl before there is one. The meter counts the output tokens as scripts/loop/report counts them, and an
-agent of a session without an end line until the last line of its transcript. A request with no event in
+The last line gives the machine's free disk, free memory, swap in use, GPU use and GPU memory in use, how many of its
+cores were busy on average while the meter read the accounts, the orchestrator's context size, and whether a
+retrospective is due. One is due once the output tokens of the agents that started since the last retrospective,
+reasoning tokens included, reach OUTPUT_TOKENS_PER_RETROSPECTIVE in this script. The last retrospective is the newest
+merged pull request with the label retrospective, or the start of .loop/agents.jsonl before there is one. The meter
+counts the output tokens as scripts/loop/report counts them, and an agent of a session without an end line until the
+last line of its transcript. A request with no event in
 .loop/requests.jsonl counts the output tokens that the transcript gives, which leave out most of them, so the line
 says how many requests have none. Until a retrospective sets OUTPUT_TOKENS_PER_RETROSPECTIVE, one is due once the
 agents have worked {hours} hours since the last retrospective instead. The hours come from the periods on each agent's
@@ -64,9 +65,9 @@ first Claude account, and reads the IDs from the result. It keeps them in .loop/
 that starts with "retrospective due:" for each such ID, and one that starts with "model of" for each alias whose
 request failed.
 
-Once {building} agents that build run, the last line says so after the load, so that the loop starts no builder and no
-test build until fewer run. The agents that build are those of a builder type, the Codex runs and the test builds of a
-retrospective.
+Once {building} agents that build run, the last line says so after the busy cores, so that the loop starts no builder
+and no test build until fewer run. The agents that build are those of a builder type, the Codex runs and the test
+builds of a retrospective.
 
 The last line ends with a part that starts with "audit due:" for each sign of clear waste, so that the orchestrator
 starts a focused audit of it. scripts/loop/waste.py gives the thresholds of the three signs: a build of a builder type
@@ -115,7 +116,7 @@ import waste
 from accounts import SIGNED_IN, Account, AccountsError, claude_environment, load_accounts, own_account
 from github import GitHubError, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, note_files
-from machine import Machine, read_machine
+from machine import CpuTicks, CpuTicksError, Machine, busy_cores, read_cpu_ticks, read_machine
 from meter_waits import LONGEST_READING_GAP, READ_EVERY_SECONDS, WAKE_EVERY
 from usage import Meter, parse_usage
 
@@ -174,6 +175,8 @@ class Readings(NamedTuple):
     has_every_account: bool
     # The machine at the last reading
     machine: Machine
+    # The cores that were busy on average while the meter read the accounts, or None if it couldn't tell
+    busy_cores: float | None
 
 
 class Agent(NamedTuple):
@@ -235,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     findings = waste_findings(runs, transcripts, loop_folder, last)
     machine = machine_line(
         readings.machine,
+        readings.busy_cores,
         building=sum(agent.is_building for agent in running),
         context=orchestrator_context(loop_folder / "state.md", checkout),
         retrospective=" | ".join([retrospective, *model_notes]),
@@ -313,6 +317,7 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
     machine = read_machine(log.parent)
     with log.open("a") as handle:
         handle.write(json.dumps({"at": machine_time.isoformat(timespec="seconds"), "machine": machine}) + "\n")
+    ticks_before = cpu_ticks()
     runs = agent_log.read_runs(log.parent / "agents.jsonl")
     earlier_runs = run_minutes_by_type(runs)
     orchestrators = own_account(accounts, os.environ)
@@ -351,7 +356,17 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
         min(waits, default=UNKNOWN_RESET_WAIT_SECONDS),
         has_every_account,
         machine,
+        None if ticks_before is None else busy_cores(ticks_before, cpu_ticks(), machine["cores"]),
     )
+
+
+def cpu_ticks() -> CpuTicks | None:
+    """The machine's CPU ticks, or None with a warning that says what couldn't be read."""
+    try:
+        return read_cpu_ticks()
+    except CpuTicksError as error:
+        print(f"warning: {error}, so the busy cores are unknown.", file=sys.stderr)
+        return None
 
 
 def start_on(agent_type: str, accounts: list[Account], log: Path) -> int:
@@ -722,7 +737,9 @@ def describe(meter: Meter, reading_time: dt.datetime) -> str:
     return f"{meter['used']:g}% resets {shown}"
 
 
-def machine_line(machine: Machine, building: int, context: int | None, retrospective: str, findings: list[str]) -> str:
+def machine_line(
+    machine: Machine, busy: float | None, building: int, context: int | None, retrospective: str, findings: list[str]
+) -> str:
     memory, swap = machine["memory_free_gb"], machine["swap_used_gb"]
     context_part = "orchestrator context unknown" if context is None else f"orchestrator context {context // 1000}k"
     return " | ".join(
@@ -732,13 +749,17 @@ def machine_line(machine: Machine, building: int, context: int | None, retrospec
             "memory unknown" if memory is None else f"memory {memory:.0f} GB free",
             "swap unknown" if swap is None else f"swap {swap:.1f} GB used",
             gpu_part(machine),
-            f"load {machine['load']:.1f} on {machine['cores']} cores",
+            cores_part(busy, machine["cores"]),
             *building_part(building),
             context_part,
             retrospective,
             *(f"audit due: {finding}" for finding in findings),
         ]
     )
+
+
+def cores_part(busy: float | None, cores: int) -> str:
+    return f"busy cores of {cores} unknown" if busy is None else f"{busy:.1f} of {cores} cores busy"
 
 
 def building_part(building: int) -> list[str]:
