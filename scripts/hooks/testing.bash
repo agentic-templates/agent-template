@@ -69,16 +69,18 @@ export HOOK_GH_VERSION_FILE=/dev/null
 # Sets quoted_json to a text as a JSON string, in quotes: quote_json <text>
 # The cases build their inputs without jq, because starting jq took 4 ms of CPU time for each case.
 quote_json() {
-  local LC_ALL=C text=$1 character code
-  text=${text//\\/\\\\}
-  text=${text//\"/\\\"}
-  # JSON escapes each control character, such as a line break, which this writes as \u000a.
-  while [[ $text =~ [[:cntrl:]] ]]; do
-    character=${BASH_REMATCH[0]}
-    printf -v code '\\u%04x' "'$character"
-    text=${text//"$character"/$code}
+  local LC_ALL=C rest=$1 escaped="" code
+  rest=${rest//\\/\\\\}
+  rest=${rest//\"/\\\"}
+  # JSON escapes each control character, such as a line break, which this writes as \u000a. The loop moves the text up
+  # to each control character in turn from rest to escaped. For the line breaks in a text of 60 KB, that took bash 3.2
+  # 0.4 seconds of CPU time, and replacing them with ${rest//…} took 36 seconds.
+  while [[ $rest =~ ^([^[:cntrl:]]*)([[:cntrl:]]) ]]; do
+    printf -v code '\\u%04x' "'${BASH_REMATCH[2]}"
+    escaped+=${BASH_REMATCH[1]}$code
+    rest=${rest:${#BASH_REMATCH[0]}}
   done
-  quoted_json="\"$text\""
+  quoted_json="\"$escaped$rest\""
 }
 
 # Sets sample_input_json to a sample of what a tool sends the hook before an action:

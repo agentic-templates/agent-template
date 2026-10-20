@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests the functions of testing.bash that stand in for the tools: make_sample_input makes the input that jq made from
-# the same values, and run_hook runs the hook as a bash process of its own runs it.
+# Tests the functions of testing.bash that stand in for the tools: make_sample_input makes, in little CPU time, the input
+# that jq made from the same values, and run_hook runs the hook as a bash process of its own runs it.
 set -euo pipefail
 # shellcheck source=scripts/hooks/testing.bash
 source "${BASH_SOURCE[0]%/*}/testing.bash"
@@ -48,10 +48,16 @@ sample_input_from_jq() {
 
 # Checks that make_sample_input makes the input that jq makes: expect_same_input <tool> <tool name> <value>
 expect_same_input() {
+  make_sample_input "$@"
+  expect_input_from_jq "$@"
+}
+
+# Checks that sample_input_json, which make_sample_input made, is the input that jq makes from the same values:
+# expect_input_from_jq <tool> <tool name> <value>
+expect_input_from_jq() {
   local expected actual
   case_count=$((case_count + 1))
   expected=$(sample_input_from_jq "$@" | jq -S .)
-  make_sample_input "$@"
   actual=$(jq -S . 2>&1 <<<"$sample_input_json") || true
   if [[ $actual != "$expected" ]]; then
     echo "error: for $1, $2 and [$3], make_sample_input must make the input $expected, but it made $sample_input_json" >&2
@@ -70,13 +76,33 @@ done
 # Values with the characters that JSON escapes, and others that it doesn't
 # shellcheck disable=SC2016 # The values are text, so their $ stays as written.
 values=('' 'say "hi" \ there' '\n is two characters' $'two\nlines\twith a tab and a return\r'
-  $'\001 \037 \177 \033' 'é ü 漢字 😀' '$HOME `pwd` $(id)')
+  $'\001 \037 \177 \033' 'é ü 漢字 😀' $'é\n漢字\t😀' '$HOME `pwd` $(id)')
 for value in "${values[@]}"; do
   expect_same_input claude-code Bash "$value"
 done
 test_cwd='/tmp/a "folder" with \ in it'
 expect_same_input codex Bash ls
 test_cwd=$test_home/project
+
+# make_sample_input makes the input of a long text of many lines in little CPU time, because block-log.test's limit
+# for the hook on a long command includes making its input. bash 3.2 took 36 seconds to replace the line breaks in a
+# text of 60 KB. The case measures the CPU time, because a busy machine, as in CI, stretches the time on the clock.
+long_text=""
+for ((line = 1; line <= 2500; line++)); do
+  long_text+="Line $line of a long text"$'\n'
+done
+max_cpu_milliseconds=2000
+TIMEFORMAT='%U %S'
+{ time make_sample_input claude-code Bash "$long_text"; } 2>"$copies/cpu-time"
+read -r user_seconds system_seconds <"$copies/cpu-time"
+# The times have three decimals, so without the dot they're in milliseconds.
+cpu_milliseconds=$((10#${user_seconds/./} + 10#${system_seconds/./}))
+case_count=$((case_count + 1))
+if ((cpu_milliseconds > max_cpu_milliseconds)); then
+  echo "error: make_sample_input took $cpu_milliseconds ms of CPU time for a text of ${#long_text} characters in 2500 lines, and the limit is $max_cpu_milliseconds ms." >&2
+  failed_cases=$((failed_cases + 1))
+fi
+expect_input_from_jq claude-code Bash "$long_text"
 
 # run_hook gives the result that the hook gives in a bash process of its own.
 for command in ls 'cat .env' 'sudo ls' 'git push --force origin main' 'gh pr merge 5 --admin'; do
