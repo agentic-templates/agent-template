@@ -327,6 +327,35 @@ for wrapper in command noglob time "time -p" "'time'"; do
   expect_block Bash "$wrapper cd '$other_clone' && scripts/configure-github" "$cd_after_wrapper"
 done
 
+# A run that names the script by another path, which the hook follows through the cd, .. and symbolic links: a link to
+# the scripts folder, and a link to the script in the home folder, whose run reads admin-access from the link's folder
+# instead. The shell looks for a name without a / in the folders of PATH, so the hook can't tell which file that runs.
+ln -s "$main_checkout/scripts" "$folders/tools"
+ln -s "$main_checkout/scripts/configure-github" "$test_home/configure"
+runs_by_another_path=(../project/scripts/../scripts/configure-github scripts/./configure-github "'$folders/tools/configure-github'")
+# shellcheck disable=SC2088 # The commands are the text that the agent sends, so ~ stays as written.
+runs_by_another_path_not_alone=(
+  "cd scripts && ./configure-github" "cd scripts && bash configure-github" "~/configure" "bash --rcfile ~/configure -i"
+)
+TEST_RULESETS=main
+for command in "${runs_by_another_path[@]}" "${runs_by_another_path_not_alone[@]}"; do
+  expect_block Bash "$command" "$second_run"
+done
+expect_allow Bash "cd scripts && configure-github"
+TEST_RULESETS=none
+for command in "${runs_by_another_path[@]}"; do
+  expect_allow Bash "$command"
+done
+for command in "${runs_by_another_path_not_alone[@]}"; do
+  expect_block Bash "$command" "$not_alone"
+done
+echo "# A change that hasn't merged" >>"$main_checkout/scripts/admin-access"
+for command in "${runs_by_another_path[@]}"; do
+  expect_block Bash "$command" "$unlike_main"
+done
+git -C "$main_checkout" checkout --quiet -- scripts/admin-access
+rm "$folders/tools" "$test_home/configure"
+
 # A run of scripts/configure-github by the orchestrator, the session that the state file names, once the settings were
 # applied. It runs the main checkout's script in the main checkout, while the checkout's scripts folder is the same as
 # on main on GitHub.
