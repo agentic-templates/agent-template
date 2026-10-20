@@ -10,8 +10,10 @@
 # - the subject and body of the commit that gh pr merge makes
 # - the title and notes of gh release create, its alias gh release new, and gh release edit
 # - each message and trailer that -m, --message, -F, --file and --trailer give git commit
+# - each message that -m, --message, -F and --file give git merge, for the merge commit
 # It reads the text as read_text and read_body in helpers.bash read it, as the command writes it, without running $( )
-# or filling in variables. It finds an ID in any case, because the name of an advisory's private fork holds the ID in
+# or filling in variables. It blocks a relative path to a body file when it can't tell the folder that the path starts
+# from, as after cd "$folder". It finds an ID in any case, because the name of an advisory's private fork holds the ID in
 # lower case. It asks GitHub about each ID that it finds, so a command without one asks nothing. When GitHub answers that
 # the repository has no advisory of that ID, the hook allows the ID. GitHub answers so for an advisory of another
 # repository, such as one that Dependabot names, and also for one that gh's account may not see. When gh fails in
@@ -23,11 +25,13 @@
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 
-# The flags that take a value, as gh release create --help, gh release edit --help and git commit -h list them. git
-# reads the value of -S and -u only from the same word, as in -Skey, so the list of git commit leaves them out.
+# The flags that take a value, as gh release create --help, gh release edit --help, git commit -h and git merge -h list
+# them. git reads the value of -S, and of the -u of git commit, only from the same word, as in -Skey, so the lists of
+# git leave them out.
 release_create_flags_with_value=" --discussion-category -n --notes -F --notes-file --notes-start-tag --target -t --title -R --repo "
 release_edit_flags_with_value=" --discussion-category -n --notes -F --notes-file --tag --target -t --title -R --repo "
-commit_flags_with_value=" -F --file --author --date -m --message -c --reedit-message -C --reuse-message --fixup --squash --trailer -t --template --cleanup -U --unified --inter-hunk-context --pathspec-from-file "
+git_commit_flags_with_value=" -F --file --author --date -m --message -c --reedit-message -C --reuse-message --fixup --squash --trailer -t --template --cleanup -U --unified --inter-hunk-context --pathspec-from-file "
+git_merge_flags_with_value=" --cleanup -s --strategy -X --strategy-option -m --message -F --file --into-name "
 
 # A GHSA ID in any case. GitHub writes GHSA in capitals and the rest in lower case.
 ghsa_id='[Gg][Hh][Ss][Aa]-[0-9A-Za-z]{4}-[0-9A-Za-z]{4}-[0-9A-Za-z]{4}'
@@ -69,27 +73,57 @@ read_gh_command_text() {
   esac
 }
 
-# Adds each message and trailer that a git commit command in command_words gives to posted_text.
-read_commit_message() {
-  local i word flag value value_is_next_word flags_before
-  read_git_options
-  if [[ ${command_words[git_subcommand]:-} != commit ]]; then
+# Prints the folder that git opens a relative path to the file of -F from: the folder that the command runs in, as each
+# -C before the subcommand changes it, or nothing when the hook can't tell the folder. read_git_options puts the agent's
+# folder first in git_folder, so the loop starts after it.
+git_file_folder() {
+  local i
+  for ((i = 2; i < ${#git_folder[@]}; i += 2)); do
+    if [[ ${git_folder[i]} == -C ]]; then
+      change_command_folder "${git_folder[i + 1]}"
+    fi
+  done
+  printf '%s' "$command_folder"
+}
+
+# Sets body_source, body_file and body_folder for read_body to read the file of -F: read_message_file <path>
+# git commit reads - as standard input, and the shell opens the file of a < redirection from the folder that the command
+# runs in. git opens any other file from the folder that git_file_folder prints, and git merge opens a file named - too.
+read_message_file() {
+  body_source=file body_file=$1
+  if [[ $1 == - && ${command_words[git_subcommand]} == commit ]]; then
     return 0
   fi
+  if [[ $1 == - ]]; then
+    body_file=./-
+  fi
+  body_folder=$(git_file_folder)
+}
+
+# Adds each message and trailer that a git commit or git merge command in command_words gives to posted_text.
+read_commit_message() {
+  local flags_with_value i word flag value value_is_next_word flags_before
+  read_git_options
+  case ${command_words[git_subcommand]:-} in
+    commit) flags_with_value=$git_commit_flags_with_value ;;
+    merge) flags_with_value=$git_merge_flags_with_value ;;
+    *) return 0 ;;
+  esac
   for ((i = git_subcommand + 1; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
     case $word in
       --) return 0 ;;
-      -*) split_flag_word "$word" "$commit_flags_with_value" ;;
+      -*) split_flag_word "$word" "$flags_with_value" ;;
       *) continue ;;
     esac
     if [[ -n $value_is_next_word ]]; then
       i=$((i + 1))
       value=${command_words[i]:-}
     fi
+    body_folder=$command_folder
     case $flag in
       -m | --message | --trailer) body_source=text body_word=$value body_may_expand=${command_word_may_expand[i]:-} ;;
-      -F | --file) body_source=file body_file=$value ;;
+      -F | --file) read_message_file "$value" ;;
       *) continue ;;
     esac
     read_body "$what_is_checked" -m -F
@@ -149,13 +183,9 @@ check_advisory_ids() {
 }
 
 # Blocks the gh or git command in command_words when it would post the ID of an advisory that isn't published. A
-# relative path to a body file starts from the folder that the command runs in, as follow_cd in helpers.bash finds it,
-# so the hook allows the command after a cd to a folder that it can't tell.
+# relative path to a body file starts from the folder that the command runs in, as follow_cd in helpers.bash finds it.
 check_posted_text() {
-  if [[ -z $command_folder ]] || ! cd -- "$command_folder" 2>/dev/null; then
-    return 0
-  fi
-  posted_text="" destination=""
+  posted_text="" destination="" body_folder=$command_folder
   case ${command_words[0]##*/} in
     gh) read_gh_command_text ;;
     git) read_commit_message ;;

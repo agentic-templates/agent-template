@@ -855,12 +855,22 @@ is_written() {
 
 # Sets body to the text of a file, or blocks when the hook can't read the file before the command runs:
 # read_body_file <path as the command writes it>
+# A relative path starts from body_folder when the check sets it, and otherwise from the current folder. A check sets
+# body_folder to empty when it can't tell the folder, as after cd "$folder", and the function then blocks a relative
+# path.
 read_body_file() {
   local path=$1
   # The command's words come as written, so ~ is matched before the shell expands it.
   # shellcheck disable=SC2088
   case $path in
     "~/"*) path=$HOME/${path#"~/"} ;;
+    /*) ;;
+    *)
+      if [[ -z ${body_folder-.} ]]; then
+        block "Blocked: this hook checks the body file before the command runs, but it can't tell which folder the path $1 starts from, such as after a cd to a folder that a variable names. Give the file's absolute path."
+      fi
+      path=${body_folder-.}/$path
+      ;;
   esac
   if is_written "$1" || [[ ! -f $path || ! -r $path ]]; then
     block "Blocked: this hook checks the body file before the command runs, and $1 doesn't exist yet or the command writes it. Write the file in a command of its own first, and give its path without variables."

@@ -132,6 +132,8 @@ other_templates=(
   "git commit -m 'feat: skip imported expenses' -m TEXT"
   "git commit -m 'feat: skip imported expenses' --trailer TEXT"
   "git -C . commit --amend -m TEXT"
+  "git merge --no-ff -m TEXT topic"
+  "git merge -s ort --message TEXT topic"
 )
 for template in "${other_templates[@]}"; do
   expect_block Bash "$(with_text "$template" "fix: check the paths that $draft names")" "$(blocked "$draft")"
@@ -169,6 +171,7 @@ expect_block Bash "gh issue comment 7 --body-file body.md" "$(blocked "$draft")"
 expect_block Bash "gh pr create --title 'feat: skip imported expenses' -F body.md" "$(blocked "$draft")"
 expect_block Bash "git commit -F body.md" "$(blocked "$draft")"
 expect_block Bash "git commit --file=body.md" "$(blocked "$draft")"
+expect_block Bash "git merge --no-ff -F body.md topic" "$(blocked "$draft")"
 expect_block Bash "git commit -F - <<'EOF'
 $(body_with "$draft")
 EOF" "$(blocked "$draft")"
@@ -185,6 +188,37 @@ expect_block Bash "gh issue comment -R jtmpl/other 7 --body 'Fix $draft'" "$(blo
 mkdir "$test_cwd/notes"
 body_with "$draft" >"$test_cwd/notes/message.md"
 expect_block Bash "cd notes && git commit -F message.md" "$(blocked "$draft")"
+
+# git opens a relative path to the file of -F from the folder that its -C options lead to, but the shell opens the file
+# of a < redirection from the folder that the command runs in.
+mkdir "$test_cwd/notes/drafts"
+body_with "$draft" >"$test_cwd/notes/drafts/clean.md"
+printf '%s\n' "$change_body" >"$test_cwd/clean.md"
+expect_block Bash "git -C notes commit -F message.md" "$(blocked "$draft")"
+expect_block Bash "git -C notes -C drafts commit -F clean.md" "$(blocked "$draft")"
+expect_block Bash "git -C notes/drafts merge --no-ff --file=clean.md topic" "$(blocked "$draft")"
+expect_allow Bash "git -C notes/drafts commit -F - <clean.md"
+# git merge reads - as the name of a file, not as standard input.
+cp "$test_cwd/notes/drafts/clean.md" "$test_cwd/notes/drafts/-"
+expect_block Bash "git -C notes/drafts merge --no-ff -F - topic <clean.md" "$(blocked "$draft")"
+body_with "$published" >"$test_cwd/notes/published.md"
+expect_allow Bash "git -C notes commit -F published.md"
+
+# After a cd or a git -C that the hook can't follow, it still reads the text that the command writes, and a body file by
+# its absolute path, but it can't tell which file a relative path names.
+unknown_folder_block="Blocked: this hook checks the body file before the command runs, but it can't tell which folder the path body.md starts from, such as after a cd to a folder that a variable names. Give the file's absolute path."
+for cd_command in "cd \"\$WORKTREE\"" "cd /no/such/folder" "cd -"; do
+  expect_block Bash "$cd_command && git commit -m 'fix: check the paths that $draft names'" "$(blocked "$draft")"
+  expect_block Bash "$cd_command && gh issue comment 7 --body 'Fix $draft'" "$(blocked "$draft")"
+  expect_block Bash "$cd_command && gh issue comment 7 --body-file '$test_cwd/body.md'" "$(blocked "$draft")"
+  expect_block Bash "$cd_command && gh issue comment 7 --body-file body.md" "$unknown_folder_block"
+  expect_block Bash "$cd_command && git commit -F - <body.md" "$unknown_folder_block"
+  expect_allow Bash "$cd_command && git commit -m 'fix: check the paths that $published names'"
+done
+expect_block Bash "git -C \"\$WORKTREE\" commit -m 'fix: check the paths that $draft names'" "$(blocked "$draft")"
+expect_block Bash "git -C \"\$WORKTREE\" commit -F body.md" "$unknown_folder_block"
+expect_block Bash "git -C /no/such/folder commit -F body.md" "$unknown_folder_block"
+expect_block Bash "git -C \"\$WORKTREE\" commit -F - <body.md" "$(blocked "$draft")"
 
 # The ID in capitals, in a link, and in lower case in the name of the advisory's private fork, as the text writes it
 expect_block Bash "gh issue comment 7 --body 'Fix GHSA-2C5X-3M4V-7Q8R'" "$(blocked GHSA-2C5X-3M4V-7Q8R)"
