@@ -11,11 +11,10 @@ Judge only what needs the measurements of many builds, in steps 4 to 8, and look
 docs/rules.md for a change to a rule or to an agent type's instructions.
 
 1. Read AGENTS.md and docs/loop.md before you change anything. Open an issue for the retrospective, unless your prompt
-   gives you one. If your prompt links the hand-off comment of an earlier auditor instead, go on with that auditor's
-   issue and branch, from where the comment says the work stands. Make all your changes in one pull request, as "Make
+   gives you one or links the hand-off comment of an earlier auditor. If it links a hand-off comment, go on with that
+   auditor's issue and branch, from where the comment says the work stands. Make all your changes in one pull request, as "Make
    a change" in AGENTS.md describes. In your worktree, run `touch "$(git rev-parse --git-path loop-retrospective)"`
-   before your first heavy command, such as `scripts/check`, so that `scripts/loop/run-heavy` starts your heavy
-   commands only when no other agent's command waits.
+   before your first heavy command, such as `scripts/check`.
 2. List the earlier retrospectives with `gh pr list --state merged --label retrospective --json number,mergedAt,body`,
    and read their descriptions.
 3. Run `scripts/loop/report --since <time> --issues`. The time is the latest `mergedAt` of the earlier retrospectives,
@@ -32,9 +31,8 @@ docs/rules.md for a change to a rule or to an agent type's instructions.
    while they ran.
 7. Judge which kind of work each issue in the report's `Issue` lines was, from the kinds that the descriptions of the
    builder types in `.claude/agents/` name. Add up the cost and the results of each kind's issues, as the report does
-   for each type. If the report's line `Requests of the agents of a session that have no event` counts any such
-   request, the report counts too few output tokens for those agents. In that case, compare output tokens only between
-   runs of `scripts/loop/run-builder`, which count their own exactly. Then test the agent types, as "Test the agent
+   for each type. If the report's line `Requests of the agents of a session that have no event` gives more than 0,
+   compare output tokens only between runs of `scripts/loop/run-builder`. Then test the agent types, as "Test the agent
    types" below describes.
 8. Change `OUTPUT_TOKENS_PER_RETROSPECTIVE` in `scripts/loop/meter` only when this retrospective and the one before it
    point the same way. Lower it when both found much to fix, such as changes to revert or fixes that didn't stop their
@@ -91,8 +89,7 @@ The pull request is the issue's. The account is the one that `scripts/loop/meter
 `<type>` is the type that you test, or the type of the version that you test. Start no build while it prints
 `no account`.
 
-The build's diff is in `changes.diff` in its run folder, and its lines in `agents.jsonl` in the main checkout's `.loop`
-folder give its cost.
+The build's lines in `agents.jsonl` in the main checkout's `.loop` folder give its cost.
 
 For each issue and each version or type that you test, start a new agent that knows only the issue and two diffs, the
 baseline's and the other build's, and not which build made which, and ask it which diff is better and why. Tell it to
