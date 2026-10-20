@@ -112,7 +112,14 @@ expect_block Bash 'sysctl -w kern.maxfiles=65536' "$(machine sysctl)"
 expect_block Bash 'networksetup -setdnsservers Wi-Fi 1.1.1.1' "$(machine networksetup)"
 expect_block Bash 'mkfs.ext4 /dev/sdb1' "$(machine mkfs.ext4)"
 expect_block Bash 'shutdown -h now' "$(machine shutdown)"
+expect_block Bash 'diskutil apfs deleteVolume disk3s5' "$(machine diskutil)"
+expect_block Bash 'diskutil apfs' "$(machine diskutil)"
+expect_block Bash 'tmutil deletelocalsnapshots /' "$(machine tmutil)"
+expect_block Bash 'tmutil localsnapshot' "$(machine tmutil)"
 expect_allow Bash 'diskutil list'
+expect_allow Bash 'diskutil apfs list'
+expect_allow Bash 'diskutil apfs listSnapshots /'
+expect_allow Bash 'tmutil listlocalsnapshots /'
 expect_allow Bash 'defaults read com.apple.dock'
 expect_allow Bash 'launchctl getenv PATH'
 expect_allow Bash 'systemctl status nginx'

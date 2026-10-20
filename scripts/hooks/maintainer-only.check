@@ -90,7 +90,14 @@ changes_machine() {
       chsh | dscl | passwd | shutdown | reboot | halt | ufw | iptables | pfctl | bless)
       return 0
       ;;
-    diskutil) ! is_one_of "$first" list info activity ;;
+    diskutil)
+      # diskutil apfs takes a verb of its own, as in diskutil apfs list and diskutil apfs deleteVolume.
+      if [[ $first == apfs ]]; then
+        ! is_one_of "${command_words[2]:-}" list listSnapshots listCryptoUsers listUsers listVolumeGroups
+      else
+        ! is_one_of "$first" list info activity
+      fi
+      ;;
     defaults) ! is_one_of "$first" read read-type domains find help ;;
     launchctl) ! is_one_of "$first" list print print-disabled getenv help version blame ;;
     crontab) [[ $first != -l ]] ;;
@@ -98,7 +105,10 @@ changes_machine() {
     scutil) ! is_one_of "$first" --get --dns --proxy --nwi -r ;;
     networksetup) [[ ! $first =~ ^-(list|get|print) ]] ;;
     softwareupdate) ! is_one_of "$first" -l --list --history ;;
-    tmutil) ! is_one_of "$first" status listbackups latestbackup destinationinfo machinedirectory version ;;
+    tmutil)
+      ! is_one_of "$first" status listbackups latestbackup destinationinfo machinedirectory version \
+        listlocalsnapshots listlocalsnapshotdates
+      ;;
     systemctl)
       # The first word that isn't an option, as in systemctl --user restart app
       for ((i = 1; i < ${#command_words[@]}; i++)); do
