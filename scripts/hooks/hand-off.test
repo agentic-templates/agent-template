@@ -65,7 +65,7 @@ run_hook() {
     '{session_id: $session, transcript_path: $transcript, cwd: $cwd, hook_event_name: "PostToolUse", tool_name: "Read",
       tool_input: {file_path: "README.md"}} + (if $agent == "" then {} else {agent_id: $agent, agent_type: $type} end)')
   shift 2
-  output=$(env -u LOOP_HAND_OFF -u LOOP_DIR "$@" "$repository/scripts/hooks/hand-off" <<<"$input" 2>&1) || true
+  output=$(env -u LOOP_HAND_OFF -u LOOP_RUN -u LOOP_DIR "$@" "$repository/scripts/hooks/hand-off" <<<"$input" 2>&1) || true
 }
 
 # Checks what the hook told the agent: expect_note <description> <message, or nothing>
@@ -382,6 +382,113 @@ case_count=$((case_count + 1))
 if ((notes_given != 1)); then
   echo "error: Of 8 calls that end at the same time, one must give the note, but $notes_given gave it." >&2
   failed_cases=$((failed_cases + 1))
+fi
+
+# Checks the text in the file of a note: expect_note_text <description> <file name> <text>
+expect_note_text() {
+  local actual=""
+  case_count=$((case_count + 1))
+  if [[ -f $notes/$2 ]]; then
+    actual=$(<"$notes/$2")
+  fi
+  if [[ $actual != "$3" ]]; then
+    echo "error: $1, the file $2 in .loop/hand-offs must hold \"$3\", but it holds \"$actual\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# The notes about the account's room, which scripts/loop/meter --hand-off gives from the account's latest reading. The
+# meter needs uv, and the bash-3-2 and macos jobs of CI don't install it, so these cases run only where uv is installed.
+if command -v uv >/dev/null; then
+  mkdir -p "$repository/scripts/loop"
+  cp -p scripts/loop/meter scripts/loop/*.py "$repository/scripts/loop/"
+  cp -p .python-version "$repository/"
+  rm -rf "$notes"
+  base_time=$(jq -n 'now | floor')
+  # Prints the time this many minutes after the base time, as the logs give times: at <minutes>
+  at() {
+    jq -n -r --argjson base "$base_time" --argjson minutes "$1" '$base + $minutes * 60 | todate'
+  }
+  # Adds a reading of the account claude, a minute before the base time, with the 5-hour meter at the percentage, at
+  # 0.25 points an agent-minute: add_reading <percentage>
+  add_reading() {
+    jq -c -n --argjson used "$1" --arg at "$(at -1)" --arg session_reset "$(at 120)" --arg week_reset "$(at 4320)" \
+      '{at: $at, account: "claude", meters: {session: {used: $used, resets: $session_reset},
+        week: {used: 30, resets: $week_reset}}, per_agent_minute: {session: 0.25, week: 0.01}, orchestrator_share: 0}' \
+      >>"$repository/.loop/meter.jsonl"
+  }
+  # An earlier builder ran 30 minutes, so a builder's long run takes 30 minutes. At the reading, the subagent r1 had run
+  # 1 minute, so it still needs 29, or 7.25 points, and the builder r2 of scripts/loop/run-builder had run 20, so it
+  # still needs 2.5 points. Until an agent with a note ends, a hand-off takes 10 minutes, or 2.5 points.
+  run_builder=88888888-aaaa-4bbb-8ccc-000000000008
+  {
+    jq -c -n --arg at "$(at -180)" '{at: $at, event: "start", id: "toolu_09", type: "builder", account: "claude"}'
+    jq -c -n --arg at "$(at -150)" '{at: $at, event: "end", id: "toolu_09", minutes: 30}'
+    jq -c -n --arg at "$(at -2)" '{at: $at, event: "start", id: "toolu_r1", type: "builder", account: "claude"}'
+    jq -c -n --arg at "$(at -21)" '{at: $at, event: "start", id: "r2-20261020", type: "builder", account: "claude"}'
+  } >"$repository/.loop/agents.jsonl"
+  mkdir -p "$projects/$orchestrator/subagents"
+  echo '{"agentType": "builder", "toolUseId": "toolu_r1", "spawnDepth": 1}' \
+    >"$projects/$orchestrator/subagents/agent-r1.meta.json"
+  add_reply "$orchestrator" r1 100000
+  add_reply "$run_builder" "" 100000
+  room_soon="Your account's usage limit leaves too little room for all its agents to finish, and you're among those with the most work left. Hand off your work at your next stopping point, so that a fresh agent continues it."
+  room_now="Your account's usage limit leaves its agents only the room to hand off. Hand off your work as soon as the step you're on ends, so that a fresh agent continues it."
+
+  add_reading 90.25
+  run_hook "$orchestrator" r1
+  expect_note "While the room covers what every agent still needs" ""
+  run_hook "$run_builder" "" LOOP_HAND_OFF=builder LOOP_RUN=r2-20261020
+  expect_note "For a builder of scripts/loop/run-builder, while the room covers what every agent still needs" ""
+  add_reading 90.5
+  run_hook "$run_builder" "" LOOP_HAND_OFF=builder LOOP_RUN=r2-20261020
+  expect_note "For the agent that needs less, once the room doesn't cover what every agent still needs" ""
+  run_hook "$orchestrator" r1
+  expect_note "For the agent that needs the most, once the room doesn't cover what every agent still needs" \
+    "$room_soon $how"
+  expect_note_text "For the agent that needs the most" r1.room-soon toolu_r1
+  run_hook "$orchestrator" r1
+  expect_note "After the note to hand off at the next stopping point" ""
+  add_reply "$orchestrator" r1 410000
+  run_hook "$orchestrator" r1
+  expect_note "Past 400k tokens, after the note about the room" ""
+  add_reading 94.75
+  run_hook "$run_builder" "" LOOP_HAND_OFF=builder LOOP_RUN=r2-20261020
+  expect_note "For the agent that needs less, while the room covers its need and the other's hand-off" ""
+  add_reading 95
+  run_hook "$run_builder" "" LOOP_HAND_OFF=builder LOOP_RUN=r2-20261020
+  expect_note "For a builder of scripts/loop/run-builder, once the room is down to the hand-offs" "$room_now $how"
+  expect_note_text "For a builder of scripts/loop/run-builder" "$run_builder.room-now" r2-20261020
+  run_hook "$orchestrator" r1
+  expect_note "For a subagent, once the room is down to the hand-offs" "$room_now $how"
+  add_reply "$orchestrator" r1 510000
+  run_hook "$orchestrator" r1
+  expect_note "Past 500k tokens, after the note about the room" ""
+  expect_note_files "After the notes about the room" \
+    "$run_builder.room-now r1.room-now r1.room-soon"
+
+  # An agent that got the note about its context before the hook wrote ids in the notes' files, which the meter doesn't
+  # count as told
+  rm -rf "$notes"
+  mkdir "$notes"
+  touch "$notes/r1.400000"
+  add_reply "$orchestrator" r1 100000
+  add_reading 90.5
+  run_hook "$orchestrator" r1
+  expect_note "After the note to hand off at the next stopping point about the context" ""
+  add_reply "$orchestrator" r1 410000
+  rm "$notes/r1.400000"
+  add_reading 90.25
+  run_hook "$orchestrator" r1
+  expect_note "Past 400k tokens, while the room covers what every agent needs" "$soon $how"
+  expect_note_text "For a note about the context" r1.400000 toolu_r1
+
+  rm -rf "$notes"
+  mkdir "$notes"
+  printf toolu_r1 >"$notes/r1.room-soon"
+  add_reply "$orchestrator" r1 510000
+  run_hook "$orchestrator" r1
+  expect_note "Past 500k tokens, after the note about the room to hand off at the next stopping point" "$now $how"
 fi
 
 if ((failed_cases > 0)); then

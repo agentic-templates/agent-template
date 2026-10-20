@@ -1,6 +1,6 @@
-"""Decides which agent types an account can start, and the account to start each type on, as scripts/loop/meter --help
-describes, from the account's meters, its usage per agent-minute, the agents that run on it and the minutes of the
-agents' earlier runs."""
+"""Decides which agent types an account can start, the account to start each type on, and which of the account's agents
+hand off their work, as scripts/loop/meter --help describes, from the account's meters, its usage per agent-minute, the
+agents that run on it and the minutes of the agents' earlier runs and hand-offs."""
 
 import datetime as dt
 import math
@@ -29,13 +29,22 @@ FIRST_RUN_MINUTES = 30.0
 # rather than too much.
 FIRST_SESSION_PER_AGENT_MINUTE = 0.12
 FIRST_WEEK_PER_AGENT_MINUTE = 0.02
+# The time that a hand-off takes until an agent that got a note of scripts/hooks/hand-off ends: between the 4 and 18
+# minutes from the note to the end of the first two hand-offs of the loop's agents, in October 2026.
+FIRST_HAND_OFF_MINUTES = 10.0
+# The notes that scripts/loop/meter --hand-off gives an agent: to hand off its work at its next stopping point, and as
+# soon as the step it's on ends
+HAND_OFF_SOON = "soon"
+HAND_OFF_NOW = "now"
 
 
 class Running(NamedTuple):
-    """An agent that runs on the account: its type, and the minutes that it has run."""
+    """An agent that runs on the account: its type, the minutes that it has run, and the id of its start line in
+    agents.jsonl, or None for an agent that the meter named the account for and that has no start line yet."""
 
     type: str
     minutes: float
+    id: str | None = None
 
 
 class Room(NamedTuple):
@@ -49,6 +58,15 @@ class Room(NamedTuple):
     orchestrator_share: float
 
 
+class HandOffs(NamedTuple):
+    """What an agent's note to hand off its work depends on besides the room: the ids of the agents that still run, of
+    those that were told to hand off their work, and the minutes that a long hand-off takes."""
+
+    running: set[str]
+    told: set[str]
+    minutes: float
+
+
 class Candidate(NamedTuple):
     """An account that can be named for an agent."""
 
@@ -58,17 +76,20 @@ class Candidate(NamedTuple):
     is_orchestrators: bool
 
 
-def agents_since_reading(started: list[tuple[dt.datetime, str]], named: list[tuple[dt.datetime, str]]) -> list[Running]:
-    """The agents that started on an account since its reading, at 0 minutes, from the time and type of each start line
-    since then and of each time that the meter named the account since then. A start line takes the oldest earlier
-    naming of its type, because that agent started after the meter named its account, so it counts once."""
+def agents_since_reading(
+    started: list[tuple[dt.datetime, str, str]], named: list[tuple[dt.datetime, str]]
+) -> list[Running]:
+    """The agents that started on an account since its reading, at 0 minutes, from the time, type and id of each start
+    line since then, and the time and type of each time that the meter named the account since then. A start line takes
+    the oldest earlier naming of its type, because that agent started after the meter named its account, so it counts
+    once."""
     unmatched = sorted(named)
     agents = []
-    for at, agent_type in sorted(started):
+    for at, agent_type, agent_id in sorted(started):
         naming = next((entry for entry in unmatched if entry[1] == agent_type and entry[0] <= at), None)
         if naming is not None:
             unmatched.remove(naming)
-        agents.append(Running(agent_type, 0.0))
+        agents.append(Running(agent_type, 0.0, agent_id))
     agents += [Running(agent_type, 0.0) for _, agent_type in unmatched]
     return agents
 
@@ -149,15 +170,30 @@ def usage_of(minutes: float, name: str, room: Room, reading_time: dt.datetime) -
     return room.per_agent_minute[name] * counted
 
 
-def free_room(name: str, room: Room, runs: dict[str, list[float]], reading_time: dt.datetime) -> float:
-    """The room on a meter, less what the running agents still need."""
-    meter = room.meters[name]
+def room_left(name: str, room: Room) -> float:
+    """What is left of a meter until its limit."""
     limit = SESSION_LIMIT_PERCENT if name == SESSION else WEEK_LIMIT_PERCENT
-    needs = sum(usage_of(minutes_left(agent, runs), name, room, reading_time) for agent in room.running)
+    return limit - room.meters[name]["used"]
+
+
+def free_room(
+    name: str,
+    room: Room,
+    runs: dict[str, list[float]],
+    reading_time: dt.datetime,
+    handing_off: frozenset[str] = frozenset(),
+    hand_off_minutes: float = 0.0,
+) -> float:
+    """The room on a meter, less what the running agents still need. An agent in handing_off needs only the minutes of a
+    hand-off."""
+    needs = 0.0
+    for agent in room.running:
+        minutes = hand_off_minutes if agent.id in handing_off else minutes_left(agent, runs)
+        needs += usage_of(minutes, name, room, reading_time)
     week = room.meters.get(WEEK)
     until_week_reset = minutes_to_reset(WEEK, week, reading_time) if week else WEEK_WINDOW.total_seconds() / 60
     needs += room.orchestrator_share * usage_of(until_week_reset, name, room, reading_time)
-    return limit - meter["used"] - needs
+    return room_left(name, room) - needs
 
 
 def fits(agent_type: str, name: str, room: Room, runs: dict[str, list[float]], reading_time: dt.datetime) -> bool:
@@ -189,6 +225,63 @@ def minutes_until_change(
         longest_run = max(usage_of(run_minutes(agent_type, runs), name, room, reading_time) for agent_type in fitting)
         soonest = min(soonest, (free_room(name, room, runs, reading_time) - longest_run) / rate)
     return max(0.0, soonest)
+
+
+def hand_off_note(
+    agent_id: str,
+    room: Room,
+    runs: dict[str, list[float]],
+    reading_time: dt.datetime,
+    hand_offs: HandOffs,
+) -> str | None:
+    """The note to hand off its work that an agent of the account gets, if any. Every agent gets HAND_OFF_NOW once the
+    room is down to what the agents need to hand off. Before then, an agent gets HAND_OFF_SOON when it is among those
+    that agents_to_hand_off picks."""
+    if is_down_to_hand_offs(room, reading_time, hand_offs.minutes):
+        return HAND_OFF_NOW
+    if agent_id in agents_to_hand_off(room, runs, reading_time, hand_offs):
+        return HAND_OFF_SOON
+    return None
+
+
+def is_down_to_hand_offs(room: Room, reading_time: dt.datetime, hand_off_minutes: float) -> bool:
+    """Whether a meter has no more room than the usage of the running agents, the orchestrator at its share among them,
+    for the time that a hand-off takes."""
+    agents = len(room.running) + room.orchestrator_share
+    return any(
+        room_left(name, room) <= agents * usage_of(hand_off_minutes, name, room, reading_time) for name in room.meters
+    )
+
+
+def agents_to_hand_off(
+    room: Room, runs: dict[str, list[float]], reading_time: dt.datetime, hand_offs: HandOffs
+) -> list[str]:
+    """The agents that hand off at their next stopping point, so that the room covers what the rest still need. They
+    are those that still run, picked one at a time, the one that still needs the most minutes first, until the room
+    covers the rest. Of two that need the same, the one that has run for less time goes first, because it loses less
+    work. An agent that hands off needs only the time that a hand-off takes, and one that was told to already does."""
+    handing_off = frozenset(hand_offs.told)
+    picked: list[str] = []
+    for agent in sorted(room.running, key=lambda agent: (-minutes_left(agent, runs), agent.minutes)):
+        if all(free_room(name, room, runs, reading_time, handing_off, hand_offs.minutes) >= 0 for name in room.meters):
+            break
+        if agent.id is None or agent.id not in hand_offs.running or agent.id in handing_off:
+            continue
+        picked.append(agent.id)
+        handing_off |= {agent.id}
+    return picked
+
+
+def hand_off_minutes(notes: dict[str, dt.datetime], ends: dict[str, dt.datetime]) -> float:
+    """The time that a long hand-off takes: the LONG_RUN_SHARE percentile of the minutes from each agent's latest note
+    to hand off its work to its end, from the time of the latest note of each agent and the time of each agent's end,
+    by the id of its start line."""
+    minutes = [
+        (ends[agent_id] - noted).total_seconds() / 60
+        for agent_id, noted in notes.items()
+        if agent_id in ends and ends[agent_id] >= noted
+    ]
+    return long_run(minutes) if minutes else FIRST_HAND_OFF_MINUTES
 
 
 def account_for(agent_type: str, candidates: list[Candidate]) -> str | None:

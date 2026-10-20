@@ -642,8 +642,9 @@ def run_claude(
     except request_events.ReceiverError as error:
         raise Stop(str(error)) from error
     # The first variable makes claude wait through a usage limit. The second keeps the hooks from logging the agents
-    # that the builder starts, because the run's tokens count theirs.
-    variables = {"CLAUDE_CODE_RETRY_WATCHDOG": "1", agent_log.RUN_VARIABLE: "1"}
+    # that the builder starts, because the run's tokens count theirs, and tells scripts/hooks/hand-off the id of the
+    # run's start line in agents.jsonl.
+    variables = {"CLAUDE_CODE_RETRY_WATCHDOG": "1", agent_log.RUN_VARIABLE: folders.run.name}
     if hand_off_type:
         variables[HAND_OFF_VARIABLE] = hand_off_type
     environment = request_events.with_events(claude_environment(account) | variables, port)

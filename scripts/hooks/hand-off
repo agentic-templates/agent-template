@@ -9,16 +9,25 @@
 # the file once the context is below the threshold again, as after a compaction. Until the note, the hook refuses the
 # orchestrator's request for a compaction: it deletes the request while the context is at or below compact_tokens,
 # because the note comes at the first tool call past that size.
-# A builder, an auditor, a reviewer or a researcher hands off its work: once its context first passes soon_tokens, at
-# its next stopping point, and once it first passes now_tokens, after the step it's on. These are the subagents of
-# those types that the orchestrator's session starts itself, and the agents that scripts/loop/run-builder starts,
-# which have their type in LOOP_HAND_OFF. Each type gets the steps of its own hand-off. Other agents, and the
-# maintainer's other sessions, get no note, because the notes' steps are those of the orchestrator and these types.
-# Each note comes once to each agent. For each note, the hook creates a file in .loop/hand-offs, named
-# <agent>.<threshold>, where <agent> is a subagent's agent id or a session's id. scripts/loop/meter reads them.
+# A builder, an auditor, a reviewer or a researcher hands off its work. These are the subagents of those types that the
+# orchestrator's session starts itself, and the agents that scripts/loop/run-builder starts, which have their type in
+# LOOP_HAND_OFF and the name of their run's folder in LOOP_RUN. Each type gets the steps of its own hand-off. Other
+# agents, and the maintainer's other sessions, get no note, because the notes' steps are those of the orchestrator and
+# these types. The agent hands off:
+# - at its next stopping point, once its context first passes soon_tokens, or once scripts/loop/meter --hand-off says
+#   soon. The meter says it to the agents with the most work left on an account whose room at its latest reading
+#   doesn't cover what its running agents still need.
+# - after the step it's on, once its context first passes now_tokens, or once the meter says now. The meter says it to
+#   every agent on an account whose room is down to what its agents need to hand off.
+# The note to hand off at the next stopping point comes only to an agent that got no note before, and the other note
+# once to each agent. For each note, the hook creates a file in .loop/hand-offs, named <agent>.<threshold> for a note
+# about the context, and <agent>.room-soon or <agent>.room-now for one about the room, where <agent> is a subagent's
+# agent id or a session's id. The file holds the id of the agent's start line in .loop/agents.jsonl: the subagent's
+# tool use id, or the name of the run's folder. scripts/loop/meter reads the files.
 # The files are in the .loop of the main checkout. When the hook can't create a note's file, the note says so. The hook
-# says nothing when it can't tell the context's size, such as when it can't find the agent's transcript, or after a
-# compaction until the agent's next reply.
+# gives no note about the context when it can't tell the context's size, such as when it can't find the agent's
+# transcript, or after a compaction until the agent's next reply. It gives none about the room when the meter can't
+# tell, such as before the meter's first reading of the account.
 
 compact_tokens=300000
 soon_tokens=400000
@@ -63,12 +72,12 @@ context_size() {
     | (.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0)' 2>/dev/null
 }
 
-# Creates the file of a note, and fails if it exists already. With noclobber, the redirection fails when the file
-# exists, so of two calls that end at the same time, only one gives the note. When the hook can't create the file, it
-# gives the note, and adds the file to unwritten: claim_note <file>
+# Creates the file of a note, with the text in it, and fails if the file exists already. With noclobber, the
+# redirection fails when the file exists, so of two calls that end at the same time, only one gives the note. When the
+# hook can't create the file, it gives the note, and adds the file to unwritten: claim_note <file> [<text>]
 unwritten=""
 claim_note() {
-  if (set -o noclobber && : >"$1") 2>/dev/null; then
+  if (set -o noclobber && printf '%s' "${2:-}" >"$1") 2>/dev/null; then
     return 0
   fi
   if [[ -e $1 ]]; then
@@ -163,35 +172,74 @@ fi
 if [[ ! $agent =~ ^[A-Za-z0-9_-]+$ ]]; then
   exit 0
 fi
-size=$(context_size "$transcript")
-if [[ ! $size =~ ^[0-9]+$ ]] || ((size <= soon_tokens)); then
-  exit 0
-fi
 
 loop=$(find_loop_folder) || exit 0
+# The id of the agent's start line in .loop/agents.jsonl
+start_id=${LOOP_RUN:-}
 if [[ -n $agent_id ]]; then
   if ! is_orchestrators_session "$loop" "$session_id"; then
     exit 0
   fi
   # Claude Code writes the depth at which the agent started next to its transcript: 1 for an agent that the session
-  # started itself, and 2 for one that its agent started.
-  depth=$(jq -r '.spawnDepth // empty' "${transcript%.jsonl}.meta.json" 2>/dev/null)
-  if [[ $depth != 1 ]]; then
+  # started itself, and 2 for one that its agent started. It writes the id of the tool call that started it there too.
+  meta=$(jq -r '"\(.spawnDepth // "") \(.toolUseId // "")"' "${transcript%.jsonl}.meta.json" 2>/dev/null)
+  start_id=${meta#* }
+  if [[ ${meta%% *} != 1 ]]; then
     exit 0
   fi
 fi
 notes=$loop/hand-offs
-mkdir -p "$notes" 2>/dev/null
 
+# Succeeds if the agent got one of the notes, which the ends of their files' names give: has_note <end>...
+has_note() {
+  local end
+  for end in "$@"; do
+    if [[ -e $notes/$agent.$end ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# The note that the context calls for: now, soon or nothing
+size=$(context_size "$transcript")
+context=""
+if [[ $size =~ ^[0-9]+$ ]] && ((size > now_tokens)); then
+  context=now
+elif [[ $size =~ ^[0-9]+$ ]] && ((size > soon_tokens)); then
+  context=soon
+fi
+# The note that the account's room calls for. The meter takes about a tenth of a second, so the hook asks it only when
+# its answer could give a note: when the context calls for no note after the step, and the agent got none.
+room=""
+if [[ $context != now && -n $start_id && -f $loop/meter.jsonl ]] && ! has_note "$now_tokens" room-now; then
+  room=$(LOOP_DIR=$loop "${BASH_SOURCE[0]%/*}/../loop/meter" --hand-off "$start_id" 2>/dev/null) || room=""
+fi
+
+mkdir -p "$notes" 2>/dev/null
+soon_steps="Hand off your work at your next stopping point, so that a fresh agent continues it. $how"
+now_steps="Hand off your work as soon as the step you're on ends, so that a fresh agent continues it. $how"
 note=""
-if ((size > now_tokens)); then
-  # The note to hand off at the next stopping point would come too late after this one.
-  claim_note "$notes/$agent.$soon_tokens" || true
-  if claim_note "$notes/$agent.$now_tokens"; then
-    note="Your context has passed $((now_tokens / 1000))k tokens. Hand off your work as soon as the step you're on ends, so that a fresh agent continues it. $how"
+if [[ $context == now ]]; then
+  if ! has_note room-now; then
+    # The note to hand off at the next stopping point would come too late after this one.
+    claim_note "$notes/$agent.$soon_tokens" "$start_id" || true
+    if claim_note "$notes/$agent.$now_tokens" "$start_id"; then
+      note="Your context has passed $((now_tokens / 1000))k tokens. $now_steps"
+    fi
   fi
-elif claim_note "$notes/$agent.$soon_tokens"; then
-  note="Your context has passed $((soon_tokens / 1000))k tokens. Hand off your work at your next stopping point, so that a fresh agent continues it. $how"
+elif [[ $room == now ]]; then
+  if claim_note "$notes/$agent.room-now" "$start_id"; then
+    note="Your account's usage limit leaves its agents only the room to hand off. $now_steps"
+  fi
+elif [[ $context == soon ]]; then
+  if ! has_note room-soon room-now && claim_note "$notes/$agent.$soon_tokens" "$start_id"; then
+    note="Your context has passed $((soon_tokens / 1000))k tokens. $soon_steps"
+  fi
+elif [[ $room == soon ]]; then
+  if ! has_note "$soon_tokens" && claim_note "$notes/$agent.room-soon" "$start_id"; then
+    note="Your account's usage limit leaves too little room for all its agents to finish, and you're among those with the most work left. $soon_steps"
+  fi
 fi
 if [[ -n $note && -n $unwritten ]]; then
   note+=" scripts/hooks/hand-off couldn't write${unwritten}, so it may give this note again, and scripts/loop/meter doesn't show it. List this in your report for the orchestrator."
