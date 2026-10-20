@@ -161,9 +161,9 @@ heartbeat and schedule it again, because a recurring prompt ends 7 days after yo
 ## Read the meter
 
 For each account in `.loop/accounts.json`, `scripts/loop/meter` prints a line that ends with the account's advice.
-The meter's last line starts with `machine`, and gives your context size, whether a retrospective is due, and each
-finding for a focused audit, in a part that starts with `audit due:`. The line before it starts with `agents`, and
-gives the context size of each agent that runs. Run the meter once in each pass, before you launch.
+The meter's last line starts with `machine`, and gives your context size and whether a retrospective is due. Each
+part of it that starts with `audit due:` names a finding for a focused audit. The line before it starts with
+`agents`, and gives the context size of each agent that runs. Run the meter once in each pass, before you launch.
 
 `scripts/loop/meter --wake` ends, and so wakes you, when an account's advice changes, and when a hook tells an agent
 to hand off its work, so that you can plan the agent that takes over. Start it again as a background task each time it
@@ -234,8 +234,10 @@ For each finding after `audit due:` on the meter's `machine` line, start a focus
 retrospective:
 
 1. Skip a finding if the state file lists an audit of the same subject whose issue is still open. A finding's subject
-   is a build, which it names by the builder's type and issue, such as `builder #208`, or else the builders' waits for
-   room on the machine, or the time of `scripts/check`.
+   is one of these:
+   - a build, which the finding names by the builder's type and issue, such as `builder #208`
+   - the builders' waits for room on the machine
+   - the time of `scripts/check`
 2. Open an issue with the label `research` that quotes the finding, and asks the researcher to find its cause and to
    open an issue for each fix. Say in it that the logs are in the `.loop` folder of the main checkout. Add `ready` to
    it, because agents take instructions only from issues with that label. Assign it to yourself, so that
