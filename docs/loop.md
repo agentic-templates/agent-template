@@ -86,7 +86,8 @@ on.
   - after the step it's on: once its context passes 500k tokens, or once its account's room is down to what all the
     account's running agents need to hand off.
 
-  An agent whose work left takes no longer than a hand-off gets neither note about its account's room.
+  An agent that needs no more time to finish its work than to hand it off gets neither note about its account's room,
+  only the notes about its context.
 
   When an agent reports that it handed off its work, start a new agent of the same type to take over, and give it a
   message, as the start of "Work through the cycle" describes:

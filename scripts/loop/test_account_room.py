@@ -187,7 +187,7 @@ class HandOffNoteTest(unittest.TestCase):
         running = [account_room.Running("builder", 25.0, "a1"), account_room.Running("reviewer", 5.0, "a2")]
         self.assertEqual(notes(hand_off_room(97.75, running=running)), {"a1": None, "a2": "soon"})
 
-    def test_gives_no_note_to_an_agent_whose_work_left_takes_no_longer_than_a_hand_off(self) -> None:
+    def test_gives_no_note_to_an_agent_that_needs_no_more_time_to_finish_than_to_hand_off(self) -> None:
         # At 0.1 of its time, the orchestrator needs 3 points, so a room of 4 points can't cover the agents even when a1
         # hands off. A builder that has run 26 minutes needs 4 more, as long as a hand-off, and one that has run 25
         # needs 5.
