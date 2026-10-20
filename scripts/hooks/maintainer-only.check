@@ -81,6 +81,17 @@ check_sudo() {
   fi
 }
 
+# Succeeds if the diskutil command in command_words changes the disks. diskutil apfs takes a verb of its own, as in
+# diskutil apfs list and diskutil apfs deleteVolume.
+diskutil_changes() {
+  local verb=${command_words[1]:-} reading=(list info activity)
+  if [[ $verb == apfs ]]; then
+    verb=${command_words[2]:-}
+    reading=(list listSnapshots listCryptoUsers listUsers listVolumeGroups)
+  fi
+  ! is_one_of "$verb" "${reading[@]}"
+}
+
 # Succeeds if command_words changes the machine's disks, settings or security. For a command that can also only read
 # them, its first argument usually tells which, as in defaults read and defaults write.
 changes_machine() {
@@ -90,14 +101,7 @@ changes_machine() {
       chsh | dscl | passwd | shutdown | reboot | halt | ufw | iptables | pfctl | bless)
       return 0
       ;;
-    diskutil)
-      # diskutil apfs takes a verb of its own, as in diskutil apfs list and diskutil apfs deleteVolume.
-      if [[ $first == apfs ]]; then
-        is_one_of "${command_words[2]:-}" list listSnapshots listCryptoUsers listUsers listVolumeGroups && return 1
-        return 0
-      fi
-      ! is_one_of "$first" list info activity
-      ;;
+    diskutil) diskutil_changes ;;
     defaults) ! is_one_of "$first" read read-type domains find help ;;
     launchctl) ! is_one_of "$first" list print print-disabled getenv help version blame ;;
     crontab) [[ $first != -l ]] ;;
