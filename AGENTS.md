@@ -17,7 +17,7 @@ Ask the maintainer before you do any of these:
 
 Decide everything else yourself, and write the decision where the next reader needs it, such as in the issue. Put your questions in one short message, each with the option you recommend.
 
-When a maintainer's request conflicts with a rule here, follow the request, and say which rule it overrides. Ask first only when the rule protects main, secrets, releases, or the project from untrusted code.
+When a maintainer's request conflicts with a rule here, follow the request, and say which rule it overrides. If the rule protects main, secrets, releases, or the project from untrusted code, ask before you follow the request.
 
 ## Read the guides
 
@@ -77,10 +77,10 @@ Dependabot adds `dependencies` to its own pull requests.
 If a maintainer asks for something that's bigger than one pull request or needs a decision along the way, triage it first, as "Triage new ideas" in `docs/planning.md` describes.
 
 1. Start from an issue. If you don't have one yet, search with `gh issue list --state all --search "<words>"`, and use an open issue that asks for the change. Otherwise open one with `gh issue create`, and mention any closed issue that asked for the same change. Make the "Done when" section of its body a list of results that someone can check. If your issue is marked as blocked by research issues, read their answers.
-2. Run `scripts/start-issue <issue>`. It checks out the issue's branch, and creates the branch if the issue has none.
+2. Run `scripts/start-issue <issue>`. It checks out the issue's branch.
 3. Before you edit a file, read every AGENTS.md from the root down to the file's own folder. Where the AGENTS.md files differ, the one closest to the file wins.
-4. Make the change. Run `scripts/check` and fix every failure that your change causes. A failure that also happens on main isn't yours, and neither is any other problem you notice outside your issue. Open an issue for each one, with the type that fits, unless one is open already. If you reproduced a bug, give its issue the `ready` label. List the issues you opened in your report, so that the orchestrator plans them. If your change can't pass until one of these issues is fixed, mark your issue as blocked by it with `gh issue edit <issue> --add-blocked-by <other issue>`, and say so in your report. If main or a release has a security vulnerability that isn't public yet, don't describe it in an issue, a pull request or a commit before a release fixes it. Say in your report that you found one, and record it as "Record a vulnerability privately" in `docs/releasing.md` describes.
-5. Push the branch, and open a pull request with `gh pr create`. In Claude Code, a hook then turns on auto-merge and says so. Elsewhere, turn it on with `gh pr merge <number>`. Auto-merge is the maintainer's standing request for every pull request of work they asked for, so don't ask about merging, and don't offer Auto-fix. GitHub merges the pull request once its checks pass, so don't wait for them. If the maintainer wants to see the pull request before it merges, open it with `--draft`.
+4. Make the change. Run `scripts/check` and fix every failure that your change causes. For each failure that also happens on main, and each other problem you notice outside your issue, open an issue with the type that fits, unless one is open already. If you reproduced a bug, give its issue the `ready` label. List the issues you opened in your report, so that the orchestrator plans them. If your change can't pass until the issue for one of these problems is fixed, mark your issue as blocked by that issue with `gh issue edit <issue> --add-blocked-by <other issue>`, and say so in your report. If main or a release has a security vulnerability that isn't public yet, don't describe it in an issue, a pull request or a commit before a release fixes it. Say in your report that you found one, and record it as "Record a vulnerability privately" in `docs/releasing.md` describes.
+5. Push the branch, and open a pull request with `gh pr create`. In Claude Code, a hook then turns on auto-merge and says so. Elsewhere, turn it on with `gh pr merge <number>`. Auto-merge is the maintainer's standing request for every pull request of work they asked for, so don't ask about merging, and don't offer Claude Code's Auto-fix. GitHub merges the pull request once its checks pass, so don't wait for them. If the maintainer wants to see the pull request before it merges, open it with `--draft`.
 
 ## Commits
 
