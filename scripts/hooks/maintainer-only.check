@@ -47,9 +47,9 @@ security_change="Blocked: this changes the repository's rules or security settin
 physical_home=""
 reviewed_fixes_file=""
 deletable_folders=()
-# The values of GH_REPO that the Bash call's simple commands so far set in the shell, as record_earlier_gh_repo finds
-# them
-earlier_gh_repos=()
+# The values of GH_REPO that the Bash call's simple commands set in the shell, wherever they're written, as
+# record_shell_gh_repo finds them
+shell_gh_repos=()
 
 # Succeeds if a word is one of the others: is_one_of <word> <other>...
 is_one_of() {
@@ -693,7 +693,7 @@ text_flags=" -b --body -t --title -c -F --body-file --description -n --notes --n
 # - GH_REPO, whose value check_gh puts in gh_repo when the words before gh set it
 # - the remote named origin of the folder that the command runs in
 # It also sets guessed_repositories, as find_named_repository describes. Before it takes the origin, it adds each value
-# in earlier_gh_repos to guessed_repositories, because gh takes such a GH_REPO while the shell exports it, but takes the
+# in shell_gh_repos to guessed_repositories, because gh takes such a GH_REPO while the shell exports it, but takes the
 # origin when the shell didn't export it or no longer has it, as after the ( ) that set it ends.
 # For gh api, run read_arguments first.
 find_destination() {
@@ -717,7 +717,7 @@ find_destination() {
     destination=$gh_repo
     return 0
   fi
-  guessed_repositories+=(${earlier_gh_repos[@]+"${earlier_gh_repos[@]}"})
+  guessed_repositories+=(${shell_gh_repos[@]+"${shell_gh_repos[@]}"})
   if [[ -z $command_folder ]]; then
     return 0
   fi
@@ -921,12 +921,13 @@ check_gh() {
   check_destination
 }
 
-# Adds to earlier_gh_repos the value of GH_REPO that the simple command in command_words sets in the shell for the
-# commands after it: with words that set variables and no command, or with export, declare and the like. An empty
-# value counts as none, as it does for gh. Run drop_command_prefixes first.
-record_earlier_gh_repo() {
+# Adds to shell_gh_repos the value of GH_REPO that a simple command sets in the shell for the commands after it: with
+# words that set variables and no command, or with export, declare and the like. An empty value counts as none, as it
+# does for gh: record_shell_gh_repo <word>...
+record_shell_gh_repo() {
   local word
   local -a setting_words=()
+  drop_command_prefixes "$@"
   if ((${#command_words[@]} == 0)); then
     setting_words=(${assignment_words[@]+"${assignment_words[@]}"})
   elif is_one_of "${command_words[0]}" export declare typeset readonly local; then
@@ -934,7 +935,7 @@ record_earlier_gh_repo() {
   fi
   for word in ${setting_words[@]+"${setting_words[@]}"}; do
     if [[ $word == GH_REPO=?* ]]; then
-      earlier_gh_repos+=("${word#GH_REPO=}")
+      shell_gh_repos+=("${word#GH_REPO=}")
     fi
   done
 }
@@ -954,7 +955,6 @@ check_simple_command() {
     # bash -c, because zsh has no compgen.
     block "Blocked: this command prints the whole environment, which holds tokens. Print only the variables you need, by name, as in printenv PATH. To list the variables' names without their values, run bash -c 'compgen -e'."
   fi
-  record_earlier_gh_repo
   if ((${#command_words[@]} == 0)); then
     return 0
   fi
@@ -987,6 +987,9 @@ check_simple_command() {
 read_input
 case $tool_name in
   Bash)
+    # A gh command in a loop or a function can run after a GH_REPO that the Bash call sets later in its text, so the
+    # hook finds each GH_REPO before it checks the first gh command.
+    for_each_simple_command record_shell_gh_repo "$shell_command"
     command_folder=${cwd:-$PWD}
     for_each_simple_command check_simple_command "$shell_command"
     ;;

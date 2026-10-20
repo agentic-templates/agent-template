@@ -674,17 +674,21 @@ expect_allow Bash 'GH_REPO=jtmpl/project gh pr comment 5 --body Hello'
 expect_allow Bash 'GH_REPO=someone/else gh pr comment 5 -R jtmpl/project --body Hello'
 # time -o names the file that time writes to, so GH_REPO=someone/else sets no variable there.
 expect_allow Bash 'time -o GH_REPO=someone/else gh pr comment 5 --body Hello'
-# A GH_REPO that an earlier command exports or assigns holds for each gh command after it.
+# A GH_REPO that a command of the Bash call exports or assigns holds for each gh command after it. The hook checks it
+# for each gh command of the call, wherever it's written, because a gh command in a loop or a function can run after a
+# GH_REPO that the call sets later in its text.
 for command in 'export GH_REPO=someone/else; gh pr comment 5 --body Hello' \
   'GH_REPO=someone/else && gh issue comment 5 --body Hello' 'declare -x GH_REPO=someone/else; gh pr close 5' \
-  'export GH_REPO=someone/else; gh pr view 5; gh issue comment 5 --body Hello'; do
+  'export GH_REPO=someone/else; gh pr view 5; gh issue comment 5 --body Hello' \
+  'for pass in 1 2; do echo "$pass"; gh pr comment 5 --body Hello; export GH_REPO=someone/else; done' \
+  $'post() {\n  gh pr comment 5 --body Hello\n}\nexport GH_REPO=someone/else\npost' \
+  'gh pr comment 5 --body Hello; export GH_REPO=someone/else'; do
   expect_block Bash "$command" "$(other_repository someone/else)"
 done
 expect_block Bash "export GH_REPO=someone/else; gh api -X PATCH 'repos/{owner}/{repo}' -F private=false" \
   "$(public someone/else)"
 expect_allow Bash 'export GH_REPO=jtmpl/project; gh pr comment 5 --body Hello'
 expect_allow Bash 'export GH_REPO=; gh pr comment 5 --body Hello'
-expect_allow Bash 'gh pr comment 5 --body Hello; export GH_REPO=someone/else'
 expect_allow Bash 'export GH_REPO=someone/else; gh pr view 5'
 expect_allow Bash 'export GH_REPO=someone/else; gh pr comment 5 -R jtmpl/project --body Hello'
 expect_allow Bash 'export GH_REPO=someone/else; GH_REPO=jtmpl/project gh pr comment 5 --body Hello'
