@@ -62,9 +62,11 @@ on.
   line of your state file, write `taken in: now` in its place, and read the issues and comments that the maintainer
   wrote on GitHub since the time you noted. Open or rewrite issues for each goal and idea, and for the cause of each
   correction, without stopping the builders that run. Treat each mistake of your own or of an agent that the loop could
-  make again, such as a time that you guessed, as a correction, even when you fixed the mistake itself. Add the
-  `priority` label to each issue for the cause of a correction, and to each issue that the maintainer asks to have
-  built first. If a correction changes the issue of a running builder, give the builder the change.
+  make again, such as a time that you guessed, as a correction, even when you fixed the mistake itself. Write each
+  correction, with the issue for its cause, in `.loop/corrections.md` rather than your state file, because the
+  auditor judges the fixes there. Add the `priority` label to each issue for the cause of a correction, and to each
+  issue that the maintainer asks to have built first. If a correction changes the issue of a running builder, give the
+  builder the change.
 - **Answers.** For each issue with `needs-decision` that the maintainer answered in a comment, carry out the answer,
   as "Labels" in `docs/planning.md` describes.
 - **Other people's issues.** Triage them, as "Triage issues that others open" in `docs/planning.md` describes.
@@ -112,9 +114,11 @@ Start an agent for each ready issue, as far as "Read the meter" allows:
 2. If you know that the issue's change is one line, make it yourself, in a worktree of your own, as "Make a change"
    in AGENTS.md describes.
 3. Otherwise, choose the agent's type: `researcher` for a `research` issue, and otherwise the builder type whose
-   description fits the change. Choose its account as "Read the meter" describes. If that's your own account, start a
-   background agent of that type. Don't give it a model, so that it runs at its type's model and effort. After its
-   prompt's first line, name the files to start from if you know them.
+   description fits the change. If it's a builder type and the meter's `machine` line says
+   `start no builder or test build`, start none on any account, and skip the issue as "Read the meter" describes for
+   an issue that no account can take. Otherwise, choose its account as "Read the meter" describes. If that's your own
+   account, start a background agent of that type. Don't give it a model, so that it runs at its type's model and
+   effort. After its prompt's first line, name the files to start from if you know them.
 
 After each issue, go back to step 1. Start an auditor too when "Start a retrospective" says so, and a focused audit
 when "Start a focused audit" says so.
@@ -167,6 +171,13 @@ Besides the `session:` and `pid:` lines, it holds:
 - the `BLOCKED` pull requests from your last pass
 - what you do next, and the open questions
 
+It holds nothing that a query of GitHub gives, such as the ready issues, their blockers or what merged. It holds no
+lasting rule either, because each rule lives in a guide or a hook, where a new orchestrator, or one that lost the file,
+still finds it.
+
+When an entry changes, rewrite it in place rather than add a new one. Delete an entry once it no longer tells you what
+to do next, such as a pull request that merged or an agent that ended.
+
 A hook writes the clock's time into the file: on its `updated:` line each time you write the file, on its `taken in:`
 line each time you write `now` there, and on its `heartbeat:` line each time you schedule the heartbeat. Keep these
 times as the hook wrote them. Once the `updated:` time is 6 days or more after the `heartbeat:` time, delete the
@@ -177,8 +188,10 @@ heartbeat and schedule it again, because a recurring prompt ends 7 days after yo
 For each account in `.loop/accounts.json`, `scripts/loop/meter` prints a line that ends with the account's advice.
 The meter's last line starts with `machine`, and gives your context size and whether a retrospective is due. Of the
 parts that ` | ` separates on the line, each one that starts with `audit due:` names a finding for a focused audit.
-The line before it starts with `agents`, and gives the context size of each agent that runs. Run the meter once in
-each pass, before you launch.
+Once as many agents build as the machine has room for, the line has a part that gives their number and the limit,
+and ends with `start no builder or test build`. Reviewers and researchers still start then, because they rarely run
+`scripts/check`. The line before the `machine` line starts with `agents`, and gives the context size of each agent
+that runs. Run the meter once in each pass, before you launch.
 
 `scripts/loop/meter --wake` ends, and so wakes you, when an account's advice changes, when a reading has a finding for
 a focused audit whose subject wasn't on the last `machine` line that the meter printed, and when a hook tells an agent
@@ -186,21 +199,35 @@ to hand off its work, so that you can plan the agent that takes over. Start it a
 ends.
 
 Your own account is the Claude account in `.loop/accounts.json` whose `env` values match this session's
-environment, such as `CLAUDE_CONFIG_DIR`. For each builder and researcher, and for each reviewer of a pull request,
-choose the account whose line has the lowest `week` percentage, among the accounts whose advice lets you start the
-agent. A Codex account builds only the kinds `research` and `other`. Each reviewer of a pull request, each builder of
-the type `builder-deep`, and each builder or researcher that takes over a hand-off can run only on a Claude account.
-Start the auditor, and each reviewer that reviews no pull request, such as the reviewer of a release, on your own
-account, in your session. Each account's advice says what you can start on that account:
+environment, such as `CLAUDE_CONFIG_DIR`. Each account's advice names the agent types that the account has room for:
+those whose long run, as `scripts/loop/meter --help` defines it, fits in what is left of both its 5-hour and weekly
+limits, after subtracting what its running agents still need. On your own account, the advice also leaves room for the
+usage that you still need until the weekly reset.
 
-- **go:** start any agent.
-- **watch:** keep the number of agents that run on the account from growing, and start no auditor.
-- **near:** start only reviewers, and agents for the issues that fit the types `builder-small` or `researcher`.
+- **go:** start an agent of any type.
+- **a list of types,** such as `builder-small, researcher, reviewer`: start only agents of those types.
 - **stop:** start nothing on the account.
 - **parked:** start nothing on the account. If it's your own account, also delete the heartbeat, because the meter
   wakes you a minute after the reset instead. Schedule the heartbeat again then.
 - **no reading:** start nothing on the account, and fix what the account's line names, or ask the maintainer if the
   fix needs them.
+
+The line after the accounts starts with `start on`, and names the Claude account for each type, or `no account`.
+Choose the account of each builder and researcher, and of each reviewer of a pull request, with
+`scripts/loop/meter --start-on <type>`, and start the agent on the account that it prints. It names the account as
+the `start on` line does, from the same reading, but it counts each agent that it named an account for since then.
+So one pass starts only as many agents on each account as fit. For a builder type, it also prints `no account` once
+the agents that build at the reading, with each builder that it named an account for since then, reach the limit, and
+then says so on its next line. If it prints `no account`, start no agent of that type on a Claude account. Start the
+auditor, and each reviewer that reviews no pull request, such as the reviewer of a release, on your own account, as an
+agent of your session.
+
+A Codex account builds only the kinds `research` and `other`, and only while its advice is `go`. Start a builder or
+researcher on such a Codex account without running `--start-on`, when the Codex account's `week` percentage of use is
+lower than that of the account that the `start on` line names for the agent's type. Also start it on such a Codex
+account when `--start-on` prints `no account`. But start no builder on a Codex account while the `machine` line names
+the limit, or once `--start-on` said in this pass that the agents that build reached it. Each builder of the type
+`builder-deep`, and each builder or researcher that takes over a hand-off, can run only on a Claude account.
 
 To start an agent on another account, run one of these commands as a background task. For an issue, give the line
 that `scripts/take-next-issue` printed in place of `<issue> <kind>`. The command's last line says how the run ended,
@@ -218,7 +245,8 @@ the script again, followed by the number of each issue that no account can take,
 ## Compact your context
 
 Keep your shell in the main checkout, and run git in a worktree with `git -C <worktree>`. After a compaction, the
-session-start hook shows you your state file only when your shell is in the main checkout.
+session-start hook shows you your state file, this guide and `docs/writing.md` only when your shell is in the main
+checkout.
 
 When `scripts/hooks/hand-off` tells you that your context has grown long enough to compact, ask for a compaction if the
 maintainer installed a compaction sender. That's a hook in the maintainer's own Claude Code settings that runs on both

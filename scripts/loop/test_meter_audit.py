@@ -220,7 +220,7 @@ class SlowerCheckTest(AuditTest):
 
 
 class WakeTest(AuditTest):
-    """While the account's advice is go, meter --wake reads every 30 minutes. The advice turns to watch at the fifth
+    """While the account's advice is go, meter --wake reads every 30 minutes. The advice turns to stop at the fifth
     reading of the account, so a wake that misses a finding ends then."""
 
     LONG_BUILD = (
@@ -229,7 +229,7 @@ class WakeTest(AuditTest):
 
     def setUp(self) -> None:
         super().setUp()
-        self.answer("claude", [*[usage_output(8)] * 4, usage_output(8, week=85)])
+        self.answer("claude", [*[usage_output(8)] * 4, usage_output(98)])
 
     def test_wakes_at_the_reading_with_a_finding_that_the_meter_had_not_printed(self) -> None:
         self.write_logs(earlier_builds(10))

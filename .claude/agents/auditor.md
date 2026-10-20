@@ -34,6 +34,10 @@ background: true
      folder of the main checkout, the first folder that `git worktree list` prints. Judge whether each block was real
      or a false alarm. Narrow each hook check that blocked an action by mistake, and add a test that the action now
      goes ahead.
+   - the corrections in `corrections.md` in that `.loop` folder, each a mistake that the loop could make again, with
+     the issue that fixes its cause. For each correction whose issue is closed, judge whether the mistake happened
+     again after the fix, and fix the cause yourself if it did. Then delete from the file each correction that you
+     judged, so that the next retrospective judges only the rest.
    - the pull requests that needed a fix after their builder first pushed them, such as for a failed check, an error
      that a reviewer found, or a conflict with main
    - the issues that the orchestrator planned again after a builder took them, which lost `ready` then
@@ -86,8 +90,10 @@ If your prompt names a model that no retrospective tested, test it too, as "Star
 describes.
 
 Leave out a test that an earlier retrospective's description records, unless its numbers changed since. Run the test
-with the largest expected saving first, and start each build only while `scripts/loop/meter` gives the advice `go`
-for the account that the build runs on.
+with the largest expected saving first. Start each build on the account that `scripts/loop/meter --start-on <type>`
+prints, where `<type>` is the type that the tested version is a version of, and start none while it prints
+`no account`. Start no build either while the `machine` line of `scripts/loop/meter` names the limit on the agents
+that build, because the meter counts the test builds among them.
 
 A version can differ from its type in its model, effort, instructions, tools, disallowed tools or limit on turns.
 Write each version as an agent file in `.claude/agents/` in your worktree, such as `builder-cheaper.md`. In a test,

@@ -4,6 +4,8 @@
 # - writing a settings file in the home folder, such as ~/.zshrc, a file in ~/.config/ or ~/.claude/settings.json, with
 #   a redirection, tee, cp and the like, sed -i, perl -i or the agent's file-writing tool, and git config --global or
 #   --system
+# - writing .loop/reviewed-fixes in the main checkout in the same ways, unless the orchestrator's session writes it,
+#   because a release includes each fix in a private fork that the file marks as reviewed without asking the maintainer
 # - deleting with rm, find and the like outside the repository's worktrees and the temporary folders
 # - making a gist public, and making a repository public or posting with gh to a repository other than this one, unless
 #   the list of allowed repositories names it. The list is .loop/allowed-repositories in the main checkout, with one
@@ -15,7 +17,8 @@
 # - printing the whole environment with env or printenv, because it holds tokens
 # A path or a repository that a variable other than HOME decides goes ahead, because the hook can't tell it before the
 # command runs. A push is blocked, though, when the hook can't tell the folder that it runs in, or when git fails on the
-# push's own words, because the hook can't ask git then which hooks the push would run.
+# push's own words, because the hook can't ask git then which hooks the push would run. It's blocked too when its remote
+# or a refspec has a variable, a $( ) or backticks, as read_push_arguments in helpers.bash describes.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 
@@ -39,9 +42,10 @@ ask="Ask the maintainer, and go on with the other work."
 test_repositories="If it's a repository that agents created from this template to test it, add its owner/name to .loop/allowed-repositories in the main checkout first. Otherwise, ask the maintainer, and go on with the other work."
 security_change="Blocked: this changes the repository's rules or security settings, and only the maintainer may do that. $ask"
 
-# The physical path of the home folder, and the folders inside which an agent may delete, which is_settings_file and
-# may_delete find when they first need them.
+# The physical paths of the home folder and of the file of reviewed fixes, and the folders inside which an agent may
+# delete, which is_settings_file, is_reviewed_fixes_file and may_delete find when they first need them.
 physical_home=""
+reviewed_fixes_file=""
 deletable_folders=()
 
 # Succeeds if a word is one of the others: is_one_of <word> <other>...
@@ -156,19 +160,42 @@ is_settings_file() {
   [[ $relative =~ ^(\.[^/]+|\.config/.+|\.ssh/.+|\.claude/settings[^/]*\.json|\.codex/config\.toml|Library/LaunchAgents/.+)$ ]]
 }
 
-# Blocks a write to a settings file in the home folder:
-# block_if_settings_file <path as the command or the tool names it> <folder that a relative path starts from, or empty>
+# Succeeds if a physical path is the file of reviewed fixes in the loop's folder, which step 1 of "Publish a release" in
+# docs/releasing.md reads. A name in another case counts too, because macOS finds a file by its name in any case:
+# is_reviewed_fixes_file <physical path>
+is_reviewed_fixes_file() {
+  local loop is_match=""
+  shopt -s nocasematch
+  # Only a path with the file's name makes the hook ask git for the loop's folder, which takes about 5 milliseconds.
+  if [[ ${1##*/} == reviewed-fixes ]]; then
+    if [[ -z $reviewed_fixes_file ]] && loop=$(hook_loop_folder); then
+      reviewed_fixes_file=$(physical_path "$loop/reviewed-fixes" /)
+    fi
+    if [[ -n $reviewed_fixes_file && $1 == "$reviewed_fixes_file" ]]; then
+      is_match=yes
+    fi
+  fi
+  shopt -u nocasematch
+  [[ -n $is_match ]]
+}
+
+# Blocks a write to a settings file in the home folder, and a write to the file of reviewed fixes unless the
+# orchestrator's session writes it:
+# block_if_protected_file <path as the command or the tool names it> <folder that a relative path starts from, or empty>
 # [<the part of the action to log, if not the simple command>]
-block_if_settings_file() {
+block_if_protected_file() {
   local path
   path=$(resolved_path "$1" "$2") || return 0
   if is_settings_file "$path"; then
     block "Blocked: $1 holds settings of the machine or of a tool, and only the maintainer may change them. $ask" ${3+"$3"}
   fi
+  if is_reviewed_fixes_file "$path" && ! is_orchestrator; then
+    block "Blocked: only the orchestrator writes $1, because a release includes each fix that it marks as reviewed without asking the maintainer. Go on with the other work, and list the change in your report." ${3+"$3"}
+  fi
 }
 
-# Blocks cp, mv, install or ln when it writes a settings file in the home folder: the file that its last word names,
-# or a file in the folder that its last word or -t names.
+# Blocks cp, mv, install or ln when it writes a file that block_if_protected_file protects: the file that its last
+# word names, or a file in the folder that its last word or -t names.
 check_copy() {
   local name=${command_words[0]##*/} with_value=" -S --suffix " i word folder="" destination path source
   local -a operands=()
@@ -200,18 +227,18 @@ check_copy() {
     unset 'operands[${#operands[@]} - 1]'
     path=$(resolved_path "$destination" "$command_folder") || return 0
     if [[ ! -d $path && $destination != */ ]]; then
-      block_if_settings_file "$destination" "$command_folder"
+      block_if_protected_file "$destination" "$command_folder"
       return 0
     fi
     folder=$destination
   fi
   for source in ${operands[@]+"${operands[@]}"}; do
     source=${source%/}
-    block_if_settings_file "${folder%/}/${source##*/}" "$command_folder"
+    block_if_protected_file "${folder%/}/${source##*/}" "$command_folder"
   done
 }
 
-# Blocks sed -i or perl -i when it changes a settings file in the home folder.
+# Blocks sed -i or perl -i when it changes a file that block_if_protected_file protects.
 check_in_place_edit() {
   local name=${command_words[0]##*/} with_value in_place_option i word in_place=""
   local -a operands=()
@@ -243,9 +270,9 @@ check_in_place_edit() {
   if [[ -z $in_place ]]; then
     return 0
   fi
-  # The first word can be the script rather than a file, but a script doesn't name a settings file.
+  # The first word can be the script rather than a file, but a script doesn't name a protected file.
   for word in ${operands[@]+"${operands[@]}"}; do
-    block_if_settings_file "$word" "$command_folder"
+    block_if_protected_file "$word" "$command_folder"
   done
 }
 
@@ -871,7 +898,7 @@ check_simple_command() {
   written_files=()
   record_written_files
   for file in ${written_files[@]+"${written_files[@]}"}; do
-    block_if_settings_file "$file" "$command_folder"
+    block_if_protected_file "$file" "$command_folder"
   done
   if prints_environment; then
     # bash -c, because zsh has no compgen.
@@ -887,7 +914,7 @@ check_simple_command() {
     tee)
       for ((i = 1; i < ${#command_words[@]}; i++)); do
         if [[ ${command_words[i]} != -* ]]; then
-          block_if_settings_file "${command_words[i]}" "$command_folder"
+          block_if_protected_file "${command_words[i]}" "$command_folder"
         fi
       done
       ;;
@@ -915,7 +942,7 @@ case $tool_name in
   Write | Edit | apply_patch)
     read_tool_paths
     for path in ${tool_paths[@]+"${tool_paths[@]}"}; do
-      block_if_settings_file "$path" "${cwd:-$PWD}" "$path"
+      block_if_protected_file "$path" "${cwd:-$PWD}" "$path"
     done
     ;;
 esac

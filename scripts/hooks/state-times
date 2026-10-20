@@ -7,12 +7,18 @@
 #   line before it reads the maintainer's comments on GitHub, so that its next pass reads from that time.
 # - on the heartbeat: line, after CronCreate schedules the heartbeat that docs/loop.md gives. Claude Code ends a
 #   recurring prompt 7 days after it's scheduled, and CronList doesn't say when that was.
-# It replaces the first line of each name, and adds an updated: or heartbeat: line that the file lacks at its end. It
-# prints nothing, and does nothing when it can't tell what to do, such as when the state file doesn't exist.
+# It replaces the first line of each name, and adds an updated: or heartbeat: line that the file lacks at its end.
+# Each time it writes the file, it then tells the orchestrator when the file holds more than longest_state_file
+# characters, so that the orchestrator deletes what's done, and which lines hold a time with x in place of a digit, such
+# as 02:4x, which the orchestrator guessed. It looks through the whole file, because a script that writes the file
+# doesn't run the hook. It does nothing when it can't tell what to do, such as when the state file doesn't exist.
 
 # A heartbeat: line that the hook adds after an Edit or a Write gets this time, because the hook can't tell when an
 # earlier heartbeat was scheduled. The orchestrator then finds the heartbeat 6 days old or more, and schedules it again.
 unknown_heartbeat=1970-01-01T00:00:00Z
+# A short state file costs the orchestrator less context after each compaction, and keeps the entries that matter from
+# hiding among done ones.
+longest_state_file=10000
 
 # shellcheck source=scripts/loop-folder
 source "${BASH_SOURCE[0]%/*}/../loop-folder" || exit 0
@@ -77,5 +83,38 @@ if ! awk -v name="$name:" -v time="$time" -v other_name="$other_name:" -v other_
     if (!has_other_name) print other_name " " other_time
   }' "$state_file" >"$new_file" || ! mv -f "$new_file" "$state_file"; then
   rm -f "$new_file"
+fi
+
+# Prints the times in the state file that have x in place of a digit, as a list such as "line 3 has 02:4x, line 12
+# has 22:1x", or nothing when it has none. A time is hours and minutes, and the character before it is neither a digit
+# nor a letter, other than the T of an ISO 8601 time.
+guessed_times() {
+  LC_ALL=C awk '
+    {
+      rest = " " $0
+      while (match(rest, /[^0-9A-SU-Za-z][0-9xX][0-9xX]:[0-9xX][0-9xX]/)) {
+        time = substr(rest, RSTART + 1, 5)
+        if (time ~ /[xX]/) found = found (found == "" ? "" : ", ") "line " NR " has " time
+        rest = substr(rest, RSTART + 1)
+      }
+    }
+    END { if (found != "") print found }' "$state_file"
+}
+
+message=""
+subject="Your state file, $state_file,"
+# jq 1.7.1 damages a character of more than one byte that crosses the end of a block it reads with -R, and so counts
+# too many characters, so it reads the file with --rawfile.
+characters=$(jq -n --rawfile text "$state_file" '$text | length') || exit 0
+if ((characters > longest_state_file)); then
+  message="$subject holds $characters characters, and the limit is $longest_state_file. Delete each entry that no longer tells you what to do next, such as a pull request that merged or an agent that ended."
+  subject="It also"
+fi
+times=$(guessed_times) || exit 0
+if [[ -n $times ]]; then
+  message+="${message:+ }$subject holds a guessed time, with x in place of a digit: $times. Run date -u and write the time that it prints, or leave the time out."
+fi
+if [[ -n $message ]]; then
+  jq -n --arg message "$message" '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $message}}'
 fi
 exit 0

@@ -252,17 +252,24 @@ expect_block_behind_wrappers() {
   done
 }
 
-# Runs the hook on a command of a session, or of a subagent of it, and checks its result:
-# expect_from <session> <agent id or ""> <command> <exit code> <message>
+# Runs the hook on an action of a session, or of a subagent of it, in the first tool that sends the action, and checks
+# its result: expect_action_from <session> <agent id or ""> <tool name> <command, patch or path> <exit code> <message>
 # A subagent's input has the id of its session, and its own in agent_id.
-expect_from() {
-  local input
-  make_sample_input claude-code Bash "$3"
+expect_action_from() {
+  local tools input
+  find_tools "$3"
+  make_sample_input "${tools%% *}" "$3" "$4"
   input=$(jq -c --arg session "$1" --arg agent "$2" \
     '.session_id = $session | if $agent == "" then . else . + {agent_id: $agent, agent_type: "builder"} end' \
     <<<"$sample_input_json")
   run_hook "$input"
-  expect_result "For session $1${2:+ and its agent $2}, the hook for Bash \"$3\"" "$4" "$5"
+  expect_result "For session $1${2:+ and its agent $2}, the hook for $3 \"$4\"" "$5" "$6"
+}
+
+# Runs the hook on a command of a session, or of a subagent of it, and checks its result:
+# expect_from <session> <agent id or ""> <command> <exit code> <message>
+expect_from() {
+  expect_action_from "$1" "$2" Bash "$3" "$4" "$5"
 }
 
 # Checks each form of the repository flag before a subcommand against a fixed result:
@@ -277,6 +284,12 @@ expect_repository_flags() {
     run_hook "$sample_input_json"
     expect_result "The hook for $command" "$status" "$message"
   done
+}
+
+# Prints the message that blocks a git push whose remote or refspec the shell expands, as read_push_arguments in
+# helpers.bash reads them: expanded_push_word <the word as the command writes it, without its quotes>
+expanded_push_word() {
+  echo "Blocked: the shell expands $1 in this git push, so this hook can't tell which remote or branch it names. Write the remote and each branch in plain words, as in git push origin <branch>."
 }
 
 # Checks a gh command with words of its subcommand before the group, between the group and the subcommand, and just

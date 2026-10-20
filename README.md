@@ -91,7 +91,7 @@ scripts/loop/claude-with-events --resume
 Issues and pull requests are public, so the orchestrator keeps a security problem in a private security advisory until a release fixes it. GitHub opens an advisory for each private report too.
 
 1. Ask the orchestrator to fix the problem. It builds the fix in the advisory's temporary private fork.
-2. Ask for a release right away if the severity is high or critical, or if the problem is public. Otherwise, ask within 90 days of a report, as `.github/SECURITY.md` promises reporters. Before each release, the orchestrator asks you in its session whether to include each fix that waits in a private fork.
+2. Ask for a release right away if the severity is high or critical, or if the problem is public. Otherwise, ask within 90 days of a report, as `.github/SECURITY.md` promises reporters. Before each release, the orchestrator includes each fix whose latest commit a reviewer passed, without asking you. In its session, it asks you about each other fix that waits in a private fork, and about each branch of a fork where it can't tell whether a fix waits.
 3. In a new session, ask "Check the security advisories." The new session checks each fix more closely than the orchestrator can, because its context doesn't also hold the work of the release.
 4. Ask that session to publish only the advisories that you're sure are fixed, and only once users can install the release, because a published advisory shows attackers where to look.
 
