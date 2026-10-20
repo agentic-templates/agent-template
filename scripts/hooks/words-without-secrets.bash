@@ -36,6 +36,7 @@ words_without_secrets() {
     kept+=("$word")
     find_what_follows "$original"
   done
+  # The quotes keep a line break at the end, which bash 3.2 drops from an unquoted ${kept[*]} in an assignment.
   safe_words="${kept[*]}"
   # tr, because bash 3.2 takes minutes to replace the characters in a text of 60 KB with line breaks. Words without a
   # control character skip tr and the processes that it takes.
