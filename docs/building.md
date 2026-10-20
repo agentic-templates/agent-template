@@ -6,7 +6,7 @@ If the issue's branch ends in a commit with the subject `chore: save the unfinis
 
 Build the issue by the kind that your prompt names:
 
-- For `research`, don't open a pull request. Answer its question in a comment, with a recommendation and the evidence behind it. If you try code, do it in a temporary folder, and put the short parts that show the answer in the comment. Next, go through the issues that the research issue blocks. Rewrite each one whose request changes because of the answer. If the answer leaves a question about one of them to the maintainer, as "Decide or ask" in AGENTS.md describes, write the question in that issue and add `needs-decision` to it. Then close the research issue, and name in your report the issues where you wrote a question.
+- For `research`, don't open a pull request. Answer its question in a comment, with a recommendation and the evidence behind it. If you try code, put the short parts that show the answer in the comment. Next, go through the issues that the research issue blocks. Rewrite each one whose request changes because of the answer. If the answer leaves a question about one of them to the maintainer, as "Decide or ask" in AGENTS.md describes, write the question in that issue and add `needs-decision` to it. Then close the research issue, and name in your report the issues where you wrote a question.
 - For `parent`, don't build anything. Close it if its "Done when" is met, and give it back if it isn't.
 - For `left behind <pull request>`, finish that pull request: run `scripts/check` again, update its description, and turn on auto-merge with `gh pr merge <number>`.
 - For `other`, make the change as steps 2 to 5 of "Make a change" in AGENTS.md describe.
