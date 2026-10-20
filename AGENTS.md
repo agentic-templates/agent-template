@@ -72,6 +72,8 @@ A status label says what an issue is waiting for. The status labels are:
 
 The loop builds the issues that have the `ready` label, which isn't a status label. An issue gets the label once it meets "Definition of ready" in `docs/planning.md`.
 
+`scripts/take-next-issue` takes the ready issues that have the `priority` label before the others, the lowest-numbered first in each group.
+
 The `retrospective` label marks the pull request of a retrospective. `scripts/loop/meter` says that the next retrospective is due once the agents have used a set number of output tokens since the newest such pull request merged. Until a retrospective sets that number, the meter counts the hours that the agents worked instead.
 
 Dependabot adds `dependencies` to its own pull requests.
