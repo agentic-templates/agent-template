@@ -241,6 +241,21 @@ class StartTest(RunHeavyTest):
         self.assertEqual(errors, warning)
         self.assertEqual(self.log(skipped=1)[1]["need"], need(2.0))
 
+    def test_counts_a_command_in_line_whose_use_has_no_numbers_as_using_nothing(self) -> None:
+        # Another version of the script, such as on another branch, leaves the use of a waiting command empty.
+        self.add_entry("waiting", need(1.0), started=None, arrived=-10)
+        self.hold("waiting")
+        state = self.state()
+        state["commands"][0]["using"] = None
+        (self.heavy / "state.json").write_text(json.dumps(state))
+        self.write_log(end_line([PYTHON, "-c", "pass"], need(2.0)))
+        # The first look starts the command ahead in line, and this one starts at the second, which has two readings
+        # of the CPU.
+        self.clock.actions = [lambda: None]
+        self.assertEqual(self.run_heavy(PYTHON, "-c", "pass"), (0, ""))
+        self.assertEqual(self.log()[2]["waited_seconds"], 2.0)
+        self.assertEqual(self.state()["commands"][0]["started"], NOW)
+
     def test_starts_a_retrospectives_command_after_another_agents_that_came_later(self) -> None:
         worktree = self.root / "test-build"
         subprocess.run(["git", "init", "--quiet", str(worktree)], check=True)

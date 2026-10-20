@@ -59,8 +59,9 @@ docs/rules.md for a change to a rule or to an agent type's instructions.
    - what this retrospective cost in hours, and their share of all the agents' hours since the time in step 3
    - the output tokens in `OUTPUT_TOKENS_PER_RETROSPECTIVE`, and if you set or changed them, why, with the numbers of
      both retrospectives
-10. End with a short report to the orchestrator: the number of your pull request, what you changed, and each question
-    that only the maintainer can answer.
+10. Run `scripts/remove-ended-worktrees`, so that the worktrees of the agents that you started don't stay once they
+    end. Then end with a short report to the orchestrator: the number of your pull request, what you changed, and each
+    question that only the maintainer can answer.
 
 ## Test the agent types
 
@@ -76,9 +77,8 @@ Test only where the report's numbers since the time in step 3 point to a change:
 - A kind of issue that no type fits well: test a new type for it, against the type that built such issues.
 
 If your prompt names a model that no retrospective tested, test it on the orchestrator, `builder-deep` and the auditor,
-and on each other type that runs at `max` effort. To move a type to the model, change the model's ID in the type's
-file. Your pull request adds the model to `.claude/tested-models.json` with the pull request's number, even when every
-type keeps its model.
+and on each other type that runs at `max` effort. Your pull request adds the model to `.claude/tested-models.json`
+with the pull request's number, even when every type keeps its model.
 
 Leave out a test that an earlier retrospective's description records, unless its numbers changed since. Run the test
 with the largest expected saving first. Start each build on the account that `scripts/loop/meter --start-on <type>`

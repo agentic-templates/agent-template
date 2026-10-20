@@ -57,7 +57,8 @@ describes:
 
 Start the prompt of each agent of the types `builder`, `builder-small`, `builder-deep`, `researcher` and `reviewer`
 with a line that names its work: for an issue, the line that `scripts/take-next-issue` printed, and for a pull
-request, its number alone. `.loop/agents.jsonl` takes the agent's issue or pull request, and its kind, from that line.
+request, its number alone. `scripts/loop/agent-log` reads the agent's issue or pull request, and its kind, from that
+line into `.loop/agents.jsonl`.
 
 ### Take in
 
@@ -146,7 +147,8 @@ when "Start a focused audit" says so.
   this pass found.
 - **Merges.** While pull requests are merging, keep `scripts/wait-for-pull-requests` running as a background task,
   and start it again each time it ends. If the script says it can't fast-forward `main` in the main checkout, fix
-  what it names, such as by switching the main checkout back to `main`.
+  what it names, such as by switching the main checkout back to `main`. After each merge, run
+  `scripts/remove-ended-worktrees`, which removes the worktree of each ended agent whose work is on GitHub.
 - **Settings.** Once a pull request that changes `scripts/configure-github` merges, and the fast-forward is done, run
   `scripts/configure-github` in the main checkout, so that GitHub's settings match main.
 - **Releases.** Once a goal is done, publish a release as "Publish a release" in `docs/releasing.md` describes, and
@@ -201,14 +203,12 @@ environment, such as `CLAUDE_CONFIG_DIR`. Each account's advice says which agent
 
 The line after the accounts starts with `start on`, and names the Claude account for each type, or `no account`.
 Choose the account of each builder and researcher, and of each reviewer of a pull request, with
-`scripts/loop/meter --start-on <type>`, and start the agent on the account that it prints. Unlike the `start on`
-line, it also counts the agents that it named an account for earlier in this pass, so that one pass starts only as many
-agents on each account as fit. If it prints `no account`, start the agent on a Codex account if one can take it, and
-otherwise start none. Start the auditor, and each reviewer that reviews no pull request, such as the reviewer of a
+`scripts/loop/meter --start-on <type>`, and start the agent on the account that it prints. If it prints
+`no account`, start the agent on a Codex account if one can take it, and otherwise start none. Start the auditor, and each reviewer that reviews no pull request, such as the reviewer of a
 release, on your own account, as an agent of your session.
 
-A Codex account can take a researcher of a `research` issue, or a builder of an `other` issue, while its advice is
-`go`. Start such an agent there, in place of running `--start-on`, when the Codex account's `week` percentage of use
+A Codex account can take an agent while its advice is `go`, unless the agent must open issues, as the researcher of a
+focused audit must. Start the agent there, in place of running `--start-on`, when the Codex account's `week` percentage of use
 is lower than that of the account that the `start on` line names for the agent's type. Each builder of the type
 `builder-deep`, and each builder or researcher that takes over a hand-off, can run only on a Claude account.
 
@@ -229,8 +229,8 @@ Keep your shell in the main checkout, and run git in a worktree with `git -C <wo
 hook shows you your state file and this guide after a `/clear` or a compaction only when your shell is in the main
 checkout.
 
-When `scripts/hooks/hand-off` tells you to ask for a `/clear`, follow its steps. The `/clear` sender that they name is
-a hook in the maintainer's own Claude Code settings that reads `.loop/compact-request.txt`, as the README describes.
+A `/clear` sender is a hook in the maintainer's own Claude Code settings that types `/clear`, and then the request's
+second line, into your session.
 
 ## Ask the maintainer
 
@@ -265,6 +265,5 @@ without waiting for the next retrospective:
    open an issue for each fix. Say in it that the logs are in the `.loop` folder of the main checkout. Add `ready` to
    it, and assign it to yourself, so that `scripts/take-next-issue` doesn't give it to anyone.
 3. Start a `researcher` agent on it, as step 3 of "Launch" describes, with `<issue> research` as the line that names
-   its work. Choose its account only among the Claude accounts, because an agent on a Codex account can't reach
-   GitHub to open the issues for the fixes.
+   its work.
 4. Add the audit to the state file's list of focused audits.
