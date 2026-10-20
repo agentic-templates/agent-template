@@ -23,6 +23,8 @@ source "${BASH_SOURCE[0]%/*}/../loop-folder"
 source "${BASH_SOURCE[0]%/*}/words-without-secrets.bash"
 # shellcheck source=scripts/hooks/simple-commands.bash
 source "${BASH_SOURCE[0]%/*}/simple-commands.bash"
+# shellcheck source=scripts/hooks/command-prefixes.bash
+source "${BASH_SOURCE[0]%/*}/command-prefixes.bash"
 
 # This file's folder, as an absolute path, because some checks change to the folder that the agent works in.
 hooks_folder=${BASH_SOURCE[0]%/*}
@@ -193,12 +195,13 @@ read_tool_paths() {
 # Changes command_folder as a cd command in command_words would, or empties it when the hook can't tell the folder.
 # command_folder is the folder that the next simple command runs in, and visit_simple_commands keeps a cd in a subshell
 # inside it. A check sets it to ${cwd:-$PWD} before the first simple command, because Cursor doesn't send the folder
-# the agent works in, and then the hook's own folder counts.
+# the agent works in, and then the hook's own folder counts. A cd that another program runs, as after env or timeout,
+# changes only that program's folder. Run drop_command_prefixes first.
 follow_cd() {
-  if [[ ${command_words[0]} != cd ]]; then
+  if [[ ${command_words[0]} != cd || $shell_runs_command == no ]]; then
     return 0
   fi
-  if ((${#command_words[@]} != 2)) || [[ ${command_words[1]} == -* ]]; then
+  if ((${#command_words[@]} != 2)) || [[ ${command_words[1]} == -* || $shell_runs_command == maybe ]]; then
     command_folder=""
     return 0
   fi
@@ -218,75 +221,6 @@ change_command_folder() {
     command_folder=$(CDPATH='' cd -- "$command_folder" 2>/dev/null && CDPATH='' cd -- "$expanded_path" 2>/dev/null && pwd) ||
       command_folder=""
   fi
-}
-
-# Reads one of env's options, and sets env_option_words to the number of words that it takes: 2 when its value is the
-# next word, otherwise 1. -C changes command_folder for the command that env runs, and visit_simple_commands changes it
-# back after that command. Blocks each option that the hooks don't read, because they can't tell then which word is the
-# command, as with -S, whose value holds the command, or --uns, which GNU's env reads as --unset:
-# read_env_option <option> <next word, or empty>
-read_env_option() {
-  local option=$1 name value
-  env_option_words=1
-  case $option in
-    --ignore-environment | --null | --debug) return 0 ;;
-    --unset | --chdir) name=$option value=$2 env_option_words=2 ;;
-    --unset=* | --chdir=*) name=${option%%=*} value=${option#*=} ;;
-    *)
-      # A group of the options that take no value, as in -i0, can end in one that takes a value. Its value is the rest
-      # of the word, as in -iuNAME, or the next word.
-      if [[ $option =~ ^-[0iv]*$ ]]; then
-        return 0
-      fi
-      if [[ ! $option =~ ^-[0iv]*([uCP])(.*)$ ]]; then
-        block "Blocked: the hooks can't tell which command env runs after its option $option, so they can't check that command. Run the command without that option. The hooks read only env's options -i, -0, -u, -C, -P and -v, and their long forms."
-      fi
-      name=-${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
-      if [[ -z $value ]]; then
-        value=$2 env_option_words=2
-      fi
-      ;;
-  esac
-  if [[ $name == -C || $name == --chdir ]]; then
-    if [[ -z ${folder_after_command+set} ]]; then
-      folder_after_command=${command_folder-}
-    fi
-    change_command_folder "$value"
-  fi
-}
-
-# Sets the array command_words to a simple command's words from the command's name on, without the words before it:
-# sudo, env, env's options and their values, and the words that set variables. Sets runs_through_env to true if env is
-# among them: drop_command_prefixes <word>...
-# The shell reads a word as setting a variable when it starts with a name and =, as in NAME=value, but env reads each
-# word with = that way.
-drop_command_prefixes() {
-  local -a prefixed=("$@")
-  local i=0 word is_after_env=false reads_env_options=false
-  runs_through_env=false
-  while ((i < ${#prefixed[@]})); do
-    word=${prefixed[i]}
-    if [[ $reads_env_options == true && $word == -- ]]; then
-      reads_env_options=false
-    elif [[ $reads_env_options == true && $word == -* ]]; then
-      read_env_option "$word" "${prefixed[i + 1]-}"
-      i=$((i + env_option_words - 1))
-    elif [[ $word =~ ^[A-Za-z_][A-Za-z0-9_]*= || ($is_after_env == true && $word == *=*) ]]; then
-      reads_env_options=false
-    elif [[ $word == sudo ]]; then
-      is_after_env=false
-      reads_env_options=false
-    elif [[ ${word##*/} == env ]]; then
-      is_after_env=true
-      reads_env_options=true
-      runs_through_env=true
-    else
-      break
-    fi
-    i=$((i + 1))
-  done
-  command_words=(${prefixed[@]+"${prefixed[@]:i}"})
-  command_word_may_expand=(${words_may_expand[@]+"${words_may_expand[@]:i}"})
 }
 
 # The options of git before its subcommand that take the next word as their value, as handle_options in git's git.c

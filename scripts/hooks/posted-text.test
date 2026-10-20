@@ -90,6 +90,8 @@ for template in "${body_commands[@]}"; do
   expect_block Bash "$(with_text "$template" "$change_body"$'\n'"$code_block")" \
     "$(blocked "$name" "$(home_path "The line \"cat /home/$person/bank.csv\"" "/home/$person/")")"
 done
+expect_block_behind_wrappers "$(with_text "gh issue comment 7 --body TEXT" "$change_body"$'\n'"$semicolon_line")" \
+  "$(blocked "gh issue comment" "$(semicolon "The line \"$semicolon_line\"")")"
 
 # A review that asks for changes, with the dash line written as two sentences, with an empty body, with no body, and
 # with the dash line only in code, then also as prose after the code

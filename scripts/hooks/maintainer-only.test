@@ -64,6 +64,10 @@ list_names="bash -c 'compgen -e'"
 env_option() {
   echo "Blocked: the hooks can't tell which command env runs after its option $1, so they can't check that command. Run the command without that option. The hooks read only env's options -i, -0, -u, -C, -P and -v, and their long forms."
 }
+# wrapper_option <wrapper> <option> [<the options that the hooks read>]
+wrapper_option() {
+  echo "Blocked: the hooks can't tell which command $1 runs after its option $2, so they can't check that command. Run the command without that option${3:+, or with one that the hooks read: $3}."
+}
 environment="Blocked: this command prints the whole environment, which holds tokens. Print only the variables you need, by name, as in printenv PATH. To list the variables' names without their values, run $list_names."
 no_verify="Blocked: --no-verify skips the pre-push hook, which scans the push for leaks. Push without it. If the scan finds a leak, take it out of the commits."
 # The messages that block a push whose git hooks aren't the repository's: other_hooks <folder that git names>,
@@ -217,6 +221,12 @@ expect_allow Bash 'folder=$(cd /usr && pwd); rm -rf build'
 # shellcheck disable=SC2016
 expect_allow Bash 'echo "`cd /usr && pwd`" && rm -rf build'
 expect_allow Bash '(cd /usr) && rm -rf build'
+# A cd that the shell runs itself, as after builtin, changes its folder, and one that another program runs, as after
+# timeout, doesn't.
+expect_block Bash 'builtin cd /usr && rm -rf share' "$(deleting rm share)"
+expect_block Bash 'time cd /usr && rm -rf share' "$(deleting rm share)"
+expect_allow Bash 'timeout 10 cd /usr && rm -rf build'
+expect_allow Bash 'env cd /usr && rm -rf build'
 # env -C runs only the command after it in another folder.
 expect_block Bash 'env -C /usr rm -rf share' "$(deleting rm share)"
 expect_block Bash 'env -C / rm -rf usr/share' "$(deleting rm usr/share)"
@@ -262,6 +272,34 @@ expect_block Bash 'env -u CLAUDECODE git push --no-verify' "$no_verify"
 expect_block Bash '/usr/bin/env -C build git push --no-verify' "$no_verify"
 # env reads each word with = before the command as a variable to set.
 expect_block Bash 'env x.y=1 git push --no-verify' "$no_verify"
+# The wrappers that run the command after them, with each way to write their options and timeout's duration
+expect_block_behind_wrappers 'git push --no-verify' "$no_verify"
+for wrapper in "timeout 10" "/usr/bin/timeout -k5 10" "timeout -fk 5 10" "timeout --kill-after 5 --preserve-status 1h" \
+  "timeout -s KILL -v 10" "timeout -pvsKILL 10" "timeout --foreground --verbose -- 10" time "/usr/bin/time -l" \
+  "/usr/bin/time -ao times.txt" "time --format=%e --output times.txt --append --portability --quiet --verbose" \
+  "time -hqv -f %e" nice "nice -10" "nice --10" "nice -+10" "nice -n5" "nice -n -5" "nice --adjustment=5" \
+  "nice --adjustment 5" "nohup --" "stdbuf -o L" "stdbuf -i0 -e0" "stdbuf --input=0 --output L --error=0" command \
+  "command -p --" "builtin --" "nohup nice -n 5 timeout 10" "env FOO=1 timeout 10" "timeout 10 env -u CLAUDECODE" \
+  "time nohup"; do
+  expect_block Bash "$wrapper git push --no-verify" "$no_verify"
+done
+# The hooks can't tell which word is the command after an option that they don't read. GNU's timeout reads --sig as
+# --signal.
+timeout_options="-f -p -v -k -s --foreground --preserve-status --verbose --kill-after --signal"
+expect_block Bash 'timeout --sig KILL 10 git push --no-verify' "$(wrapper_option timeout --sig "$timeout_options")"
+expect_block Bash 'timeout -x 10 git status' "$(wrapper_option timeout -x "$timeout_options")"
+expect_block Bash 'timeout --foreground=yes 10 git status' "$(wrapper_option timeout --foreground=yes "$timeout_options")"
+expect_block Bash 'nice -x git status' "$(wrapper_option nice -x "-n --adjustment")"
+expect_block Bash 'stdbuf -oL -x git status' "$(wrapper_option stdbuf -x "-i -o -e --input --output --error")"
+expect_block Bash 'command -px git status' "$(wrapper_option command -px "-p -v -V")"
+expect_block Bash 'nohup -x git status' "$(wrapper_option nohup -x)"
+expect_block Bash 'builtin --help' "$(wrapper_option builtin --help)"
+expect_allow Bash 'timeout 10 git push origin HEAD'
+# command -v and command -V look a command up instead of running it, and Claude Code doesn't drop xargs with an option.
+expect_allow Bash 'command -v uv'
+expect_allow Bash 'command -V uv'
+expect_allow Bash 'command -pv git'
+expect_allow Bash 'xargs -n1 echo'
 # git takes the start of a long option as the option, unless another option starts the same way, as with --no-ver,
 # which could be --no-verbose too.
 expect_block Bash 'git push --no-veri origin main' "$no_verify"

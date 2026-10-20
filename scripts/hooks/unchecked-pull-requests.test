@@ -116,6 +116,7 @@ mkdir "$repository/docs"
 work_in "$repository/docs"
 forget_pass
 expect_block Bash 'gh pr create --title "Add notes" --body "Closes #1"' "$not_checked"
+expect_block_behind_wrappers 'gh pr create --title "Add notes" --body "Closes #1"' "$not_checked"
 record_pass
 expect_allow Bash 'gh pr create --title "Add notes" --body "Closes #1"'
 

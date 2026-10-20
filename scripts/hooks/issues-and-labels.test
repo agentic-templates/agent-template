@@ -94,6 +94,8 @@ expect_block Bash "gh issue create --title 'Skip imported expenses' --body '$cha
   "Blocked: the new issue $no_type Add it with --label <label>."
 expect_block Bash "gh issue create --label needs-triage --body '$change_body'" \
   "Blocked: the new issue $no_type Add it with --label <label>."
+expect_block_behind_wrappers "gh issue create --label needs-triage --body '$change_body'" \
+  "Blocked: the new issue $no_type Add it with --label <label>."
 expect_block Bash "gh issue create --label bug,feature --body '$change_body'" \
   "Blocked: the new issue would have the type labels bug and feature. $type_label_rule Keep one of them in --label."
 expect_block Bash "gh issue create -l research -l Bug -l feature --body '$research_body'" \

@@ -278,7 +278,7 @@ check_orchestrators_run() {
   local main on_github on_disk
   main=$(hook_main_checkout 2>/dev/null) || main=""
   if [[ -z $main ]] || ! runs_alone_in_main_checkout "$main" "$2"; then
-    block "Blocked: the orchestrator runs scripts/configure-github again only in the main checkout, as a command of its own, without a variable, env, bash, sh or a redirection: cd ${main:-<main checkout>} && scripts/configure-github."
+    block "Blocked: the orchestrator runs scripts/configure-github again only in the main checkout, as a command of its own, without a word before it, such as a variable, env, timeout or bash, and without a redirection: cd ${main:-<main checkout>} && scripts/configure-github."
   fi
   if ! on_github=$(scripts_and_gitignore_on_github "$1") || ! on_disk=$(scripts_and_gitignore_on_disk "$main"); then
     block "Blocked: this hook can't compare the main checkout's scripts folder and .gitignore with the ones on main on GitHub, because gh or git failed, or the folder holds a repository of its own. Check that gh can reach GitHub, remove any repository inside the folder, and try again."

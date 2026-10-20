@@ -165,6 +165,7 @@ expect_block Bash 'gh api -X POST repos/{owner}/{repo}/actions/runs/123/approve'
 expect_block Bash 'gh api --method=POST /repos/jtmpl/project/actions/runs/123/approve' "$approval"
 expect_block Bash 'gh api repos/jtmpl/project/actions/runs/123/approve --method POST --silent' "$approval"
 expect_block Bash 'gh api -H "Accept: application/vnd.github+json" -X POST repos/jtmpl/project/actions/runs/123/approve' "$approval"
+expect_block_behind_wrappers 'gh api -X POST repos/{owner}/{repo}/actions/runs/123/approve' "$approval"
 expect_allow Bash 'gh api repos/{owner}/{repo}/actions/runs/123'
 expect_allow Bash 'gh api -X POST repos/{owner}/{repo}/actions/runs/123/rerun'
 
