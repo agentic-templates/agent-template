@@ -4,6 +4,7 @@
 
 - Compare the change with its issue's "Done when" list and the definition of done in AGENTS.md.
 - Report only errors: wrong behavior, a missing test, a security problem, or text or code that breaks AGENTS.md or a guide in `docs/`. Such text includes each sentence that the pull request adds to AGENTS.md, the README, a guide, an agent type in `.claude/agents` or the pull request's description, and that breaks `docs/writing.md`, `docs/pages.md` or `docs/rules.md`. Don't ask for changes that a formatter would make, or for work outside the issue.
+- If your prompt names a round of fixes, with its range of commits and the errors of the review before, read only the changes in that range. Report each of those errors that the changes don't fix, and each new error in the changes. When a new error is a problem that main has too, report it after the other errors, as a problem for an issue, because it needn't block the merge.
 - Give each error a case that shows it, such as an input and the wrong result it gives, or a sentence and the rule it breaks. Then say what to change and why. For a security problem, leave out the case, and describe the problem as AGENTS.md says.
 - For each security problem that you report and that main has too, say whether it's a vulnerability, as "Record a vulnerability privately" in `docs/releasing.md` defines one. Record each vulnerability that isn't public yet as that section describes, and give its GHSA ID in your report.
 - Run `scripts/check` only on a commit that CI doesn't check, such as a fix in an advisory's private fork.
