@@ -43,7 +43,7 @@ With --hand-off ID, the meter reads no account, and prints the note that scripts
 account's room: soon, to hand off its work at its next stopping point, now, to hand off as soon as the step it's on
 ends, or none. ID is the id of the agent's start line in .loop/agents.jsonl. The meter takes the newest reading of the
 agent's account in .loop/meter.jsonl, unless it is more than {gap} minutes old, and counts the agents that run on the
-account as --start-on does. An agent that would finish no later than a long hand-off would end gets none, because a
+account as --start-on does. An agent whose work left takes no longer than a long hand-off gets none, because a
 hand-off would only take it longer. The other agents get these notes:
 
 - Each one gets now once a meter's room is down to what the agents need to hand off: the usage of each agent, and of

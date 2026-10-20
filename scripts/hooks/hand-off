@@ -20,7 +20,7 @@
 #   doesn't cover what its running agents still need.
 # - after the step it's on, once its context first passes now_tokens, or once the meter says now. The meter says it to
 #   every agent on an account whose room is down to what its agents need to hand off.
-# The meter says neither to an agent that would finish no later than a hand-off would end.
+# The meter says neither to an agent whose work left takes no longer than a hand-off.
 # The note to hand off at the next stopping point comes only to an agent that got no note before, and the other note
 # once to each agent. For each note, the hook creates a file in .loop/hand-offs, named <agent>.<threshold> for a note
 # about the context, and <agent>.room-soon or <agent>.room-now for one about the room, where <agent> is a subagent's

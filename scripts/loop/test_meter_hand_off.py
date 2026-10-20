@@ -9,8 +9,8 @@ from test_meter import NOW, MeterTest, meters
 class HandOffTest(MeterTest):
     """At the reading, the builder a has run 1 minute of a builder's 30, so it still needs 29, or 7.25 points at 0.25
     points a minute, and the builder b has run 20, so it still needs 10, or 2.5 points. Until an agent with a note of
-    scripts/hooks/hand-off ends, a hand-off takes 10 minutes, or 2.5 points, so b would finish no later than its
-    hand-off would end, and gets no note."""
+    scripts/hooks/hand-off ends, a hand-off takes 10 minutes, or 2.5 points, so b's work left takes no longer than a
+    hand-off, and b gets no note."""
 
     def setUp(self) -> None:
         super().setUp()

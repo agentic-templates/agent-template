@@ -80,13 +80,13 @@ on.
   maintainer. Ask about the rest as "Ask the maintainer" below describes.
 - **Hand-offs.** `scripts/hooks/hand-off` tells a builder, the auditor, a reviewer or a researcher to hand off its
   work:
-  - at its next stopping point: once its context passes 400k tokens, or, if it's among the agents with the most work
-    left on its account, once the account's room at the meter's latest reading no longer covers what the account's
-    running agents still need
-  - after the step it's on: once its context passes 500k tokens, or once its account's room is down to what the
-    account's agents need to hand off
+  - at its next stopping point: once its context passes 400k tokens, or once its account's room at the meter's latest
+    reading no longer covers what the account's running agents still need. For this note, the meter picks one agent at
+    a time, the one with the most work left first, until the room covers what the rest need.
+  - after the step it's on: once its context passes 500k tokens, or once its account's room is down to what all the
+    account's running agents need to hand off.
 
-  An agent that would finish before a hand-off would end gets no note about its account's room.
+  An agent whose work left takes no longer than a hand-off gets neither note about its account's room.
 
   When an agent reports that it handed off its work, start a new agent of the same type to take over, and give it a
   message, as the start of "Work through the cycle" describes:
