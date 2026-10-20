@@ -103,7 +103,9 @@ guessed_times() {
 
 message=""
 subject="Your state file, $state_file,"
-characters=$(jq -R -s length <"$state_file") || exit 0
+# jq 1.7.1 damages a character of more than one byte that crosses the end of a block it reads with -R, and so counts
+# too many characters, so it reads the file with --rawfile.
+characters=$(jq -n --rawfile text "$state_file" '$text | length') || exit 0
 if ((characters > longest_state_file)); then
   message="$subject holds $characters characters, and the limit is $longest_state_file. Delete each entry that no longer tells you what to do next, such as a pull request that merged or an agent that ended."
   subject="It also"

@@ -393,8 +393,9 @@ part_problems() {
     if ((bytes > 10000)); then
       printf 'part %s has %s bytes. ' "$((index + 1))" "$bytes"
     fi
-    # jq reads each byte that isn't part of a UTF-8 character as the character U+FFFD.
-    if [[ $(printf '%s\n' "$part" | jq -R -r .) != "$part" ]]; then
+    # jq reads each byte that isn't part of a UTF-8 character as the character U+FFFD. With -R, jq 1.7.1 also damages
+    # a character that crosses the end of a block it reads, so it reads the part with --rawfile.
+    if [[ $(printf '%s\n' "$part" | jq -n -j --rawfile text /dev/stdin '$text') != "$part" ]]; then
       printf 'part %s has bytes that are not UTF-8. ' "$((index + 1))"
     fi
   done

@@ -220,6 +220,13 @@ run_hook "$main_checkout" "$(file_input Write "$state_file")"
 expect_note "After a Write of a state file of 10,001 characters" \
   "Your state file, $state_file, holds 10001 characters, and the limit is 10000. Delete each entry that no longer tells you what to do next, such as a pull request that merged or an agent that ended."
 
+# A line of about 40,000 bytes crosses the end of many of the blocks that jq reads, each time maybe in the middle of a
+# character of two bytes.
+sized_state 20000
+run_hook "$main_checkout" "$(file_input Edit "$state_file")"
+expect_note "After an Edit of a state file of 20,000 characters, most of them of two bytes in one line" \
+  "Your state file, $state_file, holds 20000 characters, and the limit is 10000. Delete each entry that no longer tells you what to do next, such as a pull request that merged or an agent that ended."
+
 # The hook tells the orchestrator about each time with x in place of a digit, in the whole file.
 write_state 'session: owner-1' 'updated: 2020-01-02T00:00:00Z' "$old_heartbeat" '- #12 merged at 2026-10-19T02:45Z'
 run_hook "$main_checkout" "$(file_input Edit "$state_file")"
