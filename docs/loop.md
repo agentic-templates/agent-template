@@ -178,11 +178,12 @@ to hand off its work, so that you can plan the agent that takes over. Start it a
 ends.
 
 Your own account is the Claude account in `.loop/accounts.json` whose `env` values match this session's
-environment, such as `CLAUDE_CONFIG_DIR`. For each builder, researcher and reviewer, choose the account whose line has
-the lowest `week` percentage, among the accounts whose advice lets you start the agent. A Codex account builds only the
-kinds `research` and `other`. Each reviewer, each builder of the type `builder-deep`, and each builder that takes over
-a hand-off can run only on a Claude account. Start the auditor on your own account, in your session. Each account's
-advice says what you can start on that account:
+environment, such as `CLAUDE_CONFIG_DIR`. For each builder and researcher, and for each reviewer of a pull request,
+choose the account whose line has the lowest `week` percentage, among the accounts whose advice lets you start the
+agent. A Codex account builds only the kinds `research` and `other`. Each reviewer of a pull request, each builder of
+the type `builder-deep`, and each builder that takes over a hand-off can run only on a Claude account. Start the
+auditor, and each reviewer that reviews no pull request, such as the reviewer of a release, on your own account, in
+your session. Each account's advice says what you can start on that account:
 
 - **go:** start any agent.
 - **watch:** keep the number of agents that run on the account from growing, and start no auditor.
@@ -200,7 +201,7 @@ and where the agent's report is.
 - `scripts/loop/run-builder <issue> <kind> --tool codex --account <name>` for an issue on a Codex account
 - `scripts/loop/run-builder <issue> <kind> --tool claude --account <name> --type <type>` for an issue on a Claude
   account, with the type that fits the issue, as step 3 of "Launch" chooses it
-- `scripts/loop/run-builder --review <pull request> --account <name>` for a reviewer
+- `scripts/loop/run-builder --review <pull request> --account <name>` for a reviewer of a pull request
 
 If no account can take the issue that `scripts/take-next-issue` gave you, remove your assignment from it. Then run
 the script again, followed by the number of each issue that no account can take, such as

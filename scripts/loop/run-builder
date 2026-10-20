@@ -55,8 +55,9 @@ head, and reviews it as "Review a pull request" in docs/reviewing.md describes. 
 nothing on GitHub, and it removes the worktree when the reviewer ends. The reviewer's prompt starts with the pull
 request's number, followed by the text of FILE if --message gives one. The run folder is
 .loop/runs/review-<pull request>-<time>, and the lines in .loop/agents.jsonl give the pull request's number as the
-issue. The script doesn't start when the author of the pull request lacks write access to the repository, because
-Claude Code runs the hooks that the pull request's .claude/settings.json names.
+issue. The script doesn't start when the pull request's head is a branch in another repository, or when its author
+lacks write access to the repository, because Claude Code runs the hooks that the pull request's .claude/settings.json
+names.
 """
 
 import argparse
@@ -79,6 +80,7 @@ import paths
 import request_events
 from accounts import TOOLS, Account, AccountsError, claude_environment, load_accounts
 from machine import peak_memory_bytes
+from pull_request_trust import PullRequestError, read_pull_request
 from run_events import claude_problem, codex_problem, parse_event, read_events, run_numbers
 
 # The checkout that holds this script. The script runs this checkout's checks, such as scripts/hooks/before-tool,
@@ -101,9 +103,6 @@ CODEX_KINDS = ("research", "other")
 # The type of a Codex builder in agents.jsonl
 CODEX_TYPE = "codex"
 REVIEWER_TYPE = "reviewer"
-# The permissions from GitHub's permission API that let a person write to the repository. The API reports the Maintain
-# role as write.
-WRITE_PERMISSIONS = ("admin", "write")
 # Fills the uv cache that Codex's sandbox uses, outside the sandbox, in the main checkout. The worktree's files can be a
 # builder's, from an earlier run on the branch, and uv runs code that a project's files name, such as a build backend
 # or the Python of a .python-version or a .venv, and fetches the URLs in its uv.lock. --no-build keeps uv from building
@@ -237,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             subject = read_issue(work.number, checkout)
         hooks = run_ok(["git", "rev-parse", "--path-format=absolute", "--git-path", "hooks"], checkout).strip()
-    except (AccountsError, Stop) as error:
+    except (AccountsError, PullRequestError, Stop) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
@@ -559,29 +558,6 @@ def read_issue(number: int, checkout: Path) -> dict[str, Any]:
     if "needs-triage" in label_names(issue):
         raise Stop(shell_function("needs-triage", 'needs_triage_message "$1" "$1"', str(number)).strip())
     return issue
-
-
-def read_pull_request(number: int, checkout: Path) -> dict[str, Any]:
-    """The pull request's number, head commit and labels. Stops when its author lacks write access to the repository,
-    because Claude Code runs the hooks of the .claude/settings.json at the head, and AGENTS.md lets only a maintainer's
-    code run."""
-    fields = "number,headRefOid,author,labels"
-    pull_request: dict[str, Any] = json.loads(run_ok(["gh", "pr", "view", str(number), "--json", fields], checkout))
-    author = pull_request["author"]["login"]
-    answer = run(["gh", "api", f"repos/{{owner}}/{{repo}}/collaborators/{author}/permission"], checkout)
-    if answer.returncode != 0:
-        raise Stop(
-            f"can't tell whether {author}, who opened pull request #{number}, may write to the repository, because gh "
-            f"failed: {one_line(answer.stderr)}"
-        )
-    permission = json.loads(answer.stdout)["permission"]
-    if permission not in WRITE_PERMISSIONS:
-        raise Stop(
-            f"{author}, who opened pull request #{number}, has the permission {permission}, not write, and the reviewer "
-            "would run hooks from the pull request. Start the reviewer in your own session, which reads the diff "
-            "without running its code."
-        )
-    return pull_request
 
 
 def label_names(issue: dict[str, Any]) -> list[str]:

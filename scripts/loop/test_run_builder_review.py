@@ -27,8 +27,14 @@ class ReviewTest(RunBuilderTest):
         self.head = self.git("rev-parse", "HEAD")
         self.git("push", "--quiet", str(self.origin), "HEAD:refs/pull/7/head")
         self.git("reset", "--quiet", "--hard", main)
-        pull_request = {"number": 7, "headRefOid": self.head, "author": {"login": "alice"}, "labels": [{"name": "bug"}]}
-        self.answer("gh", "pr view", {"stdout": json.dumps(pull_request)})
+        self.pull_request = {
+            "number": 7,
+            "headRefOid": self.head,
+            "isCrossRepository": False,
+            "author": {"login": "alice"},
+            "labels": [{"name": "bug"}],
+        }
+        self.answer("gh", "pr view", {"stdout": json.dumps(self.pull_request)})
         self.answer("gh", PERMISSION, {"stdout": json.dumps({"permission": "write", "role_name": "maintain"})})
         # The reviewer leaves a change in its worktree, which the script must neither commit nor push.
         self.answer("claude", "", {"stdout": lines(INIT, REVIEW), "write": {"scratch.txt": "scratch\n"}})
@@ -92,6 +98,30 @@ class ReviewTest(RunBuilderTest):
         self.assertIn("pull request 7 | claude main | failed: claude ended with code 1 and gave no result.", printed)
         self.assertFalse(self.worktree.exists())
         self.assert_changed_nothing_on_github()
+
+    def test_reviews_the_head_that_gh_gave_when_the_pull_request_got_a_newer_commit(self) -> None:
+        self.git("checkout", "--quiet", self.head)
+        (self.repo / "later.txt").write_text("a commit pushed after gh read the pull request\n")
+        self.git("add", "later.txt")
+        self.git("commit", "--quiet", "-m", "feat: later")
+        self.git("push", "--quiet", "--force", str(self.origin), "HEAD:refs/pull/7/head")
+        self.git("checkout", "--quiet", "-")
+        status, _, _ = self.review("--review", "7")
+        self.assertEqual(status, 0)
+        [call] = self.calls("claude")
+        self.assertEqual(call["head"], self.head)
+
+    def test_stops_when_the_head_of_the_pull_request_is_in_another_repository(self) -> None:
+        self.answer("gh", "pr view", {"stdout": json.dumps({**self.pull_request, "isCrossRepository": True})})
+        status, printed, errors = self.review("--review", "7")
+        self.assertEqual((status, printed), (1, ""))
+        self.assertEqual(
+            errors,
+            "error: the head of pull request #7 is a branch in another repository, whose commits anyone may have "
+            "written, and the reviewer would run hooks from them. Start the reviewer in your own session, which reads "
+            "the diff without running its code.\n",
+        )
+        self.assertEqual((self.calls("claude"), (self.loop / "agents.jsonl").exists()), ([], False))
 
     def test_stops_when_the_author_of_the_pull_request_cannot_write_to_the_repository(self) -> None:
         self.answer("gh", PERMISSION, {"stdout": json.dumps({"permission": "read", "role_name": "triage"})})
