@@ -56,13 +56,13 @@ test_home=/home-for-tests/someone
 # The folder the agent works in, which the sample inputs send. A test file can change it.
 test_cwd=$test_home/project
 
-# The seconds that a hook may run in a case of run_hook or run_check. watch_hooks stops a hook that runs longer, after
-# one to two limits, so within 4 minutes. A hook that never returns, such as one with a loop that never ends, would
-# otherwise keep its test file and scripts/check running until something stops them, as it did for 31 minutes in issue
-# #447. HOOK_TESTS_TIME_LIMIT sets another limit, as scripts/hooks/testing.test does to test it.
-hook_time_limit=${HOOK_TESTS_TIME_LIMIT:-120}
-if [[ ! $hook_time_limit =~ ^[1-9][0-9]*$ ]]; then
-  echo "error: HOOK_TESTS_TIME_LIMIT must be a whole number of seconds above 0, such as 120, and it's \"$hook_time_limit\"." >&2
+# The seconds between the wakes of watch_hooks, which stops a hook of run_hook or run_check that runs from one wake to
+# the next, so after one to two of these spans, within 4 minutes. A hook that never returns, such as one with a loop
+# that never ends, would otherwise keep its test file and scripts/check running until something stops them, as it did
+# for 31 minutes in issue #447. HOOK_TESTS_WAKE_SECONDS sets another span, as scripts/hooks/testing.test does to test it.
+hook_wake_seconds=${HOOK_TESTS_WAKE_SECONDS:-120}
+if [[ ! $hook_wake_seconds =~ ^[1-9][0-9]*$ ]]; then
+  echo "error: HOOK_TESTS_WAKE_SECONDS must be a whole number of seconds above 0, such as 120, and it's \"$hook_wake_seconds\"." >&2
   exit 2
 fi
 # run_hook and run_check write running to hook_state_file before the hook runs, and returned after it. watch_hooks
@@ -83,8 +83,7 @@ stop_process_tree() {
   kill -KILL "$1" 2>/dev/null || true
 }
 
-# While the test process runs, stops each hook that has run for a whole round of hook_time_limit seconds:
-# watch_hooks <test process>
+# While the test process runs, stops each hook that runs from one wake to the next: watch_hooks <test process>
 # The hook runs in a subshell of the test, so the function stops every process that the test started. The test then
 # gets the hook's result, with code 137, and goes on with its next case.
 watch_hooks() {
@@ -93,7 +92,7 @@ watch_hooks() {
   trap 'kill "$sleep_process" 2>/dev/null; exit 0' TERM
   while kill -0 "$test_process" 2>/dev/null; do
     touch "$round_start"
-    sleep "$hook_time_limit" &
+    sleep "$hook_wake_seconds" &
     sleep_process=$!
     wait "$sleep_process"
     read -r hook_state <"$hook_state_file" || true
@@ -264,7 +263,7 @@ expect_result() {
   case_count=$((case_count + 1))
   if [[ -e $stopped_hook_file ]]; then
     rm "$stopped_hook_file"
-    echo "error: $description must exit with code $status and the message \"$message\", but the hook ran for more than $hook_time_limit seconds, so the test stopped it." >&2
+    echo "error: $description must exit with code $status and the message \"$message\", but the hook ran for more than $hook_wake_seconds seconds, so the test stopped it." >&2
     failed_cases=$((failed_cases + 1))
   elif [[ $hook_status != "$status" || $hook_message != "$message" ]]; then
     echo "error: $description must exit with code $status and the message \"$message\", but it exited with code $hook_status and the message \"$hook_message\"." >&2
@@ -381,7 +380,7 @@ finish_tests() {
   kill "$hook_watcher" 2>/dev/null || true
   rm -rf "$hook_watch_folder"
   if [[ -n $is_hook_stopped ]]; then
-    echo "error: a hook in $test_name ran for more than $hook_time_limit seconds, so the test stopped it." >&2
+    echo "error: a hook in $test_name ran for more than $hook_wake_seconds seconds, so the test stopped it." >&2
     exit 1
   fi
   # shellcheck disable=SC2086 # The names of the functions, one to a line, become a word each.

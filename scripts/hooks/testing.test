@@ -150,7 +150,7 @@ printf '%s\n' "source '$hooks_folder/testing.bash'" 'expect_allow Bash "echo han
   finish_tests >"$copies/hangs.test"
 case_count=$((case_count + 1))
 status=0
-message=$(HOOK_TESTS_TIME_LIMIT=2 bash "$copies/hangs.test" 2>&1) || status=$?
+message=$(HOOK_TESTS_WAKE_SECONDS=2 bash "$copies/hangs.test" 2>&1) || status=$?
 expected="error: In claude-code, the hook for Bash \"echo hang\" must exit with code 0 and the message \"\", but the hook ran for more than 2 seconds, so the test stopped it.
 error: 1 of the 2 cases in $copies/hangs.test failed. The errors above say which."
 if [[ $status != 1 || $message != "$expected" ]]; then
