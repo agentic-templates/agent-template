@@ -62,12 +62,12 @@ The lines are:
                             the sessions in the main checkout, as scripts/loop/context_growth.py measures them: how
                             many agents or sessions it covers, the median and the largest of their peak context, and
                             the share of them whose peak passed the threshold at which scripts/hooks/hand-off tells a
-                            builder to hand off, or for the sessions, tells the orchestrator to compact. Then the
-                            context that the results of their tool calls added, per tool call, and how many steps it
-                            leaves out because their call has no event in .loop/requests.jsonl. Then how many of the
-                            agents the hook told to hand off, their compactions, and the three kinds of tool calls
-                            whose results added the most, by their share, as the Agents' time line groups the tool
-                            calls.
+                            builder to hand off, or for the sessions, tells the orchestrator to clear its context.
+                            Then the context that the results of their tool calls added, per tool call, and how many
+                            steps it leaves out because their call has no event in .loop/requests.jsonl. Then how many
+                            of the agents the hook told to hand off, their compactions, and the three kinds of tool
+                            calls whose results added the most, by their share, as the Agents' time line groups the
+                            tool calls.
   Heavy command             A line for each command that scripts/loop/run-heavy ran, from .loop/heavy.jsonl: how many
                             runs started and ended, and the median minutes, cores and memory of those that ended.
                             Then how many runs waited, those that a signal stopped while they waited included, their
@@ -722,12 +722,12 @@ def contexts_by_type(runs: list[AgentRun], contexts: dict[str, Context]) -> dict
 def context_lines(by_type: dict[str, list[Context]], orchestrator: list[Context]) -> list[str]:
     """A line for each type of the agents with a transcript, measured against the threshold at which
     scripts/hooks/hand-off tells a builder to hand off, and one for the orchestrator's sessions, measured against the
-    threshold at which it tells the orchestrator to compact."""
+    threshold at which it tells the orchestrator to clear its context."""
     hand_off = ("the hand-off threshold", hook_threshold("soon_tokens"))
-    compaction = ("the compaction threshold", hook_threshold("compact_tokens"))
+    clear = ("the /clear threshold", hook_threshold("compact_tokens"))
     lines = [context_line(f"type {name}", "agents", by_type[name], hand_off, True) for name in sorted(by_type)]
     # The hook never tells the orchestrator to hand off.
-    return [*lines, context_line("the orchestrator", "sessions", orchestrator, compaction, False)]
+    return [*lines, context_line("the orchestrator", "sessions", orchestrator, clear, False)]
 
 
 def context_line(
