@@ -14,7 +14,7 @@
   ```
 
   Don't use `gh pr checkout`, because auto mode sometimes denies it, and after a few denials auto mode stops to ask the maintainer.
-- If an error shows only with an input that someone would have to craft on purpose, and nobody outside the project can give that input, report the error as a note after the other errors, because it needn't block the merge. But if the pull request changes a hook, report as an error each command that the hook on main blocks and the pull request lets through, even when only a command written on purpose to get past the hook shows it, so that no hook merges weaker than main.
+- If an error shows only with an input that someone would have to craft on purpose, and nobody outside the project can give that input, report the error as a note after the other errors, because it needn't block the merge. But if the pull request changes a hook, and the changed hook lets through a command that the hook on main blocks, report that as an error with the command as its case, even when only a command written on purpose would get through.
 - Report to whoever asked for the review. Other than the checkout above and recording a vulnerability, don't change files or labels, make commits, or post comments or reviews. If you find no errors, say so in one line.
 
 ## Review the code for security problems

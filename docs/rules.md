@@ -6,4 +6,4 @@
 - Before you remove a rule that still applies, find out why it was added, with `git log -S "<words>"`. Keep it if it prevents a mistake that happened, or records a decision that would be costly to make again.
 - Write a rule for the common case. When a rare case would need an exception, don't write one. Change the rule so that it covers that case too, or leave the case to the agent's judgment.
 - If a hook, a check or a setting enforces a requirement and its message says what to do, don't repeat that requirement in a rule.
-- To add, rename or remove a label, change "Labels" in AGENTS.md, `scripts/configure-github` and every other file that names the label, in the same pull request.
+- When you change what a rule asks, or add, rename or remove a label, find each rule, hook, script and agent file that names the same action, file or label, and update each one that your change would make wrong or incomplete, in the same pull request. For a label, these include "Labels" in AGENTS.md and `scripts/configure-github`.

@@ -101,9 +101,10 @@ It builds the issue again from the commit that the pull request started from, pu
 diff in `changes.diff` in its run folder. Its lines in `agents.jsonl` in the main checkout's `.loop` folder give the
 build's cost, and mark the build as a test, so that the report leaves it out. For each issue and each version or type
 that you test, start a new agent that knows only the issue and two diffs, the baseline's and the other build's, and
-not which build made which, and ask it which diff is better and why. Start it in a worktree of its own, such as with
-the Agent tool's `isolation: "worktree"`, because a judge that runs a diff's code in your worktree changes your
-files. Keep whichever cost least over all the issues,
+not which build made which, and ask it which diff is better and why. A judge that you start with the Agent tool starts
+in your worktree, so tell it to apply a diff only in a scratch worktree of its own, and to change no file in yours. Ask
+it to run only the tests of the files that the diffs change, because a judge's run of the whole `scripts/check` takes
+the machine's room from the loop's builds. Keep whichever cost least over all the issues,
 unless the judges find another clearly better on most of them. To keep a version, change its type's file to it. To
 keep a new type, keep its file, and narrow the description of the type that built its issues until now. Delete each
 version's file, other than that of a new type that you keep, so that your pull request holds only the change that

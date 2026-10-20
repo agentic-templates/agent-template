@@ -45,10 +45,10 @@ describes:
   message in its prompt after the first line.
 - On another account, write the message to a file in a folder of your own in `.loop/`. Then run the command that
   "Read the meter" gives for the account, and add `--message <file>`. For a builder that fixes a reviewer's errors,
-  give the command `<issue> other` as its first arguments, where `<issue>` is the old builder's issue. For a builder
-  or a researcher that takes over a hand-off, give the command the `issue` and the `kind` of the old agent's start
-  line in `.loop/agents.jsonl` in place of `<issue> other`, such as `12 left behind 34` for the issue 12 and the kind
-  `left behind 34`. If that start line has no kind, because the old builder started on a pull request, give
+  give the command `<issue> other` as its first arguments, where `<issue>` is the old builder's issue. For a builder,
+  a researcher or an auditor that takes over a hand-off, give the command the `issue` and the `kind` of the old agent's
+  start line in `.loop/agents.jsonl` in place of `<issue> other`, such as `12 left behind 34` for the issue 12 and the
+  kind `left behind 34`. If that start line has no kind, because the old builder started on a pull request, give
   `<issue> other` there too.
 
 Start the prompt of each agent of the types `builder`, `builder-small`, `builder-deep`, `researcher` and `reviewer`
@@ -193,7 +193,7 @@ choose the account whose line has the lowest `week` percentage, among the accoun
 agent. A Codex account builds only the kinds `research` and `other`. Each reviewer of a pull request, each builder of
 the type `builder-deep`, and each builder or researcher that takes over a hand-off can run only on a Claude account.
 Start each reviewer that reviews no pull request, such as the reviewer of a release, on your own account, in your
-session, and the auditor as "Start a retrospective" describes. Each account's advice says what you can start on that
+session. Start the auditor as "Start a retrospective" describes. Each account's advice says what you can start on that
 account:
 
 - **go:** start any agent.
@@ -243,7 +243,8 @@ When the maintainer asks for one thing, such as a test of one model, do that thi
 one.
 
 Before you recommend an option to the maintainer, check it against each objection that you raised earlier in the same
-thread, and against each rule that it would loosen.
+thread, and against each rule that it would loosen. When the maintainer answers with a word such as yes, tell them in
+one line the option that you understood them to choose and what it does, before you carry it out.
 
 Each time you write a question for the maintainer in an issue with `needs-decision`, or an agent's report names an
 issue where it wrote one, send the maintainer a push notification with the issue's title and link, using the
@@ -256,8 +257,9 @@ request is still open. Start it on the Claude account whose line has the lowest 
 whose advice lets you start an auditor. On your own account, start it in your session. On another account, open an
 issue for the retrospective, and write a message to a file in a folder of your own in `.loop/`, which says that the
 auditor runs the retrospective of that issue as its agent file describes, rather than building the issue, and opens
-no other issue. Then run `scripts/loop/run-builder <issue> other --tool claude --type auditor --account <name>
---message <file>` as a background task.
+no other issue for the retrospective. Then run
+`scripts/loop/run-builder <issue> other --tool claude --type auditor --account <name> --message <file>` as a background
+task.
 
 When the `retrospective due` part names a new model behind an alias, as `retrospective due: fable names
 claude-fable-5-2, which no retrospective tested` does for the alias `fable`, give the auditor the model's full ID in
