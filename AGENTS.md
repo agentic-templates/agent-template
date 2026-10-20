@@ -26,7 +26,7 @@ Read each guide before you first do its kind of work in a session, even when the
 - [docs/loop.md](docs/loop.md), before you run the loop as its orchestrator.
 - [docs/writing.md](docs/writing.md), before you write anything that others read: docs, issues, pull requests, commit messages, comments, error messages, and replies and reports to the maintainer.
 - [docs/pages.md](docs/pages.md), before you write or change the README, AGENTS.md or a page in `docs/`.
-- [docs/rules.md](docs/rules.md), before you change AGENTS.md, a guide or the labels.
+- [docs/rules.md](docs/rules.md), before you change AGENTS.md, a guide or the labels, and before you write an issue that asks for such a change.
 - [docs/code.md](docs/code.md), before you write or review code.
 - [docs/dependencies.md](docs/dependencies.md), before you add or update a tool, a package or a GitHub Action.
 - [docs/languages.md](docs/languages.md), before you add a language to the project, at setup or later.
