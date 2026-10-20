@@ -530,6 +530,68 @@ expect_block Bash 'gh pr comment 5 -R someone/else --body Hello' "$(other_reposi
 expect_block Bash 'gh issue comment -Rsomeone/else 5 --body Hello' "$(other_repository someone/else)"
 # gh drops the = after a short flag when more follows it, as split_flag_word in helpers.bash describes.
 expect_block Bash 'gh issue comment -R=someone/else 5 --body Hello' "$(other_repository someone/else)"
+# Once the list names someone/else, the hook allows the same command.
+cp "$project/.loop/allowed-repositories" "$base/allowed-repositories"
+echo someone/else >>"$project/.loop/allowed-repositories"
+expect_allow Bash 'gh issue comment -R=someone/else 5 --body Hello'
+mv "$base/allowed-repositories" "$project/.loop/allowed-repositories"
+# A word can hold several short flags, as split_flag_word in helpers.bash reads it, and -R can be the last of them.
+# The -a of gh pr review takes no value. The hooks list no flags of gh run rerun, so the hook reads its -d, which takes
+# no value, as a flag without a value too. The -c of gh issue close takes a comment, so -cRsomeone/else there is the
+# comment Rsomeone/else, and the -b of gh pr comment takes the next word as the body, even when it starts with -R.
+for command in 'gh pr review 5 -a -R someone/else' 'gh pr review 5 -aRsomeone/else' 'gh pr review -aR someone/else 5' \
+  'gh run rerun 12 -dRsomeone/else'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+expect_allow Bash 'gh issue close 5 -cRsomeone/else'
+expect_allow Bash 'gh pr comment 5 -b -Rsomeone/else'
+# For a command whose flags the hooks don't list, -R can be part of the value of a flag before it, such as the -j of
+# gh run rerun, which takes a job. The hook then checks the repository that gh posts to without -R as well.
+for command in 'GH_REPO=someone/else gh run rerun 12 -jRjtmpl/project' \
+  'GH_REPO=someone/else gh run rerun 12 -j -Rjtmpl/project'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+# gh takes the last -R that is a flag, so a later -R that can be the value of a flag before it can hide an earlier one.
+for command in 'gh run rerun 12 -R someone/else -j -Rjtmpl/project' \
+  'gh run rerun 12 -Rsomeone/else -jRjtmpl/project' 'gh run rerun 12 --repo=someone/else --job -R=jtmpl/project'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+# A word with an expansion can become nothing, so that a later -R becomes the value of the flag before it, for a
+# command whose flags the hooks list too.
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so the expansions stay as written.
+for command in 'gh pr comment 5 -R someone/else -b $EMPTY -Rjtmpl/project' \
+  'gh issue close 5 -R someone/else -c $EMPTY -Rjtmpl/project' \
+  'gh pr review 5 -R someone/else -a -b ${EMPTY} --repo=jtmpl/project'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+# A flag word with an expansion can end in another flag once the shell expands it, such as the -a of gh pr review, so
+# the -R after it can be a flag rather than the value of -b or -c.
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so the expansions stay as written.
+for command in 'gh pr review 5 -$b -Rsomeone/else' 'gh pr review 5 -${M}b -R someone/else' \
+  'gh issue close 5 -${X}c --repo=someone/else'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+# An earlier word with an expansion can also become nothing, become a flag that takes a value, or leave the flag in its
+# own word without a value, as -b$X does when X is empty. Then the flag before a -R takes another word as its value.
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so the expansions stay as written.
+for command in 'gh pr comment 5 -b $EMPTY -b -Rsomeone/else' 'gh issue close 5 -c $EMPTY -c -Rsomeone/else' \
+  'gh pr review 5 -b $EMPTY -b --repo=someone/else' 'gh pr review 5 -b $EMPTY -b -R someone/else' \
+  'gh pr comment 5 $X -b -Rsomeone/else' 'gh pr comment 5 "$X" -b -Rsomeone/else' \
+  'gh pr comment 5 -b$X -b -Rsomeone/else' 'gh pr comment 5 -$X -b -Rsomeone/else'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+# ANSI-C quoting, locale quoting, brace expansion and a pattern can become a flag that takes a value too, as each of
+# these becomes -b.
+for command in "gh pr comment 5 \$'-b' -b -Rsomeone/else" 'gh pr comment 5 $"-b" -b -Rsomeone/else' \
+  'gh pr comment 5 {-b,} -b -Rsomeone/else' 'gh pr comment 5 -[b] -b -Rsomeone/else'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+expect_allow Bash 'gh run rerun 12 -dRjtmpl/listed'
+# gh repo edit, delete, archive and unarchive take no -R, so a -R there is part of the value of a flag before it, such
+# as the -d of gh repo edit, which takes a description.
+for command in 'gh repo edit someone/else -dRjtmpl/project' 'gh repo edit someone/else -d -Rjtmpl/project'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
 expect_block Bash 'gh issue -R someone/else comment 5 --body Hello' "$(other_repository someone/else)"
 expect_block Bash 'gh release -R someone/else upload v1 app.tar' "$(other_repository someone/else)"
 expect_block Bash 'gh workflow run ci.yml --repo=github.com/someone/else' "$(other_repository someone/else)"
