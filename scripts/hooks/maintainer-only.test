@@ -408,6 +408,9 @@ done
 for value in 0 f F false FALSE False; do
   expect_allow Bash "gh pr merge 5 --squash --admin=$value"
 done
+# gh knows that --help takes no value, so it finds the subcommand right after it, and keeps the last value of --help,
+# so that it merges.
+expect_before_and_after_subcommand 2 "$admin_merge" pr '--help' merge '--help=false --admin 5'
 expect_allow Bash 'gh api repos/jtmpl/project/branches/main/protection'
 expect_allow Bash 'gh api "repos/{owner}/{repo}/rulesets?includes_parents=false"'
 expect_allow Bash 'gh api -X get "repos/{owner}/{repo}/rulesets"'
@@ -482,6 +485,9 @@ expect_block Bash 'gh issue comment -R=someone/else 5 --body Hello' "$(other_rep
 expect_block Bash 'gh issue -R someone/else comment 5 --body Hello' "$(other_repository someone/else)"
 expect_block Bash 'gh release -R someone/else upload v1 app.tar' "$(other_repository someone/else)"
 expect_block Bash 'gh workflow run ci.yml --repo=github.com/someone/else' "$(other_repository someone/else)"
+# gh finds the subcommand of every group after the repository flag, as it does after the subcommand's other flags.
+expect_before_and_after_subcommand 2 "$(other_repository someone/else)" secret '-R someone/else' set 'TOKEN'
+expect_before_and_after_subcommand 2 "$(other_repository someone/else)" workflow '-R someone/else' run 'ci.yml'
 expect_block Bash 'gh issue comment https://github.com/someone/else/issues/5 --body Hello' \
   "$(other_repository someone/else)"
 expect_block Bash 'gh api -X POST repos/someone/else/issues -f title=Bug -f body=Description' \
