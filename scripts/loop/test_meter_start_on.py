@@ -1,7 +1,8 @@
 import datetime as dt
 import json
+import os
 
-from test_meter import INTERRUPTION, NOW, MeterTest, meters
+from test_meter import INTERRUPTION, NOW, MeterTest, meters, project_folder
 
 
 class StartOnTest(MeterTest):
@@ -102,6 +103,22 @@ class StartOnTest(MeterTest):
         self.started("claude", start)
         self.reading("claude", 20.0, 1.0)
         self.assertEqual([self.start_on(), self.start_on()], ["claude", "claude"])
+
+    def test_takes_the_orchestrators_account_from_the_folder_that_holds_its_transcript(self) -> None:
+        # The meter runs on account a, and the orchestrator on account b, whose transcript has no work to count. Between
+        # accounts with the same meters, the meter names the one other than the orchestrator's.
+        self.accounts(
+            {"name": "a", "tool": "claude", "env": {"CLAUDE_CONFIG_DIR": os.environ["CLAUDE_CONFIG_DIR"]}},
+            {"name": "b", "tool": "claude"},
+        )
+        transcript = project_folder(self.root / "person" / ".claude") / "orchestrator.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(json.dumps({"type": "user", "timestamp": NOW.isoformat()}) + "\n")
+        (self.loop / "state.md").write_text("session: orchestrator\n")
+        (self.loop / "meter.jsonl").unlink()
+        self.reading("a", 20.0, 1.0)
+        self.reading("b", 20.0, 1.0)
+        self.assertEqual(self.start_on(), "a")
 
     def test_leaves_out_an_account_whose_newest_reading_is_older_than_30_minutes(self) -> None:
         self.clock.time = NOW + dt.timedelta(minutes=30)

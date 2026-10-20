@@ -88,3 +88,19 @@ def claude_project_folders(checkout: Path, accounts: list[Account]) -> list[Path
         paths.claude_project_folder(checkout, account["env"]) for account in accounts if account["tool"] == "claude"
     ]
     return list(dict.fromkeys(folders))
+
+
+def transcript_account(checkout: Path, accounts: list[Account], transcript: Path) -> Account | None:
+    """The Claude account of the session whose transcript of the checkout it is, or None: the account that this process
+    runs on, if the transcript is in this process's folder, or else the first Claude account whose folder holds it."""
+    if transcript.parent == paths.claude_project_folder(checkout) and (own := own_account(accounts, os.environ)):
+        return own
+    return next(
+        (
+            account
+            for account in accounts
+            if account["tool"] == "claude"
+            and paths.claude_project_folder(checkout, account["env"]) == transcript.parent
+        ),
+        None,
+    )

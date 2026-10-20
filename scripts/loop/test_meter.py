@@ -474,6 +474,25 @@ class AccountLineTest(MeterTest):
         self.assertTrue(line.endswith(" | stop"))
         self.assertEqual(json.loads(self.log_lines()[-1])["orchestrator_share"], 0.75)
 
+    def test_counts_the_orchestrators_work_on_the_account_whose_folder_holds_its_transcript(self) -> None:
+        transcript = self.orchestrator_on_another_account() / "orchestrator.jsonl"
+        call = {"type": "assistant", "message": {"id": "m1", "usage": {"input_tokens": 1000}}}
+        write_transcript(
+            transcript,
+            [
+                {
+                    "type": "user",
+                    "timestamp": (NOW - dt.timedelta(minutes=60)).isoformat(),
+                    "message": {"content": "go"},
+                },
+                call | {"timestamp": (NOW - dt.timedelta(minutes=15)).isoformat()},
+            ],
+        )
+        (self.loop / "state.md").write_text("session: orchestrator\n")
+        self.run_meter()
+        shares = {entry["account"]: entry["orchestrator_share"] for entry in map(json.loads, self.log_lines()[1:])}
+        self.assertEqual(shares, {"claude": 0.75, "claude-2": 0.0})
+
     def test_gives_the_weekly_meter_of_each_model(self) -> None:
         self.answer("claude", [usage_output(8, week=40, model_week=100)])
         self.assertEqual(

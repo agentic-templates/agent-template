@@ -24,9 +24,11 @@ that run on the account still need:
 
 The usage per agent-minute is the rise of a meter since the newest reading of the account that is {period} to {gap}
 minutes old, over the minutes that the account's agents worked since that reading. On its own account, the
-orchestrator counts as an agent for the minutes that its transcript shows it working. When the agents didn't work or
-the meter didn't rise, the meter takes the last usage per agent-minute that it measured, and before it measured one,
-the usage that scripts/loop/account_room.py starts with.
+orchestrator counts as an agent for the minutes that its transcript shows it working. Its own account is the one that
+the meter runs on, if the meter's folder of transcripts holds the transcript of the session that .loop/state.md names,
+or else the first Claude account whose folder holds it. When the agents didn't work or the meter didn't rise, the meter
+takes the last usage per agent-minute that it measured, and before it measured one, the usage that
+scripts/loop/account_room.py starts with.
 
 The line after the accounts names the Claude account to start each agent type on, other than the auditor: the account
 with the lowest 5-hour meter among those where the type fits. Between accounts with the same 5-hour meter, it names the
@@ -134,7 +136,7 @@ from accounts import (
     claude_environment,
     claude_project_folders,
     load_accounts,
-    own_account,
+    transcript_account,
 )
 from github import GitHubError, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, note_files, note_times, told_for_room
@@ -350,9 +352,7 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
     earlier_runs = run_minutes_by_type(runs)
     project_folders = claude_project_folders(paths.main_checkout(), accounts)
     transcripts = agent_log.agent_transcripts(project_folders)
-    orchestrators = own_account(accounts, os.environ)
-    transcript = orchestrator_transcript(log.parent / "state.md", project_folders)
-    orchestrator_periods = agent_log.session_periods(transcript) if transcript else []
+    orchestrators, orchestrator_periods = orchestrator_work(accounts, log)
     candidates: list[account_room.Candidate] = []
     for account in accounts:
         reading_time = now()
@@ -367,7 +367,7 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
             "account": account["name"],
             "meters": meters,
         }
-        is_orchestrators = orchestrators is not None and orchestrators["name"] == account["name"]
+        is_orchestrators = orchestrators == account["name"]
         orchestrator = orchestrator_periods if is_orchestrators else []
         room, measured = read_room(account["name"], meters, reading_time, log, runs, transcripts, orchestrator)
         result = advise(room, agent_types(account["tool"]), earlier_runs, reading_time)
@@ -428,11 +428,7 @@ def start_candidates(
 ) -> list[account_room.Candidate]:
     """The Claude accounts with a reading from the last OLDEST_START_READING, each with the types that fit its room."""
     earlier_runs = run_minutes_by_type(runs)
-    orchestrators = own_account(accounts, os.environ)
-    transcript = orchestrator_transcript(
-        log.parent / "state.md", claude_project_folders(paths.main_checkout(), accounts)
-    )
-    orchestrator_periods = agent_log.session_periods(transcript) if transcript else []
+    orchestrators, orchestrator_periods = orchestrator_work(accounts, log)
     candidates: list[account_room.Candidate] = []
     for account in accounts:
         readings = account_readings(log, account["name"]) if log.exists() else []
@@ -441,7 +437,7 @@ def start_candidates(
         reading_time = dt.datetime.fromisoformat(readings[-1]["at"])
         if now() - reading_time > OLDEST_START_READING:
             continue
-        is_orchestrators = orchestrators is not None and orchestrators["name"] == account["name"]
+        is_orchestrators = orchestrators == account["name"]
         orchestrator = orchestrator_periods if is_orchestrators else []
         share = account_room.working_share(orchestrator, reading_time)
         room = room_at_reading(account["name"], readings, runs, transcripts, log, share)
@@ -852,6 +848,18 @@ def agents_line(agents: list[Agent], thresholds: dict[str, int], told_for_room: 
 def orchestrator_context(state_file: Path, project_folders: list[Path]) -> int | None:
     transcript = orchestrator_transcript(state_file, project_folders)
     return None if transcript is None else context_tokens(transcript)
+
+
+def orchestrator_work(accounts: list[Account], log: Path) -> tuple[str | None, list[agent_log.Period]]:
+    """The name of the Claude account that the orchestrator runs on, which is the one whose folder holds its
+    transcript, and the periods when the orchestrator worked. The meter can run on another account, as an auditor's
+    does."""
+    checkout = paths.main_checkout()
+    transcript = orchestrator_transcript(log.parent / "state.md", claude_project_folders(checkout, accounts))
+    if transcript is None:
+        return None, []
+    account = transcript_account(checkout, accounts, transcript)
+    return (account["name"] if account else None), agent_log.session_periods(transcript)
 
 
 def orchestrator_transcript(state_file: Path, project_folders: list[Path]) -> Path | None:
