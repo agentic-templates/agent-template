@@ -505,6 +505,14 @@ for command in 'gh run rerun 12 -R someone/else -j -Rjtmpl/project' \
   'gh run rerun 12 -Rsomeone/else -jRjtmpl/project' 'gh run rerun 12 --repo=someone/else --job -R=jtmpl/project'; do
   expect_block Bash "$command" "$(other_repository someone/else)"
 done
+# A word with an expansion can become nothing, so that a later -R becomes the value of the flag before it, for a
+# command whose flags the hooks list too.
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so the expansions stay as written.
+for command in 'gh pr comment 5 -R someone/else -b $EMPTY -Rjtmpl/project' \
+  'gh issue close 5 -R someone/else -c $EMPTY -Rjtmpl/project' \
+  'gh pr review 5 -R someone/else -a -b ${EMPTY} --repo=jtmpl/project'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
 expect_allow Bash 'gh run rerun 12 -dRjtmpl/listed'
 # gh repo edit, delete, archive and unarchive take no -R, so a -R there is part of the value of a flag before it, such
 # as the -d of gh repo edit, which takes a description.
