@@ -81,7 +81,7 @@ import agent_log
 import paths
 import request_events
 from accounts import TOOLS, Account, AccountsError, claude_environment, load_accounts
-from builder_run import (
+from builder_shared import (
     TRUSTED_ROOT,
     Folders,
     Outcome,

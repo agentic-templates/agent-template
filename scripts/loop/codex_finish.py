@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from builder_run import (
+from builder_shared import (
     TRUSTED_ROOT,
     Folders,
     Outcome,
