@@ -62,6 +62,10 @@ first Claude account, and reads the IDs from the result. It keeps them in .loop/
 that starts with "retrospective due:" for each such ID, and one that starts with "model of" for each alias whose
 request failed.
 
+Once {building} agents that build run, the last line says so after the load, so that the loop starts no builder and no
+test build until fewer run. The agents that build are those of a builder type, the Codex runs and the test builds of a
+retrospective.
+
 The last line ends with a part that starts with "audit due:" for each sign of clear waste, so that the orchestrator
 starts a focused audit of it. scripts/loop/waste.py gives the thresholds of the three signs: a build of a builder type
 that took far longer than the median of its type, heavy commands that waited long in scripts/loop/run-heavy's line over
@@ -135,6 +139,12 @@ CODEX_SNAPSHOT_AGE = dt.timedelta(days=8)
 TRANSCRIPT_TAIL_BYTES = 400_000
 # How often meter --wake looks for a new note of scripts/hooks/hand-off between two readings
 HAND_OFF_CHECK_SECONDS = 60
+# The most agents that build that the machine has room for. Each runs scripts/check, which waits in
+# scripts/loop/run-heavy while the machine has no room for it. A retrospective changes this from the "Machine" lines of
+# scripts/loop/report, which give the readings for each number of agents that worked.
+MOST_BUILDING_AGENTS = 6
+# The types of the agents that build start with this, as do the versions of them that a retrospective tests.
+BUILDER_TYPE_PREFIX = "builder"
 # .claude/agents/auditor.md says when a retrospective sets this.
 OUTPUT_TOKENS_PER_RETROSPECTIVE: int | None = None
 HOURS_PER_RETROSPECTIVE = 30.0
@@ -169,6 +179,7 @@ class Agent(NamedTuple):
     # The subagent's agent id or the run's session id, which names the notes of scripts/hooks/hand-off
     key: str | None
     context: int | None
+    is_building: bool
 
 
 class NoReading(Exception):
@@ -205,7 +216,8 @@ def main(argv: list[str] | None = None) -> int:
         readings = wait_for_wake(accounts, log, hand_offs, lambda: has_new_finding(loop_folder, checkout, printed))
     else:
         readings = read_accounts(accounts, log)
-    agents = agents_line(running_agents(loop_folder, checkout), hand_off_thresholds(note_files(hand_offs)))
+    running = running_agents(loop_folder, checkout)
+    agents = agents_line(running, hand_off_thresholds(note_files(hand_offs)))
     runs = agent_log.read_runs(loop_folder / "agents.jsonl")
     transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
     try:
@@ -220,6 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     findings = waste_findings(runs, transcripts, loop_folder, last)
     machine = machine_line(
         readings.machine,
+        building=sum(agent.is_building for agent in running),
         context=orchestrator_context(loop_folder / "state.md", checkout),
         retrospective=" | ".join([retrospective, *model_notes]),
         findings=[finding.text for finding in findings],
@@ -230,14 +243,15 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def help_text() -> str:
-    """The docstring, with the numbers that the code keeps in place of {hours}, {period}, {gap} and {start}, so that
-    changing a number takes one edit. The docstring's JSON example has braces of its own, so str.format can't fill it
-    in."""
+    """The docstring, with the numbers that the code keeps in place of {hours}, {period}, {gap}, {start} and
+    {building}, so that changing a number takes one edit. The docstring's JSON example has braces of its own, so
+    str.format can't fill it in."""
     numbers = {
         "{hours}": f"{HOURS_PER_RETROSPECTIVE:g}",
         "{period}": f"{USAGE_PERIOD.total_seconds() / 60:g}",
         "{gap}": f"{LONGEST_READING_GAP.total_seconds() / 60:g}",
         "{start}": f"{OLDEST_START_READING.total_seconds() / 60:g}",
+        "{building}": str(MOST_BUILDING_AGENTS),
     }
     text = str(__doc__)
     for placeholder, number in numbers.items():
@@ -668,7 +682,7 @@ def describe(meter: Meter, reading_time: dt.datetime) -> str:
     return f"{meter['used']:g}% resets {shown}"
 
 
-def machine_line(machine: Machine, context: int | None, retrospective: str, findings: list[str]) -> str:
+def machine_line(machine: Machine, building: int, context: int | None, retrospective: str, findings: list[str]) -> str:
     memory, swap = machine["memory_free_gb"], machine["swap_used_gb"]
     context_part = "orchestrator context unknown" if context is None else f"orchestrator context {context // 1000}k"
     return " | ".join(
@@ -679,11 +693,18 @@ def machine_line(machine: Machine, context: int | None, retrospective: str, find
             "swap unknown" if swap is None else f"swap {swap:.1f} GB used",
             gpu_part(machine),
             f"load {machine['load']:.1f} on {machine['cores']} cores",
+            *building_part(building),
             context_part,
             retrospective,
             *(f"audit due: {finding}" for finding in findings),
         ]
     )
+
+
+def building_part(building: int) -> list[str]:
+    if building < MOST_BUILDING_AGENTS:
+        return []
+    return [f"{building} agents build, and the limit is {MOST_BUILDING_AGENTS}: start no builder or test build"]
 
 
 def gpu_part(machine: Machine) -> str:
@@ -707,14 +728,22 @@ def running_agents(loop_folder: Path, checkout: Path) -> list[Agent]:
             continue
         issue = run.start.get("issue")
         name = f"{run.start['type']} #{issue}" if issue else run.start["type"]
+        building = is_building(run.start)
         transcript = transcripts.get(run.start["id"])
         if transcript is not None:
-            agents.append(Agent(name, transcript.stem.removeprefix("agent-"), context_tokens(transcript)))
+            agents.append(Agent(name, transcript.stem.removeprefix("agent-"), context_tokens(transcript), building))
             continue
         events = loop_folder / "runs" / run.start["id"] / "events.jsonl"
         session = run_session(events) if events.exists() else None
-        agents.append(Agent(name, session, context_tokens(events)))
+        agents.append(Agent(name, session, context_tokens(events), building))
     return agents
+
+
+def is_building(start: dict[str, Any]) -> bool:
+    """Whether an agent builds, from its start line: a test build of a retrospective, a Codex run, or an agent of a
+    builder type."""
+    agent_type = start["type"]
+    return bool(start.get("test")) or agent_type == "codex" or agent_type.startswith(BUILDER_TYPE_PREFIX)
 
 
 def is_running(run: agent_log.AgentRun) -> bool:

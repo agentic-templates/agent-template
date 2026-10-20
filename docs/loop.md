@@ -114,7 +114,9 @@ Start an agent for each ready issue, as far as "Read the meter" allows:
 3. Otherwise, choose the agent's type: `researcher` for a `research` issue, and otherwise the builder type whose
    description fits the change. Choose its account as "Read the meter" describes. If that's your own account, start a
    background agent of that type. Don't give it a model, so that it runs at its type's model and effort. After its
-   prompt's first line, name the files to start from if you know them.
+   prompt's first line, name the files to start from if you know them. If the issue needs a builder and the meter's
+   `machine` line says `start no builder or test build`, start none on any account, and skip the issue as "Read the
+   meter" describes for an issue that no account can take.
 
 After each issue, go back to step 1. Start an auditor too when "Start a retrospective" says so, and a focused audit
 when "Start a focused audit" says so.
@@ -177,8 +179,10 @@ heartbeat and schedule it again, because a recurring prompt ends 7 days after yo
 For each account in `.loop/accounts.json`, `scripts/loop/meter` prints a line that ends with the account's advice.
 The meter's last line starts with `machine`, and gives your context size and whether a retrospective is due. Of the
 parts that ` | ` separates on the line, each one that starts with `audit due:` names a finding for a focused audit.
-The line before it starts with `agents`, and gives the context size of each agent that runs. Run the meter once in
-each pass, before you launch.
+Once as many agents build as the machine has room for, the line has a part that gives their number and the limit,
+and ends with `start no builder or test build`. Reviewers and researchers still start then, because they rarely run
+`scripts/check`. The line before the `machine` line starts with `agents`, and gives the context size of each agent
+that runs. Run the meter once in each pass, before you launch.
 
 `scripts/loop/meter --wake` ends, and so wakes you, when an account's advice changes, when a reading has a finding for
 a focused audit whose subject wasn't on the last `machine` line that the meter printed, and when a hook tells an agent
