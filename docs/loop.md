@@ -186,21 +186,26 @@ to hand off its work, so that you can plan the agent that takes over. Start it a
 ends.
 
 Your own account is the Claude account in `.loop/accounts.json` whose `env` values match this session's
-environment, such as `CLAUDE_CONFIG_DIR`. For each builder and researcher, and for each reviewer of a pull request,
-choose the account whose line has the lowest `week` percentage, among the accounts whose advice lets you start the
-agent. A Codex account builds only the kinds `research` and `other`. Each reviewer of a pull request, each builder of
-the type `builder-deep`, and each builder or researcher that takes over a hand-off can run only on a Claude account.
-Start the auditor, and each reviewer that reviews no pull request, such as the reviewer of a release, on your own
-account, in your session. Each account's advice says what you can start on that account:
+environment, such as `CLAUDE_CONFIG_DIR`. Each account's advice names the agent types that it has room to start, after
+what its running agents still need, and on your own account, what you still need.
 
-- **go:** start any agent.
-- **watch:** keep the number of agents that run on the account from growing, and start no auditor.
-- **near:** start only reviewers, and agents for the issues that fit the types `builder-small` or `researcher`.
+- **go:** start an agent of any type.
+- **a list of types,** such as `builder-small, researcher, reviewer`: start only agents of those types.
 - **stop:** start nothing on the account.
 - **parked:** start nothing on the account. If it's your own account, also delete the heartbeat, because the meter
   wakes you a minute after the reset instead. Schedule the heartbeat again then.
 - **no reading:** start nothing on the account, and fix what the account's line names, or ask the maintainer if the
   fix needs them.
+
+The line after the accounts starts with `start on`, and names the Claude account for each type, or `no account`.
+Start each builder and researcher, and each reviewer of a pull request, on the account that it names for the agent's
+type. Start the auditor, and each reviewer that reviews no pull request, such as the reviewer of a release, in your
+session.
+
+A Codex account builds only the kinds `research` and `other`, and only while its advice is `go`. Start a builder or
+researcher there instead of on the named account when the Codex account's `week` percentage is lower than the named
+account's. Each builder of the type `builder-deep`, and each builder or researcher that takes over a hand-off, can run
+only on a Claude account.
 
 To start an agent on another account, run one of these commands as a background task. For an issue, give the line
 that `scripts/take-next-issue` printed in place of `<issue> <kind>`. The command's last line says how the run ended,
