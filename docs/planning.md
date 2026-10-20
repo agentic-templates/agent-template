@@ -64,7 +64,7 @@ An issue can get `ready` when all of these are true:
 - Nothing is left that only the maintainer can decide.
 - "What should change" says what's out of scope, if the agent that builds the issue might otherwise do more than the issue asks for.
 - It's blocked by every issue whose change it needs first.
-- If it asks for a new permission, such as an allow rule in `.claude/settings.json`, a reviewer has read what the permission would let an agent run, and found it safe.
+- If it asks for a new permission, such as an allow rule in `.claude/settings.json`, a `reviewer` agent has read what the permission would let an agent run and found it safe, and a comment on the issue says so.
 - It has no status label.
 
 A research issue is ready when its question and what depends on the answer are clear, and it has no status label. A parent is ready when someone could check each of its "Done when" items, it has no status label, and each of its sub-issues is ready.

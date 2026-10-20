@@ -317,3 +317,8 @@ def working_periods(run: AgentRun, transcripts_by_id: dict[str, Path], runs_fold
     if events.exists():
         return [(started(run), dt.datetime.fromtimestamp(events.stat().st_mtime, dt.UTC))]
     return []
+
+
+def minutes_after(periods: list[Period], moment: dt.datetime) -> float:
+    """The minutes of the periods after a moment."""
+    return sum(max(0.0, (end - max(start, moment)).total_seconds() / 60) for start, end in periods)

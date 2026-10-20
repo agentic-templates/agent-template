@@ -76,6 +76,9 @@ Test only where the report's numbers since the time in step 3 point to a change:
   clearly better, add the group to its description as a kind.
 - A kind of issue that no type fits well: test a new type for it, against the type that built such issues.
 
+If your prompt names a model that no retrospective tested, test it too, as "Start a retrospective" in docs/loop.md
+describes.
+
 Leave out a test that an earlier retrospective's description records, unless its numbers changed since. Run the test
 with the largest expected saving first, and start each build only while `scripts/loop/meter` gives the advice `go`
 for the account that the build runs on.
@@ -98,7 +101,9 @@ It builds the issue again from the commit that the pull request started from, pu
 diff in `changes.diff` in its run folder. Its lines in `agents.jsonl` in the main checkout's `.loop` folder give the
 build's cost, and mark the build as a test, so that the report leaves it out. For each issue and each version or type
 that you test, start a new agent that knows only the issue and two diffs, the baseline's and the other build's, and
-not which build made which, and ask it which diff is better and why. Keep whichever cost least over all the issues,
+not which build made which, and ask it which diff is better and why. Start it in a worktree of its own, such as with
+the Agent tool's `isolation: "worktree"`, because a judge that runs a diff's code in your worktree changes your
+files. Keep whichever cost least over all the issues,
 unless the judges find another clearly better on most of them. To keep a version, change its type's file to it. To
 keep a new type, keep its file, and narrow the description of the type that built its issues until now. Delete each
 version's file, other than that of a new type that you keep, so that your pull request holds only the change that

@@ -18,6 +18,10 @@ class Account(TypedDict):
     env: dict[str, str]
 
 
+# The Claude account that this machine is signed in to
+SIGNED_IN: Account = {"name": "claude", "tool": "claude", "env": {}}
+
+
 class AccountsError(Exception):
     """A problem with the accounts file, with what to do about it."""
 
@@ -26,7 +30,7 @@ def load_accounts(file: Path) -> list[Account]:
     """The accounts that the file lists. Without the file, the list holds the Claude account that this machine is
     signed in to."""
     if not file.exists():
-        return [{"name": "claude", "tool": "claude", "env": {}}]
+        return [SIGNED_IN]
     example = '{"accounts": [{"name": "claude", "tool": "claude"}]}'
     try:
         content = json.loads(file.read_text())
