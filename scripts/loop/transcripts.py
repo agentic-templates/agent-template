@@ -24,6 +24,12 @@ QUEUED_MESSAGE = "queued_command"
 # line's subtype starts with these words, as in model_refusal_no_fallback. Claude Code 2.1.303 writes them so.
 STOPPED_RESPONSE = "safeguards stopped the response"
 REFUSED_REQUEST = "model_refusal"
+# The text of the line that Claude Code writes when the user interrupts a session or an agent, which isn't a message
+# for it
+INTERRUPTION = "[Request interrupted by user"
+# The end of a transcript that holds its last call and its last message. An orchestrator's transcript of 218 MB took
+# 0.25 seconds and about 0.5 GB of memory to read whole.
+TAIL_BYTES = 400_000
 
 
 class Call(NamedTuple):
@@ -129,6 +135,36 @@ def is_prompt(entry: dict[str, Any]) -> bool:
         return False
     content = entry["message"].get("content")
     return not isinstance(content, list) or any(block.get("type") != "tool_result" for block in content)
+
+
+def tail_lines(file: Path) -> list[str]:
+    """The lines in the last TAIL_BYTES of a transcript. The first of them may be cut off."""
+    with file.open("rb") as handle:
+        handle.seek(max(0, file.stat().st_size - TAIL_BYTES))
+        return handle.read().decode(errors="replace").splitlines()
+
+
+def is_interrupted(file: Path) -> bool:
+    """Whether the last message in an agent's transcript is the line that says that the user interrupted the agent.
+    Claude Code runs no hook then, so the agent gets no end line. A message that the agent gets later comes after that
+    line, and the agent runs again."""
+    if not file.exists():
+        return False
+    for line in reversed(tail_lines(file)):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if has_message(entry):
+            return entry.get("type") == "user" and is_interruption(entry)
+    return False
+
+
+def is_interruption(entry: dict[str, Any]) -> bool:
+    """Whether a prompt is the line that Claude Code writes when the user interrupts a session or an agent."""
+    content = entry["message"].get("content")
+    texts = [content] if isinstance(content, str) else [block.get("text", "") for block in content]
+    return any(str(text).startswith(INTERRUPTION) for text in texts)
 
 
 def safety_stops(entries: list[dict[str, Any]]) -> list[dt.datetime]:

@@ -18,6 +18,12 @@ def call(tokens: int, **fields: Any) -> str:
     return json.dumps({"type": "assistant", "message": {"usage": usage | {"output_tokens": 999_999}}} | fields)
 
 
+# The line that Claude Code writes in an agent's transcript when the user interrupts the agent
+INTERRUPTION = json.dumps(
+    {"type": "user", "message": {"content": [{"type": "text", "text": "[Request interrupted by user for tool use]"}]}}
+)
+
+
 class AgentsLineTest(MeterTest):
     def setUp(self) -> None:
         super().setUp()
@@ -144,6 +150,14 @@ class AgentsLineTest(MeterTest):
                 self.agents(),
                 "agents | builder #65 context unknown | builder #65 context unknown | builder #66 context unknown",
             )
+
+    def test_leaves_out_an_agent_that_the_user_interrupted_and_lists_it_again_once_it_gets_a_message(self) -> None:
+        self.log("start", "toolu_01", issue=64, pid=os.getpid())
+        self.subagent("a1", "toolu_01", [call(300_000), INTERRUPTION])
+        self.log("start", "toolu_02", issue=65, pid=os.getpid())
+        message = '{"type": "user", "message": {"content": "Go on."}}'
+        self.subagent("a2", "toolu_02", [call(300_000), INTERRUPTION, message, call(310_000)])
+        self.assertEqual(self.agents(), "agents | builder #65 310k")
 
     def limit_parts(self) -> list[str]:
         """The parts of the machine line that name the limit on the agents that build, at a limit of 4, while a
