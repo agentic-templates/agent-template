@@ -202,7 +202,7 @@ new_case 0
 mkdir "$pages_read"
 run_fresh_reader "$reader" docs/expenses.md
 case_count=$((case_count + 1))
-record_error="error: the reader answered, but scripts/fresh-reader can't record in $pages_read that the reader read docs/expenses.md, and a hook blocks opening a pull request that adds or rewrites text in the page without that record. Fix the error above, and run scripts/fresh-reader again."
+record_error="error: the reader answered, but scripts/fresh-reader can't record in $pages_read that the reader read docs/expenses.md, and the hooks block a pull request that adds or rewrites text in the page, and an issue or pull request with the page as its body, without that record. Fix the error above, and run scripts/fresh-reader again."
 if ((status == 0)) || [[ $output != "The reader's answer from run 1"$'\n'*$'\n'"$record_error" ]]; then
   fail_case "When the record can't be written, scripts/fresh-reader must exit with a code other than 0, and print the reader's answer first and \"$record_error\" last, but it exited with code $status and printed \"$output\"."
 fi
@@ -245,6 +245,16 @@ run_fresh_reader "$reader" docs/import.md
 expect_record "When the reader reads a second page" "$(git -C "$base/project" hash-object docs/expenses.md docs/import.md)"
 rm "$base/project/docs/import.md"
 git -C "$base/project" checkout --quiet -- docs/expenses.md
+
+# A page that doesn't end in one line break adds a second line: the hash of its text with one line break at the end,
+# which a body with that text gets.
+new_case 0
+printf '%s' "$page_text" >"$base/project/body.md"
+printf '%s\n' "$page_text" >"$base/one-line-break.md"
+run_fresh_reader "$reader" body.md
+expect_record "When the page ends in no line break" "$(git -C "$base/project" hash-object body.md)" \
+  "$(git hash-object "$base/one-line-break.md")"
+rm "$base/project/body.md" "$base/one-line-break.md"
 
 # The branch rewrites the page's heading and commits it. Then main rewrites the last line, which the branch still has
 # as it was, so that line isn't new.

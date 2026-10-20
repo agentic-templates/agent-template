@@ -11,7 +11,8 @@
 # scripts/hooks/pages-read.bash describes. Outside a git repository, it records nothing. "Review a changed page with a
 # fresh reader" in docs/pages.md runs it, and a hook blocks gh pr create until the record has each page that the pull
 # request adds or rewrites text in, as the pull request has it. The hook blocks each later git push to the pull
-# request's branch that adds or rewrites text in a page in the same way.
+# request's branch that adds or rewrites text in a page in the same way. Another hook blocks gh issue create,
+# gh issue edit, gh pr create and gh pr edit with a body until the record has the body.
 set -euo pipefail
 # shellcheck source=scripts/hooks/pages-read.bash
 source "$(dirname "$0")/hooks/pages-read.bash"
@@ -63,7 +64,11 @@ fi
 # doesn't need.
 record=""
 if record=$(pages_read_path 2>/dev/null); then
-  page_hash=$(git hash-object -- "$page")
+  hashes=$(git hash-object -- "$page")
+  hash_as_body=$(body_hash "$(<"$page")")
+  if [[ $hash_as_body != "$hashes" ]]; then
+    hashes+=$'\n'$hash_as_body
+  fi
 fi
 
 folder=$(mktemp -d)
@@ -83,6 +88,6 @@ if ((status != 0)); then
   stop "can't get the reader's answer, because claude failed twice. The second time, it exited with code $status and printed: $answer"
 fi
 printf '%s\n' "$answer"
-if [[ -n $record ]] && ! printf '%s\n' "$page_hash" >>"$record"; then
-  stop "the reader answered, but scripts/fresh-reader can't record in $record that the reader read $page, and a hook blocks opening a pull request that adds or rewrites text in the page without that record. Fix the error above, and run scripts/fresh-reader again."
+if [[ -n $record ]] && ! printf '%s\n' "$hashes" >>"$record"; then
+  stop "the reader answered, but scripts/fresh-reader can't record in $record that the reader read $page, and the hooks block a pull request that adds or rewrites text in the page, and an issue or pull request with the page as its body, without that record. Fix the error above, and run scripts/fresh-reader again."
 fi
