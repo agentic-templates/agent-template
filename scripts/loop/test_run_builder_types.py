@@ -20,6 +20,7 @@ from test_run_builder import (
     lines,
     run_builder,
 )
+from test_run_builder_message import MESSAGE, MESSAGE_START
 from test_transcripts import call_line, command_line, prompt_line, result_line
 
 
@@ -289,6 +290,16 @@ class TestBuildTest(RunBuilderTest):
         self.assertEqual([call["start"] for call in self.calls("gh")], ["repo view", "issue view", "pr view"])
         start, end = self.agent_lines()
         self.assertEqual((start["id"], start["test"], end["id"]), (run.name, True, run.name))
+
+    def test_test_builder_gets_the_message_after_the_text_of_its_issue(self) -> None:
+        message = self.root / "message.md"
+        message.write_text(f"{MESSAGE}\n")
+        status, _, errors = self.run_builder("--tool", "claude", "--test", "7", "--message", str(message))
+        self.assertEqual((status, errors), (0, ""))
+        brief = (self.run_folder() / "brief.md").read_text()
+        self.assertTrue(brief.startswith(MESSAGE_START))
+        self.assertIn("This build is a test", brief)
+        self.assertEqual(self.calls("claude")[0]["args"][-1], brief)
 
     def test_keeps_the_diff_of_a_test_build_that_failed(self) -> None:
         self.answer("claude", "", {"stdout": lines(INIT), "status": 1, "write": {"half.txt": "half\n"}})
