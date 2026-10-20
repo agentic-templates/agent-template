@@ -213,7 +213,9 @@ def main(argv: list[str] | None = None) -> int:
     label = agent_log.type_label(label_names(issue))
     is_test = options.test is not None
     agent_log.append(
-        agent_log.start_line(folders.run.name, agent_type, settings, options.issue, label, kind, is_test, os.getpid())
+        agent_log.start_line(
+            folders.run.name, agent_type, settings, options.issue, label, kind, is_test, os.getpid(), account["name"]
+        )
     )
     begun = time.monotonic()
     try:

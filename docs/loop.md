@@ -177,8 +177,8 @@ ends.
 Your own account is the Claude account in `.loop/accounts.json` whose `env` values match this session's
 environment, such as `CLAUDE_CONFIG_DIR`. For each builder and researcher, choose the account whose line has the
 lowest `week` percentage, among the accounts whose advice lets you start the agent. A Codex account builds only the
-kinds `research` and `other`. Start reviewers and the auditor on your own account, in your session. Each account's
-advice says what you can start on that account:
+kinds `research` and `other`. Start a builder of the type `builder-deep` only on a Claude account. Start reviewers
+and the auditor on your own account, in your session. Each account's advice says what you can start on that account:
 
 - **go:** start any agent.
 - **watch:** keep the number of agents that run on the account from growing, and start no auditor.
