@@ -107,7 +107,18 @@ on.
 
 ### Launch
 
-Start an agent for each ready issue, as far as "Read the meter" allows:
+Start an agent for each ready issue, as far as "Read the meter" allows.
+
+First list the advisories whose fix hasn't merged yet. Step 3 of "Fix a security vulnerability" in
+`docs/releasing.md` adds a line that starts with `Fix merged in` to an advisory once its fix merges:
+
+```sh
+gh api --paginate "repos/{owner}/{repo}/security-advisories" --jq '.[] | select(.state != "published" and .state != "closed" and .state != "withdrawn") | select((.description // "") | test("(?m)^Fix merged in") | not) | .ghsa_id + ": " + .summary'
+```
+
+Until you list them again in your next pass, start no agent of a type, or on a tool, that one of their summaries
+names, such as `builder-small` or Codex. This holds in each step of the cycle. Skip each issue that only such an
+agent could take, as "Read the meter" describes for an issue that no account can take. Then:
 
 1. Run `scripts/take-next-issue`. It assigns you the next ready issue that can start, and prints its number and its
    kind, such as `12 other` or `13 research`. If it prints `none`, go on with "Land".
