@@ -5,7 +5,9 @@
 # The orchestrator is the session that the session: line of the state file names. Once its context passes
 # compact_tokens, it asks for a compaction, as "Compact your context" in docs/loop.md describes. It gets the note once
 # each time its context passes the threshold: the hook creates .loop/told-to-compact when it gives the note, and deletes
-# the file once the context is below the threshold again, as after a compaction.
+# the file once the context is below the threshold again, as after a compaction. Until the note, the hook refuses the
+# orchestrator's request for a compaction: it deletes the request while the context is at or below compact_tokens,
+# because the note comes at the first tool call past that size.
 # A builder or an auditor hands off its work: once its context first passes soon_tokens, at its next stopping point,
 # and once it first passes now_tokens, after the step it's on. These are the subagents of a builder type or of the
 # type auditor that the orchestrator's session starts itself, and the builders that scripts/loop/run-builder starts
@@ -79,9 +81,20 @@ tell() {
   jq -n --arg message "$1" '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $message}}'
 }
 
-# Tells the orchestrator to ask for a compaction, once each time its context passes compact_tokens.
+# Deletes the orchestrator's request for a compaction, and prints why: refuse_request <request> <context size>
+refuse_request() {
+  local why="because your context is $(($2 / 1000))k tokens. Go on with the loop, and ask for a compaction only after the hook tells you that your context has passed $((compact_tokens / 1000))k tokens."
+  if rm -f "$1" 2>/dev/null; then
+    echo "scripts/hooks/hand-off deleted your request for a compaction, $1, $why"
+  else
+    echo "scripts/hooks/hand-off refuses your request for a compaction, $1, $why It couldn't delete the file, so delete it."
+  fi
+}
+
+# Tells the orchestrator to ask for a compaction, once each time its context passes compact_tokens, and refuses a
+# request for one before then.
 tell_orchestrator() {
-  local loop size told note
+  local loop size told request message=""
   loop=$(find_loop_folder) || return 0
   if ! is_orchestrators_session "$loop" "$session_id"; then
     return 0
@@ -91,20 +104,27 @@ tell_orchestrator() {
     return 0
   fi
   told=$loop/told-to-compact
+  request=$loop/compact-request.txt
   if ((size <= compact_tokens)); then
     if [[ -e $told ]] && ! rm -f "$told" 2>/dev/null; then
-      tell "scripts/hooks/hand-off couldn't delete $told, so it won't tell you again when your context passes $((compact_tokens / 1000))k tokens. Delete the file."
+      message="scripts/hooks/hand-off couldn't delete $told, so it won't tell you again when your context passes $((compact_tokens / 1000))k tokens. Delete the file."
+    fi
+    if [[ -e $request ]]; then
+      message+="${message:+ }$(refuse_request "$request" "$size")"
+    fi
+    if [[ -n $message ]]; then
+      tell "$message"
     fi
     return 0
   fi
   if ! claim_note "$told"; then
     return 0
   fi
-  note="Your context has passed $((compact_tokens / 1000))k tokens. If the maintainer installed a compaction sender, ask for a compaction, as \"Compact your context\" in docs/loop.md describes: finish the step you're on, and bring your state file up to date. Then write $loop/compact-request.txt with $session_id on its first line and \"Resume from .loop/state.md.\" on its second, and end your turn. Without a sender, ask the maintainer to type /compact, and go on with the loop."
+  message="Your context has passed $((compact_tokens / 1000))k tokens. If the maintainer installed a compaction sender, ask for a compaction, as \"Compact your context\" in docs/loop.md describes: finish the step you're on, and bring your state file up to date. Then write $request with $session_id on its first line and \"Resume from .loop/state.md.\" on its second, and end your turn. Without a sender, ask the maintainer to type /compact, and go on with the loop."
   if [[ -n $unwritten ]]; then
-    note+=" scripts/hooks/hand-off couldn't write${unwritten}, so it may give this note again."
+    message+=" scripts/hooks/hand-off couldn't write${unwritten}, so it may give this note again."
   fi
-  tell "$note"
+  tell "$message"
 }
 
 # A subagent's input has an agent_id, and a session that scripts/loop/run-builder started has LOOP_HAND_OFF.
