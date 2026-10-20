@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
-# Tests scripts/create-private-fork with stand-ins for gh and sleep.
+# Tests scripts/create-private-fork on a copy of it in a repository that the test makes, with stand-ins for gh and
+# sleep.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 case_count=0
 failed_cases=0
 
-base=$(mktemp -d)
+base=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$base"' EXIT
+# git looks for no repository above the temporary folder, and reads none of the person's settings.
+export GIT_CEILING_DIRECTORIES=$base
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 mkdir -p "$base/bin"
 state=$base/state
+checkout=$base/checkout
 
 repo=octo-org/expenses
 ghsa_id=GHSA-2c5x-3m4v-7q8r
 fork=octo-org/expenses-ghsa-2c5x-3m4v-7q8r
+fork_remote=ghsa-2c5x-3m4v-7q8r
 tab=$'\t'
 
 # A stand-in for gh, first on the PATH. It writes each command to the file calls in TEST_STATE, one to a line. It
@@ -73,11 +79,14 @@ echo "$*" >>"$TEST_STATE/sleeps"
 STAND_IN
 chmod +x "$base/bin/sleep"
 
-# Starts a case in which the person has admin access, the advisory has no private fork, and the fork that the script
-# creates lists main and two other branches at the first listing.
+# Starts a case in which the person has admin access, the checkout has no remotes, the advisory has no private fork,
+# and the fork that the script creates lists main and two other branches at the first listing.
 new_case() {
-  rm -rf "$state"
+  rm -rf "$state" "$checkout"
   mkdir "$state"
+  git init --quiet "$checkout"
+  mkdir "$checkout/scripts"
+  cp scripts/create-private-fork scripts/admin-access "$checkout/scripts/"
   : >"$state/calls"
   : >"$state/sleeps"
   : >"$state/existing-fork"
@@ -105,7 +114,7 @@ run_create_private_fork() {
   status=0
   output=$(TEST_STATE=$state TEST_PERMISSION=$permission TEST_LISTINGS_WITHOUT_MAIN=$listings_without_main \
     TEST_EARLY_LISTINGS=$early_listings TEST_FAILING_CALL=$failing_call PATH=$base/bin:$PATH \
-    scripts/create-private-fork "$@" 2>&1) || status=$?
+    "$checkout/scripts/create-private-fork" "$@" 2>&1) || status=$?
 }
 
 # Checks the script's exit code and output: expect_result <description> <exit code> <output>
@@ -143,6 +152,17 @@ expect_waiting() {
   fi
 }
 
+# Checks the checkout's remotes, as git remote -v lists them: expect_remotes <description> <remotes>
+expect_remotes() {
+  local description=$1 expected_remotes=$2 remotes
+  remotes=$(git -C "$checkout" remote -v)
+  case_count=$((case_count + 1))
+  if [[ $remotes != "$expected_remotes" ]]; then
+    echo "error: $description, the checkout must have the remotes \"$expected_remotes\", but it has \"$remotes\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
 # Prints the seconds of the sleeps between a number of checks, separated by spaces: sleeps_between <checks>
 sleeps_between() {
   local sleeps="" check
@@ -162,6 +182,8 @@ deleted="$fork
 Deleted 441-fix-import
 Deleted dependabot/github_actions/actions/checkout-5"
 copies="because they're copies of the branches of $repo, not fixes"
+fork_remotes="$fork_remote${tab}https://github.com/$fork.git (fetch)
+$fork_remote${tab}https://github.com/$fork.git (push)"
 
 new_case
 run_create_private_fork "$ghsa_id"
@@ -169,6 +191,28 @@ expect_result "When the fork has main at the first check" 0 "$deleted"
 expect_calls "When the fork has main at the first check" \
   "$read_repo"$'\n'"$read_permission"$'\n'"$read_advisory"$'\n'"$create_fork"$'\n'"$list_branches"$'\n'"${delete_prefix}441-fix-import"$'\n'"${delete_prefix}dependabot/github_actions/actions/checkout-5"
 expect_waiting "When the fork has main at the first check" 1 2 ""
+expect_remotes "When the script creates the fork" "$fork_remotes"
+
+new_case
+git -C "$checkout" remote add "$fork_remote" git@github.com:octo-org/other.git
+run_create_private_fork "$ghsa_id"
+expect_result "When the checkout has the fork's remote already" 0 "$deleted"
+expect_remotes "When the checkout has the fork's remote already" \
+  "$fork_remote${tab}git@github.com:octo-org/other.git (fetch)
+$fork_remote${tab}git@github.com:octo-org/other.git (push)"
+
+new_case
+: >"$checkout/.git/config.lock"
+run_create_private_fork "$ghsa_id"
+# git's own error differs from one version of git to the next, so the case checks the output up to it.
+expected_start="$fork
+error: can't add the private fork $fork as the git remote $fork_remote, because git failed: "
+case_count=$((case_count + 1))
+if [[ $status != 1 || $output != "$expected_start"* ]]; then
+  echo "error: When git can't add the remote, scripts/create-private-fork must exit with code 1 and print \"$expected_start\" and git's error, but it exited with code $status and printed \"$output\"." >&2
+  failed_cases=$((failed_cases + 1))
+fi
+expect_waiting "When git can't add the remote" 0 0 ""
 
 new_case
 listings_without_main=3
@@ -249,6 +293,7 @@ run_create_private_fork "$ghsa_id"
 expect_result "When the advisory has a private fork already" 0 "$fork"
 expect_calls "When the advisory has a private fork already" "$read_repo"$'\n'"$read_permission"$'\n'"$read_advisory"
 expect_waiting "When the advisory has a private fork already" 0 0 ""
+expect_remotes "When the advisory has a private fork already" "$fork_remotes"
 
 new_case
 permission=MAINTAIN
@@ -256,6 +301,7 @@ run_create_private_fork "$ghsa_id"
 expect_result "With maintain access" 1 \
   "error: creating a private fork for a security advisory of $repo needs admin access, and you have MAINTAIN access. Ask a maintainer with admin access to run this script."
 expect_calls "With maintain access" "$read_repo"$'\n'"$read_permission"
+expect_remotes "With maintain access" ""
 
 new_case
 failing_call=$read_repo
@@ -283,6 +329,7 @@ run_create_private_fork "$ghsa_id"
 expect_result "When gh can't create the fork" 1 \
   "error: can't create a private fork for the security advisory $ghsa_id, because gh failed: HTTP 404: Not Found"
 expect_waiting "When gh can't create the fork" 0 0 ""
+expect_remotes "When gh can't create the fork" ""
 
 new_case
 run_create_private_fork
