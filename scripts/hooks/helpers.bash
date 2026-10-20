@@ -150,7 +150,8 @@ expand_home() {
 # Claude Code's Write and Edit resolve each .. in a path as text before they write, so a .. after a symlink leads to
 # the folder that holds the link. Another tool may pass the path to the system unchanged, and the system leads to the
 # parent of the link's target instead. So each path with a .. is on the list twice: as written, and as an absolute
-# path with each . and .. resolved as text. A relative path starts from the folder the agent works in.
+# path with each . and .. resolved as text, and with a leading ~/ filled in as Claude Code fills it in. A relative path
+# starts from the folder the agent works in.
 read_tool_paths() {
   local line path
   tool_paths=()
@@ -170,7 +171,10 @@ read_tool_paths() {
     if [[ /$path/ != */../* ]]; then
       continue
     fi
-    if [[ $path != /* ]]; then
+    # shellcheck disable=SC2088 # The ~ is a word of the path as written, which no shell has expanded.
+    if [[ $path == "~/"* ]]; then
+      path=${HOME%/}/${path#"~/"}
+    elif [[ $path != /* ]]; then
       path=${cwd:-$PWD}/$path
     fi
     tool_paths+=("$(textual_path "$path")")
