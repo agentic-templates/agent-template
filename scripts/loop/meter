@@ -101,8 +101,9 @@ of its time that the orchestrator worked so far under "orchestrator_share", whic
 orchestrator's own. Each time it reads the accounts, it first adds a line with no account and the machine's numbers
 under "machine", as scripts/loop/machine.py describes them. A number that the machine doesn't give is null. The meter
 exits with code 1 when an account gives no reading. It reads the orchestrator's context size and the times when it
-worked from the transcript of the session that the session: line of .loop/state.md names. It reads the transcripts that Claude Code
-keeps for the main checkout, for the account that the meter runs on and for each Claude account in the file.
+worked from the transcript of the session that the session: line of .loop/state.md names. It reads the transcripts
+that Claude Code keeps for the main checkout, for the account that the meter runs on and for each Claude account in
+the file.
 """
 
 import argparse
