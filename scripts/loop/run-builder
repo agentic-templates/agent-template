@@ -18,8 +18,8 @@ scripts/clear-worktrees <issue> commits the changes that the builder left on the
 the script pushes the branch. If the branch has a pull request, the script turns off its auto-merge and makes it a
 draft before the push. If scripts/clear-worktrees or a check refuses the changes, the script keeps them in the
 worktree or on the local branch, and the run fails and says where they are. If a worktree other than the main checkout
-has the issue's branch checked out, such as one of a builder in the orchestrator's session, the script first runs
-scripts/clear-worktrees <issue>, which saves that worktree's changes on the branch and removes it. The script doesn't
+has the issue's branch checked out, the script first runs scripts/clear-worktrees <issue>, which saves that worktree's
+changes on the branch and removes it, even while an agent still works in it. The script doesn't
 start when its own worktree exists already, or when the issue has needs-triage.
 
 The builder's prompt holds the issue's text. With --message, the text of the file FILE follows it there, as a message
