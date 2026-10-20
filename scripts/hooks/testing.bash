@@ -134,6 +134,21 @@ expect_allow() {
   expect_result "In ${tools%% *}, the hook for $1 \"$2\"" 0 ""
 }
 
+# Each wrapper that drop_command_prefixes in command-prefixes.bash drops before a command, with options where it
+# takes them
+wrappers=("timeout -k 5 --signal=TERM 10m" "time -p" "nice -n 5" nohup "stdbuf -oL -e 0" "command -p" builtin noglob xargs)
+
+# The message that blocks a cd after time, command or noglob, as follow_cd in helpers.bash describes it
+cd_after_wrapper="Blocked: the hooks can't tell which folder this cd leaves the shell in, because after time, command or noglob the shell may run the program cd, which changes no folder, instead of its own. Run cd without the word before it."
+
+# Checks that the hook blocks a command behind each wrapper in wrappers: expect_block_behind_wrappers <command> <message>
+expect_block_behind_wrappers() {
+  local wrapper
+  for wrapper in "${wrappers[@]}"; do
+    expect_block Bash "$wrapper $1" "$2"
+  done
+}
+
 # Runs the hook on an action of a session, or of a subagent of it, in the first tool that sends the action, and checks
 # its result: expect_action_from <session> <agent id or ""> <tool name> <command, patch or path> <exit code> <message>
 # A subagent's input has the id of its session, and its own in agent_id.
@@ -154,12 +169,25 @@ expect_from() {
 
 # Checks each form of the repository flag before a subcommand against a fixed result:
 # expect_repository_flags <exit code> <message> <group> <subcommand> <remaining command words>
-# Each check moves the flag to just after the subcommand before it reads the command, with move_gh_repository_flags in
-# helpers.bash, so these cases also cover the flag in that place.
+# Each check moves the flag to just after the subcommand before it reads the command, with
+# move_flags_after_gh_subcommand in helpers.bash, so these cases also cover the flag in that place.
 expect_repository_flags() {
   local status=$1 message=$2 group=$3 subcommand=$4 rest=$5 repository command
   for repository in '-R jtmpl/other' -Rjtmpl/other -R=jtmpl/other '--repo jtmpl/other' --repo=jtmpl/other; do
     command="gh $group $repository $subcommand $rest"
+    run_hook "$(sample_input claude-code Bash "$command")"
+    expect_result "The hook for $command" "$status" "$message"
+  done
+}
+
+# Checks a gh command with words of its subcommand before the group, between the group and the subcommand, and just
+# after the subcommand, against a fixed result:
+# expect_before_and_after_subcommand <exit code> <message> <group> <words> <subcommand> <remaining words>
+# The group can be a nested group, such as repo deploy-key.
+expect_before_and_after_subcommand() {
+  local status=$1 message=$2 group=$3 words=$4 subcommand=$5 rest=$6 command
+  for command in "gh $words $group $subcommand $rest" "gh $group $words $subcommand $rest" \
+    "gh $group $subcommand $words $rest"; do
     run_hook "$(sample_input claude-code Bash "$command")"
     expect_result "The hook for $command" "$status" "$message"
   done

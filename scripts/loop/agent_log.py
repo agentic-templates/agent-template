@@ -14,6 +14,10 @@ Each line is a JSON object. A start line holds:
   label           the issue's type label, such as feature, or null
   kind            the kind after the number, as scripts/take-next-issue prints it, or null
   test            true for a test build of a retrospective
+  account         the name in .loop/accounts.json of the account that the agent ran on: the account that
+                  scripts/loop/run-builder ran it on, or for an agent of a session, the session's own account, as
+                  accounts.own_account finds it. It's null when no account matches or the accounts file can't be read,
+                  and a start line written before start lines held the account has none.
   pid             the id of the process that writes the agent's end line: the Claude Code process whose session
                   started the agent, or the process of scripts/loop/run-builder. It's null when Claude Code gives no
                   id, and a start line written before start lines held the id has none.
@@ -203,6 +207,7 @@ def start_line(
     kind: str | None,
     is_test: bool,
     pid: int | None,
+    account: str | None,
 ) -> dict[str, Any]:
     return {
         "at": now(),
@@ -217,6 +222,7 @@ def start_line(
         "kind": kind,
         "test": is_test,
         "pid": pid,
+        "account": account,
     }
 
 

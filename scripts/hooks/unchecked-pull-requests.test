@@ -116,6 +116,7 @@ mkdir "$repository/docs"
 work_in "$repository/docs"
 forget_pass
 expect_block Bash 'gh pr create --title "Add notes" --body "Closes #1"' "$not_checked"
+expect_block_behind_wrappers 'gh pr create --title "Add notes" --body "Closes #1"' "$not_checked"
 record_pass
 expect_allow Bash 'gh pr create --title "Add notes" --body "Closes #1"'
 
@@ -132,6 +133,12 @@ record_pass
 (cd "$worktree" && forget_pass)
 expect_block Bash "cd $worktree && gh pr create --title 'Add notes' --body 'Closes #1'" "$not_checked"
 expect_allow Bash "(cd $worktree) && gh pr create --title 'Add notes' --body 'Closes #1'"
+# The hook blocks a cd that the shell may run as a program, after time, command or noglob, because it couldn't tell
+# which folder's pass counts.
+for wrapper in time "'time'" command noglob; do
+  expect_block Bash "cd $worktree && $wrapper cd $repository && gh pr create --title 'Add notes' --body 'Closes #1'" \
+    "$cd_after_wrapper"
+done
 
 # The branch that --head names, alone or after a person's name and a colon. The branch first has only the first commit.
 work_in "$repository"

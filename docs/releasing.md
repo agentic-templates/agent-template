@@ -68,6 +68,8 @@ When a maintainer asks you to check the security advisories, check them against 
 
 ## Record a vulnerability privately
 
+A vulnerability is a way for text or code from outside the project to read a secret, change main or a release, or get past the sandbox. For example, a pull request from a fork that reads a secret is a vulnerability. Some ways around a hook work only for a command that an agent wrote on purpose to get past the hook. Such a way isn't a vulnerability, because the hooks guard against agents' mistakes, not against an agent that sets out to get past them. Open a public issue for such a way around a hook.
+
 As soon as you find a vulnerability that isn't public yet, read the advisories that aren't published, closed or withdrawn:
 
 ```sh

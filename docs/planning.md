@@ -16,7 +16,12 @@ Triage is for ideas: anything a maintainer wants judged before deciding whether 
    - Can the project build it, and is it worth what it costs? Count what it adds for agents to read and run in later sessions, such as rules, checks and options.
    - Do its claims about the project, such as how the code works, match the code and AGENTS.md? If they don't, judge the idea with the claims corrected.
 3. Give each idea one verdict:
-   - **Accept:** the idea becomes an issue in the backlog, with `needs-breakdown` if it's too big for one pull request. If an open issue covers it, add the idea's new details to that issue instead. If a closed issue covered it, mention that issue in the new one.
+   - **Accept:** the idea becomes an issue in the backlog, with `needs-breakdown` if it's too big for one pull request. If a closed issue covered the idea, mention that issue in the new one.
+     If an open issue meets either of these, add the idea to it instead of creating a new issue, and rewrite its body to hold both, as "Write issues, pull requests and commit messages" in `docs/writing.md` describes:
+     - The open issue covers the idea.
+     - The open issue has no assignee and no pull request, and it would change the same code or the same rule as the idea.
+
+     If that issue has `ready`, check that the combined issue still meets "Definition of ready" and belongs to the current goal. If it doesn't, remove `ready` and plan the issue again, as "Plan the next work" describes.
    - **Research first:** the idea can't be judged until a question is answered. It becomes an issue with `needs-decision`, blocked by a new research issue for the question.
    - **Drop:** it doesn't fit the project's direction, can't be built, isn't worth its cost, or was closed as not planned before. Nothing is created.
    - **Ask:** only the maintainer can settle it, such as an idea too vague to judge, or one that needs a decision that "Decide or ask" in AGENTS.md leaves to the maintainer.

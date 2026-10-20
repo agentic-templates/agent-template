@@ -64,6 +64,10 @@ list_names="bash -c 'compgen -e'"
 env_option() {
   echo "Blocked: the hooks can't tell which command env runs after its option $1, so they can't check that command. Run the command without that option. The hooks read only env's options -i, -0, -u, -C, -P and -v, and their long forms."
 }
+# wrapper_option <wrapper> <option> [<the options that the hooks read>]
+wrapper_option() {
+  echo "Blocked: the hooks can't tell which command $1 runs after its option $2, so they can't check that command. Run the command without that option${3:+, or with one that the hooks read: $3}."
+}
 environment="Blocked: this command prints the whole environment, which holds tokens. Print only the variables you need, by name, as in printenv PATH. To list the variables' names without their values, run $list_names."
 no_verify="Blocked: --no-verify skips the pre-push hook, which scans the push for leaks. Push without it. If the scan finds a leak, take it out of the commits."
 # The messages that block a push whose git hooks aren't the repository's: other_hooks <folder that git names>,
@@ -217,6 +221,17 @@ expect_allow Bash 'folder=$(cd /usr && pwd); rm -rf build'
 # shellcheck disable=SC2016
 expect_allow Bash 'echo "`cd /usr && pwd`" && rm -rf build'
 expect_allow Bash '(cd /usr) && rm -rf build'
+# A cd that the shell runs itself, as after builtin, changes its folder, and one that another program runs, as after
+# timeout, doesn't. The hooks block a cd after time, command or noglob, because the shell may run either. It runs the
+# program time for a quoted 'time', as for \time, and the hooks see the word without its quotes. Without the block, the
+# checks wouldn't know the folder after the cd, and would allow more than in either folder.
+expect_block Bash 'builtin cd /usr && rm -rf share' "$(deleting rm share)"
+for wrapper in time "'time'" "time -p" command noglob; do
+  expect_block Bash "$wrapper cd /tmp && rm -rf share" "$cd_after_wrapper"
+  expect_block Bash "cd /usr && $wrapper cd /tmp && rm -rf share" "$cd_after_wrapper"
+done
+expect_allow Bash 'timeout 10 cd /usr && rm -rf build'
+expect_allow Bash 'env cd /usr && rm -rf build'
 # env -C runs only the command after it in another folder.
 expect_block Bash 'env -C /usr rm -rf share' "$(deleting rm share)"
 expect_block Bash 'env -C / rm -rf usr/share' "$(deleting rm usr/share)"
@@ -262,6 +277,34 @@ expect_block Bash 'env -u CLAUDECODE git push --no-verify' "$no_verify"
 expect_block Bash '/usr/bin/env -C build git push --no-verify' "$no_verify"
 # env reads each word with = before the command as a variable to set.
 expect_block Bash 'env x.y=1 git push --no-verify' "$no_verify"
+# The wrappers that run the command after them, with each way to write their options and timeout's duration
+expect_block_behind_wrappers 'git push --no-verify' "$no_verify"
+for wrapper in "timeout 10" "/usr/bin/timeout -k5 10" "timeout -fk 5 10" "timeout --kill-after 5 --preserve-status 1h" \
+  "timeout -s KILL -v 10" "timeout -pvsKILL 10" "timeout --foreground --verbose -- 10" time "/usr/bin/time -l" \
+  "/usr/bin/time -ao times.txt" "time --format=%e --output times.txt --append --portability --quiet --verbose" \
+  "time -hqv -f %e" nice "nice -10" "nice --10" "nice -+10" "nice -n5" "nice -n -5" "nice --adjustment=5" \
+  "nice --adjustment 5" "nohup --" "stdbuf -o L" "stdbuf -i0 -e0" "stdbuf --input=0 --output L --error=0" command \
+  "command -p --" "builtin --" "nohup nice -n 5 timeout 10" "env FOO=1 timeout 10" "timeout 10 env -u CLAUDECODE" \
+  "time nohup"; do
+  expect_block Bash "$wrapper git push --no-verify" "$no_verify"
+done
+# The hooks can't tell which word is the command after an option that they don't read. GNU's timeout reads --sig as
+# --signal.
+timeout_options="-f -p -v -k -s --foreground --preserve-status --verbose --kill-after --signal"
+expect_block Bash 'timeout --sig KILL 10 git push --no-verify' "$(wrapper_option timeout --sig "$timeout_options")"
+expect_block Bash 'timeout -x 10 git status' "$(wrapper_option timeout -x "$timeout_options")"
+expect_block Bash 'timeout --foreground=yes 10 git status' "$(wrapper_option timeout --foreground=yes "$timeout_options")"
+expect_block Bash 'nice -x git status' "$(wrapper_option nice -x "-n --adjustment")"
+expect_block Bash 'stdbuf -oL -x git status' "$(wrapper_option stdbuf -x "-i -o -e --input --output --error")"
+expect_block Bash 'command -px git status' "$(wrapper_option command -px "-p -v -V")"
+expect_block Bash 'nohup -x git status' "$(wrapper_option nohup -x)"
+expect_block Bash 'builtin --help' "$(wrapper_option builtin --help)"
+expect_allow Bash 'timeout 10 git push origin HEAD'
+# command -v and command -V look a command up instead of running it, and Claude Code doesn't drop xargs with an option.
+expect_allow Bash 'command -v uv'
+expect_allow Bash 'command -V uv'
+expect_allow Bash 'command -pv git'
+expect_allow Bash 'xargs -n1 echo'
 # git takes the start of a long option as the option, unless another option starts the same way, as with --no-ver,
 # which could be --no-verbose too.
 expect_block Bash 'git push --no-veri origin main' "$no_verify"
@@ -309,6 +352,8 @@ expect_block Bash "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG
   "$(other_hooks "$hooks_elsewhere")"
 expect_block Bash "env GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='$hooks_elsewhere'\" git push" "$(other_hooks "$hooks_elsewhere")"
 expect_block Bash "GIT_DIR=$project/.git git -C $elsewhere push" "$(other_hooks "$elsewhere/scripts/git-hooks")"
+# The value of a wrapper's option sets no variable, as with time -o, which names the file that time writes to.
+expect_allow Bash "time -o GIT_DIR=$elsewhere/.git git push"
 expect_allow Bash 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=color.ui GIT_CONFIG_VALUE_0=never git push'
 printf '[core]\n\thooksPath = %s\n' "$hooks_elsewhere" >"$base/hooks.gitconfig"
 expect_block Bash "git -c include.path=$base/hooks.gitconfig push" "$(other_hooks "$hooks_elsewhere")"
@@ -408,11 +453,17 @@ done
 for value in 0 f F false FALSE False; do
   expect_allow Bash "gh pr merge 5 --squash --admin=$value"
 done
+# gh knows that --help takes no value, so it finds the subcommand right after it, and keeps the last value of --help,
+# so that it merges.
+expect_before_and_after_subcommand 2 "$admin_merge" pr '--help' merge '--help=false --admin 5'
 expect_allow Bash 'gh api repos/jtmpl/project/branches/main/protection'
 expect_allow Bash 'gh api "repos/{owner}/{repo}/rulesets?includes_parents=false"'
 expect_allow Bash 'gh api -X get "repos/{owner}/{repo}/rulesets"'
 expect_block Bash 'gh repo deploy-key add key.pub --title CI' "$security"
 expect_block Bash 'gh repo deploy-key delete 12345' "$security"
+# gh finds the subcommand of a nested group after flags, as it finds the subcommand of a group.
+expect_before_and_after_subcommand 2 "$security" 'repo deploy-key' '--title CI' add 'key.pub'
+expect_before_and_after_subcommand 2 "$security" 'repo deploy-key' '-R jtmpl/other' delete '12345'
 expect_allow Bash 'gh repo edit --enable-secret-scanning-push-protection'
 expect_allow Bash 'gh repo deploy-key list'
 
@@ -479,14 +530,81 @@ expect_block Bash 'gh pr comment 5 -R someone/else --body Hello' "$(other_reposi
 expect_block Bash 'gh issue comment -Rsomeone/else 5 --body Hello' "$(other_repository someone/else)"
 # gh drops the = after a short flag when more follows it, as split_flag_word in helpers.bash describes.
 expect_block Bash 'gh issue comment -R=someone/else 5 --body Hello' "$(other_repository someone/else)"
+# Once the list names someone/else, the hook allows the same command.
+cp "$project/.loop/allowed-repositories" "$base/allowed-repositories"
+echo someone/else >>"$project/.loop/allowed-repositories"
+expect_allow Bash 'gh issue comment -R=someone/else 5 --body Hello'
+mv "$base/allowed-repositories" "$project/.loop/allowed-repositories"
+# A word can hold several short flags, as split_flag_word in helpers.bash reads it, and -R can be the last of them.
+# The -a of gh pr review takes no value. The hooks list no flags of gh run rerun, so the hook reads its -d, which takes
+# no value, as a flag without a value too. The -c of gh issue close takes a comment, so -cRsomeone/else there is the
+# comment Rsomeone/else, and the -b of gh pr comment takes the next word as the body, even when it starts with -R.
+for command in 'gh pr review 5 -a -R someone/else' 'gh pr review 5 -aRsomeone/else' 'gh pr review -aR someone/else 5' \
+  'gh run rerun 12 -dRsomeone/else'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+expect_allow Bash 'gh issue close 5 -cRsomeone/else'
+expect_allow Bash 'gh pr comment 5 -b -Rsomeone/else'
+# For a command whose flags the hooks don't list, -R can be part of the value of a flag before it, such as the -j of
+# gh run rerun, which takes a job. The hook then checks the repository that gh posts to without -R as well.
+for command in 'GH_REPO=someone/else gh run rerun 12 -jRjtmpl/project' \
+  'GH_REPO=someone/else gh run rerun 12 -j -Rjtmpl/project'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+# gh takes the last -R that is a flag, so a later -R that can be the value of a flag before it can hide an earlier one.
+for command in 'gh run rerun 12 -R someone/else -j -Rjtmpl/project' \
+  'gh run rerun 12 -Rsomeone/else -jRjtmpl/project' 'gh run rerun 12 --repo=someone/else --job -R=jtmpl/project'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+# A word with an expansion can become nothing, so that a later -R becomes the value of the flag before it, for a
+# command whose flags the hooks list too.
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so the expansions stay as written.
+for command in 'gh pr comment 5 -R someone/else -b $EMPTY -Rjtmpl/project' \
+  'gh issue close 5 -R someone/else -c $EMPTY -Rjtmpl/project' \
+  'gh pr review 5 -R someone/else -a -b ${EMPTY} --repo=jtmpl/project'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+# A flag word with an expansion can end in another flag once the shell expands it, such as the -a of gh pr review, so
+# the -R after it can be a flag rather than the value of -b or -c.
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so the expansions stay as written.
+for command in 'gh pr review 5 -$b -Rsomeone/else' 'gh pr review 5 -${M}b -R someone/else' \
+  'gh issue close 5 -${X}c --repo=someone/else'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+# An earlier word with an expansion can also become nothing, become a flag that takes a value, or leave the flag in its
+# own word without a value, as -b$X does when X is empty. Then the flag before a -R takes another word as its value.
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so the expansions stay as written.
+for command in 'gh pr comment 5 -b $EMPTY -b -Rsomeone/else' 'gh issue close 5 -c $EMPTY -c -Rsomeone/else' \
+  'gh pr review 5 -b $EMPTY -b --repo=someone/else' 'gh pr review 5 -b $EMPTY -b -R someone/else' \
+  'gh pr comment 5 $X -b -Rsomeone/else' 'gh pr comment 5 "$X" -b -Rsomeone/else' \
+  'gh pr comment 5 -b$X -b -Rsomeone/else' 'gh pr comment 5 -$X -b -Rsomeone/else'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+# ANSI-C quoting, locale quoting, brace expansion and a pattern can become a flag that takes a value too, as each of
+# these becomes -b.
+for command in "gh pr comment 5 \$'-b' -b -Rsomeone/else" 'gh pr comment 5 $"-b" -b -Rsomeone/else' \
+  'gh pr comment 5 {-b,} -b -Rsomeone/else' 'gh pr comment 5 -[b] -b -Rsomeone/else'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+expect_allow Bash 'gh run rerun 12 -dRjtmpl/listed'
+# gh repo edit, delete, archive and unarchive take no -R, so a -R there is part of the value of a flag before it, such
+# as the -d of gh repo edit, which takes a description.
+for command in 'gh repo edit someone/else -dRjtmpl/project' 'gh repo edit someone/else -d -Rjtmpl/project'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
 expect_block Bash 'gh issue -R someone/else comment 5 --body Hello' "$(other_repository someone/else)"
 expect_block Bash 'gh release -R someone/else upload v1 app.tar' "$(other_repository someone/else)"
 expect_block Bash 'gh workflow run ci.yml --repo=github.com/someone/else' "$(other_repository someone/else)"
+# gh finds the subcommand of every group after the repository flag, as it does after the subcommand's other flags.
+expect_before_and_after_subcommand 2 "$(other_repository someone/else)" secret '-R someone/else' set 'TOKEN'
+expect_before_and_after_subcommand 2 "$(other_repository someone/else)" workflow '-R someone/else' run 'ci.yml'
 expect_block Bash 'gh issue comment https://github.com/someone/else/issues/5 --body Hello' \
   "$(other_repository someone/else)"
 expect_block Bash 'gh api -X POST repos/someone/else/issues -f title=Bug -f body=Description' \
   "$(other_repository someone/else)"
 expect_block Bash 'gh api -if body=Thanks repos/someone/else/issues/5/comments' "$(other_repository someone/else)"
+# gh finds api after the flags of gh api too.
+expect_block Bash 'gh -X POST api repos/someone/else/issues -f title=Bug' "$(other_repository someone/else)"
 expect_block Bash 'gh repo edit someone/else --description "A project"' "$(other_repository someone/else)"
 expect_block Bash 'gh repo archive someone/else --yes' "$(other_repository someone/else)"
 expect_block Bash 'gh pr comment --body Thanks https://github.com/someone/else/pull/5' "$(other_repository someone/else)"
@@ -506,6 +624,8 @@ expect_allow Bash 'gh issue comment 5 --body "The same bug: https://github.com/s
 expect_allow Bash 'gh issue comment 5 --body https://github.com/someone/else/issues/9'
 expect_allow Bash 'GH_REPO=jtmpl/project gh pr comment 5 --body Hello'
 expect_allow Bash 'GH_REPO=someone/else gh pr comment 5 -R jtmpl/project --body Hello'
+# time -o names the file that time writes to, so GH_REPO=someone/else sets no variable there.
+expect_allow Bash 'time -o GH_REPO=someone/else gh pr comment 5 --body Hello'
 expect_allow Bash 'gh api -X POST "repos/{owner}/{repo}/issues/5/comments" -f body=Thanks'
 expect_allow Bash 'gh pr list --repo someone/else'
 expect_allow Bash 'gh pr view 42 -R someone/else'
@@ -520,12 +640,22 @@ expect_block Bash 'gh repo edit someone/else --description --help' "$(other_repo
 expect_block Bash 'gh release upload v1 -R someone/else -- --help' "$(other_repository someone/else)"
 expect_block Bash 'gh repo edit someone/else -h https://example.com' "$(other_repository someone/else)"
 expect_allow Bash "gh issue comment 5 -R someone/else --body '' --help"
-# A word with an expansion can become nothing, so that --help is the value of the flag before it, or it can become --.
+# gh keeps the last value that the command gives --help, and reads it as is_true_flag_value in helpers.bash does. The
+# hook doesn't know that --enable-issues takes no value, so it reads the --help=false after it as a flag. -- can be the
+# value of the flag before it, so that gh reads the words after it as flags.
+expect_block Bash 'gh repo edit -R someone/else --help --help=false' "$(other_repository someone/else)"
+expect_allow Bash 'gh repo edit -R someone/else --help=false --help'
+expect_allow Bash 'gh repo edit -R someone/else --help=0 --help=true'
+expect_block Bash 'gh repo edit -R someone/else --help --enable-issues --help=false' "$(other_repository someone/else)"
+expect_block Bash 'gh repo edit someone/else --help --description -- --help=false' "$(other_repository someone/else)"
+# A word with an expansion can become nothing, so that --help is the value of the flag before it, or it can become --
+# or --help=false.
 # shellcheck disable=SC2016 # The commands are the text that the agent sends, so the expansions stay as written.
 for command in 'gh issue comment 5 -R someone/else --body $EMPTY --help' \
   'gh issue comment 5 -R someone/else --body ${EMPTY} --help' \
   'gh issue comment 5 -R someone/else --body $(true) --help' \
-  'gh release upload v1 -R someone/else $separator notes.md --help'; do
+  'gh release upload v1 -R someone/else $separator notes.md --help' \
+  'gh issue comment 5 -R someone/else --body Hello --help $flag'; do
   expect_block Bash "$command" "$(other_repository someone/else)"
 done
 # shellcheck disable=SC2016 # The command is the text that the agent sends, so $repo stays as written.
@@ -548,6 +678,14 @@ local_clone=$base/local-clone
 git init --quiet "$local_clone"
 git -C "$local_clone" remote add origin "$base/origin.git"
 expect_allow Bash "cd '$local_clone' && gh issue comment 5 --body Hello"
+# A cd after time, command or noglob, as in the cases of deleting above, also when it follows a cd to a folder outside
+# the repository and comes before a post with gh or a write to a settings file
+for wrapper in time "'time'" command noglob; do
+  expect_block Bash "cd '$other_clone' && $wrapper cd '$base' && gh issue comment 5 --body Hello" "$cd_after_wrapper"
+  test_home=$base
+  expect_block Bash "cd ~ && $wrapper cd /tmp && echo 'export DEBUG=1' >>.zshrc" "$cd_after_wrapper"
+  test_home=/home-for-tests/someone
+done
 
 # A worktree reads the list in the main checkout.
 worktree=$base/worktree

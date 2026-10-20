@@ -23,6 +23,8 @@ source "${BASH_SOURCE[0]%/*}/../loop-folder"
 source "${BASH_SOURCE[0]%/*}/words-without-secrets.bash"
 # shellcheck source=scripts/hooks/simple-commands.bash
 source "${BASH_SOURCE[0]%/*}/simple-commands.bash"
+# shellcheck source=scripts/hooks/command-prefixes.bash
+source "${BASH_SOURCE[0]%/*}/command-prefixes.bash"
 
 # This file's folder, as an absolute path, because some checks change to the folder that the agent works in.
 hooks_folder=${BASH_SOURCE[0]%/*}
@@ -193,10 +195,15 @@ read_tool_paths() {
 # Changes command_folder as a cd command in command_words would, or empties it when the hook can't tell the folder.
 # command_folder is the folder that the next simple command runs in, and visit_simple_commands keeps a cd in a subshell
 # inside it. A check sets it to ${cwd:-$PWD} before the first simple command, because Cursor doesn't send the folder
-# the agent works in, and then the hook's own folder counts.
+# the agent works in, and then the hook's own folder counts. A cd that another program runs, as after env or timeout,
+# changes only that program's folder. Blocks a cd that the shell may run itself or as a program, as after time, because
+# the checks would allow more in a folder they can't tell than in either of the two. Run drop_command_prefixes first.
 follow_cd() {
-  if [[ ${command_words[0]} != cd ]]; then
+  if [[ ${command_words[0]} != cd || $shell_runs_command == no ]]; then
     return 0
+  fi
+  if [[ $shell_runs_command == maybe ]]; then
+    block "Blocked: the hooks can't tell which folder this cd leaves the shell in, because after time, command or noglob the shell may run the program cd, which changes no folder, instead of its own. Run cd without the word before it."
   fi
   if ((${#command_words[@]} != 2)) || [[ ${command_words[1]} == -* ]]; then
     command_folder=""
@@ -218,75 +225,6 @@ change_command_folder() {
     command_folder=$(CDPATH='' cd -- "$command_folder" 2>/dev/null && CDPATH='' cd -- "$expanded_path" 2>/dev/null && pwd) ||
       command_folder=""
   fi
-}
-
-# Reads one of env's options, and sets env_option_words to the number of words that it takes: 2 when its value is the
-# next word, otherwise 1. -C changes command_folder for the command that env runs, and visit_simple_commands changes it
-# back after that command. Blocks each option that the hooks don't read, because they can't tell then which word is the
-# command, as with -S, whose value holds the command, or --uns, which GNU's env reads as --unset:
-# read_env_option <option> <next word, or empty>
-read_env_option() {
-  local option=$1 name value
-  env_option_words=1
-  case $option in
-    --ignore-environment | --null | --debug) return 0 ;;
-    --unset | --chdir) name=$option value=$2 env_option_words=2 ;;
-    --unset=* | --chdir=*) name=${option%%=*} value=${option#*=} ;;
-    *)
-      # A group of the options that take no value, as in -i0, can end in one that takes a value. Its value is the rest
-      # of the word, as in -iuNAME, or the next word.
-      if [[ $option =~ ^-[0iv]*$ ]]; then
-        return 0
-      fi
-      if [[ ! $option =~ ^-[0iv]*([uCP])(.*)$ ]]; then
-        block "Blocked: the hooks can't tell which command env runs after its option $option, so they can't check that command. Run the command without that option. The hooks read only env's options -i, -0, -u, -C, -P and -v, and their long forms."
-      fi
-      name=-${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
-      if [[ -z $value ]]; then
-        value=$2 env_option_words=2
-      fi
-      ;;
-  esac
-  if [[ $name == -C || $name == --chdir ]]; then
-    if [[ -z ${folder_after_command+set} ]]; then
-      folder_after_command=${command_folder-}
-    fi
-    change_command_folder "$value"
-  fi
-}
-
-# Sets the array command_words to a simple command's words from the command's name on, without the words before it:
-# sudo, env, env's options and their values, and the words that set variables. Sets runs_through_env to true if env is
-# among them: drop_command_prefixes <word>...
-# The shell reads a word as setting a variable when it starts with a name and =, as in NAME=value, but env reads each
-# word with = that way.
-drop_command_prefixes() {
-  local -a prefixed=("$@")
-  local i=0 word is_after_env=false reads_env_options=false
-  runs_through_env=false
-  while ((i < ${#prefixed[@]})); do
-    word=${prefixed[i]}
-    if [[ $reads_env_options == true && $word == -- ]]; then
-      reads_env_options=false
-    elif [[ $reads_env_options == true && $word == -* ]]; then
-      read_env_option "$word" "${prefixed[i + 1]-}"
-      i=$((i + env_option_words - 1))
-    elif [[ $word =~ ^[A-Za-z_][A-Za-z0-9_]*= || ($is_after_env == true && $word == *=*) ]]; then
-      reads_env_options=false
-    elif [[ $word == sudo ]]; then
-      is_after_env=false
-      reads_env_options=false
-    elif [[ ${word##*/} == env ]]; then
-      is_after_env=true
-      reads_env_options=true
-      runs_through_env=true
-    else
-      break
-    fi
-    i=$((i + 1))
-  done
-  command_words=(${prefixed[@]+"${prefixed[@]:i}"})
-  command_word_may_expand=(${words_may_expand[@]+"${words_may_expand[@]:i}"})
 }
 
 # The options of git before its subcommand that take the next word as their value, as handle_options in git's git.c
@@ -353,42 +291,81 @@ read_push_arguments() {
   fi
 }
 
-# Moves repository flags between a gh command group and its subcommand just after the subcommand,
-# so that the checks read the same words and flags in either position. Other flags and groups stay as written.
-# A repository flag gives the repository in the next word, as in -R jtmpl/other, or in the same word, as in
-# -Rjtmpl/other, -R=jtmpl/other or --repo=jtmpl/other.
-move_gh_repository_flags() {
-  local index=2
-  if ((${#command_words[@]} < 3)) || [[ ${command_words[0]##*/} != gh ]]; then
+# Puts the group of a gh command, its subcommand and the subcommand of a nested group, such as add of
+# gh repo deploy-key, right after gh, in that order, and the other words after them, in their order. The checks then
+# read the group as the second word, the subcommand as the third and a nested group's subcommand as the fourth,
+# wherever the command writes the flags. gh api has no subcommand, so the words after api stay as written.
+move_flags_after_gh_subcommand() {
+  if ((${#command_words[@]} < 2)) || [[ ${command_words[0]##*/} != gh ]]; then
     return 0
   fi
-  case ${command_words[1]} in
-    pr | issue | label | release) ;;
-    *) return 0 ;;
+  # Of the flags that take no value, gh's root command knows --help and --version, and each group knows only --help,
+  # as gh --help and gh <group> --help list them.
+  if ! move_gh_command_word 1 " --help --version " || [[ ${command_words[1]} == api ]]; then
+    return 0
+  fi
+  if ! move_gh_command_word 2 " --help " || ! is_nested_gh_group; then
+    return 0
+  fi
+  move_gh_command_word 3 " --help " || return 0
+}
+
+# Succeeds if the subcommand of the gh command's group is a nested group, with subcommands of its own, as in gh 2.102.
+is_nested_gh_group() {
+  case "${command_words[1]} ${command_words[2]}" in
+    "codespace ports" | "repo autolink" | "repo deploy-key" | "repo gitignore" | "repo license") return 0 ;;
   esac
+  return 1
+}
+
+# Finds the next command word of a gh command, such as the group or a subcommand, from an index of command_words on,
+# and moves it to that index, with the words that it skipped after it. Fails when gh finds none:
+# move_gh_command_word <index> <the flags that the command before it knows to take no value>
+# gh finds each command word as its command library, cobra, does. It skips each word that starts with a dash. When that
+# word is a single short flag or a long flag without =, other than a flag that the command before it knows to take no
+# value, it also skips the next word, as in -R jtmpl/other or --title Title, because it doesn't know yet whether the
+# flag takes a value. It skips an empty word too, and finds no command word after --. gh looks for each command word
+# in all the words after the command words that it found, so it reads the words that it skipped again, with the flags
+# of the command that it found last.
+move_gh_command_word() {
+  local first=$1 flags_without_value=$2 index=$1 word
   while ((index < ${#command_words[@]})); do
-    case ${command_words[index]} in
-      -R | --repo) index=$((index + 2)) ;;
-      -R?* | --repo=*) index=$((index + 1)) ;;
+    word=${command_words[index]}
+    case $word in
+      --) return 1 ;;
+      -*=*) index=$((index + 1)) ;;
+      -? | --*)
+        index=$((index + 1))
+        if [[ $flags_without_value != *" $word "* ]]; then
+          index=$((index + 1))
+        fi
+        ;;
+      "" | -*) index=$((index + 1)) ;;
       *) break ;;
     esac
   done
-  # An incomplete flag or a command without a subcommand starts no subcommand check.
-  if ((index == 2 || index >= ${#command_words[@]})); then
-    return 0
+  if ((index >= ${#command_words[@]})); then
+    return 1
   fi
-  command_words=("${command_words[@]:0:2}" "${command_words[index]}"
-    "${command_words[@]:2:index-2}" "${command_words[@]:index+1}")
-  command_word_may_expand=("${command_word_may_expand[@]:0:2}" "${command_word_may_expand[index]}"
-    "${command_word_may_expand[@]:2:index-2}" "${command_word_may_expand[@]:index+1}")
+  command_words=("${command_words[@]:0:first}" "${command_words[index]}"
+    "${command_words[@]:first:index-first}" "${command_words[@]:index+1}")
+  command_word_may_expand=("${command_word_may_expand[@]:0:first}" "${command_word_may_expand[index]}"
+    "${command_word_may_expand[@]:first:index-first}" "${command_word_may_expand[@]:index+1}")
 }
 
 # The flags of gh api that take a value, as gh api --help lists them.
 api_flags_with_value=" --cache -F --field -H --header --hostname --input -q --jq -X --method -p --preview -f --raw-field -t --template "
 
-# The flags that take a value, as gh issue create --help, gh issue edit --help and gh pr close --help list them.
+# The flags that take a value, as the --help of these commands lists them. gh issue comment and gh pr comment take the
+# same flags, and so do gh issue reopen and gh pr reopen.
 issue_create_flags_with_value=" -a --assignee --attach --blocked-by --blocking -b --body -F --body-file -l --label -m --milestone --parent -p --project --recover -T --template -t --title --type -R --repo "
 issue_edit_flags_with_value=" --add-assignee --add-blocked-by --add-blocking --add-label --add-project --add-sub-issue --attach -b --body -F --body-file -m --milestone --parent --remove-assignee --remove-blocked-by --remove-blocking --remove-label --remove-project --remove-sub-issue -t --title --type -R --repo "
+issue_close_flags_with_value=" -c --comment --duplicate-of -r --reason -R --repo "
+develop_flags_with_value=" -b --base --branch-repo -n --name --worktree -R --repo "
+comment_flags_with_value=" --attach -b --body -F --body-file -R --repo "
+reopen_flags_with_value=" -c --comment -R --repo "
+pr_edit_flags_with_value=" --add-assignee --add-label --add-project --add-reviewer --attach -B --base -b --body -F --body-file -m --milestone --remove-assignee --remove-label --remove-project --remove-reviewer -t --title -R --repo "
+review_flags_with_value=" -b --body -F --body-file -R --repo "
 pr_close_flags_with_value=" -c --comment -R --repo "
 
 # Reads the words of a gh command from an index on, each word that starts with a dash as split_flag_word reads it, and
@@ -427,29 +404,33 @@ read_arguments() {
   target+=(${repository[@]+"${repository[@]}"})
 }
 
-# Succeeds if the gh command in command_words has the flag --help, so that it only prints its help. -h doesn't count,
-# because gh repo create and gh repo edit read it as --homepage. gh reads a word after -- as an argument, and the word
-# after a flag that takes a value as that value, as in --description --help. The hook doesn't know which flags take a
-# value, so --help counts only after a word that isn't a flag, or after a flag that gives its value after =. It counts
-# only before the first word with an expansion, such as $text, because that word can become --, or nothing, as in
+# Succeeds if the gh command in command_words gives --help a true value last, so that it only prints its help. gh reads
+# the value as is_true_flag_value does. -h doesn't count, because gh repo create and gh repo edit read it as --homepage.
+# gh reads the word after a flag that takes a value as that value, as in --description --help. The hook doesn't know
+# which flags take a value, so a true --help counts only after a word that isn't a flag, or after a flag that gives its
+# value after =, while a false one counts after any word. gh reads the words after -- as arguments, unless -- is the
+# value of the flag before it. The hook can't tell which, so the function fails at --. It also fails for a command with
+# a word that may expand, such as $text, because that word can become --help=false, --, or nothing, as in
 # --body $text --help.
 prints_help() {
-  local i previous
+  local i previous flag value value_is_next_word flags_before asks_for_help=""
+  if has_word_that_may_expand; then
+    return 1
+  fi
   for ((i = 2; i < ${#command_words[@]}; i++)); do
-    if [[ -n ${command_word_may_expand[i - 1]:-} ]]; then
-      return 1
-    fi
-    previous=${command_words[i - 1]}
     case ${command_words[i]} in
       --) return 1 ;;
-      --help)
-        if [[ $previous != -* || $previous == *=* ]]; then
-          return 0
-        fi
-        ;;
+      --help | --help=*) split_flag_word "${command_words[i]}" "" ;;
+      *) continue ;;
     esac
+    previous=${command_words[i - 1]}
+    if ! is_true_flag_value "$value"; then
+      asks_for_help=""
+    elif [[ $previous != -* || $previous == *=* ]]; then
+      asks_for_help=yes
+    fi
   done
-  return 1
+  [[ -n $asks_for_help ]]
 }
 
 # Succeeds if read_arguments or read_push_arguments found one of these flags: has_flag <flag>...
