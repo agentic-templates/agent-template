@@ -356,20 +356,26 @@ done
 
 expect_repository_flags 2 "$delete_branch" pr close '7 --delete-branch'
 expect_repository_flags 0 "" pr close '7 --delete-branch=false'
-# gh finds the subcommand after the subcommand's own flags. While it looks for the subcommand, it reads the word after
-# a single short flag, or a long flag without =, as that flag's value, so a flag that takes no value comes before
+# gh finds the group and the subcommand after the subcommand's own flags. While it looks for them, it reads the word
+# after a single short flag, or a long flag without =, as that flag's value, so a flag that takes no value comes before
 # another flag here.
+expect_before_and_after_subcommand 2 "$delete_branch" pr '--repo jtmpl/other' close '7 --delete-branch'
 expect_before_and_after_subcommand 2 "$delete_branch" pr '--delete-branch --comment=Done' close '7'
 expect_before_and_after_subcommand 2 "$delete_branch" pr "--comment 'Giving it back' --delete-branch=true" close '7'
 expect_before_and_after_subcommand 2 "$delete_branch" pr "-dc'Giving it back'" close '7'
 expect_before_and_after_subcommand 0 "" pr '--delete-branch=false --comment=Done' close '7'
-# gh reads close as the value of -d, finds no subcommand, and closes nothing.
+# gh reads close as the value of -d, finds no subcommand, and closes nothing. Before the group, gh reads pr as the
+# value of -d, and reports an unknown command close.
 expect_allow Bash 'gh pr -d close 7'
-# gh skips an empty word while it looks for the subcommand, and finds none after --.
+expect_allow Bash 'gh -d pr close 7'
+# gh skips an empty word while it looks for the group or the subcommand, and finds neither after --.
 expect_before_and_after_subcommand 2 "$delete_branch" pr "'' --delete-branch=true" close '7'
 expect_allow Bash 'gh pr -- close 7 --delete-branch'
+expect_allow Bash 'gh -- pr close 7 --delete-branch'
 # gh reports an unknown command x and closes nothing, rather than reading -- and x as a flag and its value.
 expect_allow Bash 'gh pr -- x close 7 --delete-branch'
+# gh's root command knows that --version takes no value, so gh reports an unknown command x and closes nothing.
+expect_allow Bash 'gh --version x pr close 7 --delete-branch'
 
 # gh issue develop on an issue with needs-triage
 TEST_LABELS="feature needs-triage"

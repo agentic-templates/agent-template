@@ -416,6 +416,9 @@ expect_allow Bash 'gh api "repos/{owner}/{repo}/rulesets?includes_parents=false"
 expect_allow Bash 'gh api -X get "repos/{owner}/{repo}/rulesets"'
 expect_block Bash 'gh repo deploy-key add key.pub --title CI' "$security"
 expect_block Bash 'gh repo deploy-key delete 12345' "$security"
+# gh finds the subcommand of a nested group after flags, as it finds the subcommand of a group.
+expect_before_and_after_subcommand 2 "$security" 'repo deploy-key' '--title CI' add 'key.pub'
+expect_before_and_after_subcommand 2 "$security" 'repo deploy-key' '-R jtmpl/other' delete '12345'
 expect_allow Bash 'gh repo edit --enable-secret-scanning-push-protection'
 expect_allow Bash 'gh repo deploy-key list'
 
@@ -493,6 +496,8 @@ expect_block Bash 'gh issue comment https://github.com/someone/else/issues/5 --b
 expect_block Bash 'gh api -X POST repos/someone/else/issues -f title=Bug -f body=Description' \
   "$(other_repository someone/else)"
 expect_block Bash 'gh api -if body=Thanks repos/someone/else/issues/5/comments' "$(other_repository someone/else)"
+# gh finds api after the flags of gh api too.
+expect_block Bash 'gh -X POST api repos/someone/else/issues -f title=Bug' "$(other_repository someone/else)"
 expect_block Bash 'gh repo edit someone/else --description "A project"' "$(other_repository someone/else)"
 expect_block Bash 'gh repo archive someone/else --yes' "$(other_repository someone/else)"
 expect_block Bash 'gh pr comment --body Thanks https://github.com/someone/else/pull/5' "$(other_repository someone/else)"
