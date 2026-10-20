@@ -738,22 +738,22 @@ MAC: Machine = {
 class MachineLineTest(MeterTest):
     def test_gives_the_disk_the_memory_the_swap_the_gpu_the_load_the_context_and_the_retrospective(self) -> None:
         self.assertEqual(
-            meter.machine_line(MAC, 0, 210_500, "retrospective due: 31.5 hours of agents' work since the last one", []),
+            meter.machine_line(MAC, 210_500, "retrospective due: 31.5 hours of agents' work since the last one", []),
             "machine | disk 94 GB free | memory 30 GB free | swap 1.9 GB used | GPU 23% busy, 6.6 GB of the main memory"
             " | load 3.2 on 10 cores | orchestrator context 210k | "
             "retrospective due: 31.5 hours of agents' work since the last one",
         )
 
     def test_gives_the_memory_of_a_gpu_with_its_own_memory(self) -> None:
-        line = meter.machine_line({**MAC, "gpu_shares_memory": False}, 0, None, "", [])
+        line = meter.machine_line({**MAC, "gpu_shares_memory": False}, None, "", [])
         self.assertIn(" | GPU 23% busy, 6.6 GB of its own memory | ", line)
 
     def test_says_which_numbers_the_machine_does_not_give(self) -> None:
         missing = {**MAC, "memory_free_gb": None, "swap_used_gb": None, "gpu_percent": None, "gpu_memory_used_gb": None}
-        self.assertIn(" | memory unknown | swap unknown | GPU unknown | ", meter.machine_line(missing, 0, None, "", []))
-        line = meter.machine_line({**MAC, "gpu_percent": None}, 0, None, "", [])
+        self.assertIn(" | memory unknown | swap unknown | GPU unknown | ", meter.machine_line(missing, None, "", []))
+        line = meter.machine_line({**MAC, "gpu_percent": None}, None, "", [])
         self.assertIn(" | GPU use unknown, 6.6 GB of the main memory | ", line)
-        line = meter.machine_line({**MAC, "gpu_memory_used_gb": None}, 0, None, "", [])
+        line = meter.machine_line({**MAC, "gpu_memory_used_gb": None}, None, "", [])
         self.assertIn(" | GPU 23% busy, memory unknown | ", line)
 
     def test_is_the_last_line(self) -> None:
