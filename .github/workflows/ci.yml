@@ -17,6 +17,7 @@ concurrency:
 
 jobs:
   linux:
+    needs: changes
     runs-on: ubuntu-latest
     # Stops a stuck run. It's well above the time goal under "Commands" in AGENTS.md, so a slow run still finishes.
     timeout-minutes: 30
@@ -40,13 +41,16 @@ jobs:
 
       # zizmor uses the job's read-only token to check the actions in the workflows against GitHub's advisories.
       # SKIP_SCRIPT_TESTS skips the tests of the scripts and hooks, which the script-tests job runs.
+      # SKIP_PYTHON_TESTS skips the Python tests and their coverage report when the changes job says they aren't needed.
       - run: scripts/check
         env:
           ZIZMOR_GITHUB_TOKEN: ${{ github.token }}
           SKIP_SCRIPT_TESTS: 1
+          SKIP_PYTHON_TESTS: ${{ needs.changes.outputs.python_tests == 'false' && '1' || '' }}
 
   # Says whether the change needs the tests of the scripts and hooks, as scripts/script-tests-needed decides from the
-  # files it changes. When it can't list them, the tests run.
+  # files it changes, and whether it needs the Python tests, as scripts/python-tests-needed decides. When it can't list
+  # the files, the tests run.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -55,6 +59,7 @@ jobs:
       pull-requests: read
     outputs:
       script_tests: ${{ steps.decide.outputs.script_tests }}
+      python_tests: ${{ steps.decide.outputs.python_tests }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -62,7 +67,7 @@ jobs:
 
       # GitHub's compare API lists at most 300 files, so a merge group with more runs the tests.
       - id: decide
-        name: Decide whether the tests of the scripts and hooks run
+        name: Decide whether the tests of the scripts and hooks, and the Python tests, run
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
@@ -90,6 +95,13 @@ jobs:
             script_tests=false
           fi
           echo "script_tests=$script_tests" >>"$GITHUB_OUTPUT"
+          needed=0
+          scripts/python-tests-needed <<<"$paths" || needed=$?
+          python_tests=true
+          if ((needed == 1)); then
+            python_tests=false
+          fi
+          echo "python_tests=$python_tests" >>"$GITHUB_OUTPUT"
 
   # Runs the tests of the scripts and hooks while the linux job runs the other checks, because the tests took most of
   # the linux job's time. Each job of the matrix runs a part of the tests, as scripts/test-scripts --part describes.
