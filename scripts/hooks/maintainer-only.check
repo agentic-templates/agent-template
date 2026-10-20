@@ -680,7 +680,8 @@ gh_posts() {
   esac
 }
 
-# The flags of gh commands that take text, which can hold the URL of an issue of another repository
+# The flags that take text, which can hold the URL of an issue of another repository, of the gh commands whose flags the
+# hooks don't list
 text_flags=" -b --body -t --title -c --comment -F --body-file --description -n --notes --notes-file --subject -T --template "
 
 # Sets destination to the repository that a gh command posts to, as the command or git names it, or to empty when the
@@ -820,13 +821,30 @@ find_named_repository() {
   # The URL can stand anywhere among the words after the subcommand.
   for ((i = 3; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
-    if [[ $text_flags == *" $word "* ]]; then
+    if is_flag_before_value "$word" "$command_flags_with_value"; then
       i=$((i + 1))
     elif [[ $word =~ ^https?://[^/]+/[^/]+/[^/]+ ]]; then
       destination=$word
       return 0
     fi
   done
+}
+
+# Succeeds if gh reads the word after a word of a gh command as the value of a flag that the word ends in. It reads the
+# word as split_flag_word does, with the command's flags that take a value. For a command whose flags the hooks don't
+# list, it reads only a word in text_flags as such a flag:
+# is_flag_before_value <word> <the command's flags that take a value, or empty>
+is_flag_before_value() {
+  local flag value value_is_next_word flags_before
+  if [[ -z $2 ]]; then
+    [[ $text_flags == *" $1 "* ]]
+    return
+  fi
+  if [[ $1 != -* ]]; then
+    return 1
+  fi
+  split_flag_word "$1" "$2"
+  [[ -n $value_is_next_word ]]
 }
 
 # Blocks a post to a repository other than this one, unless the list of allowed repositories names it. It allows the
