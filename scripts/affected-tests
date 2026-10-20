@@ -5,9 +5,9 @@ gets, one to a line and in the order that it gets them. Run it from the reposito
   scripts/affected-tests <test file>...
 
 scripts/test-scripts --branch runs the test files that it prints. A test file is affected when the branch changes the
-test file, a file that it tests, or a file that a tested file names, and so on. The script doesn't follow the names in
-the test file itself, because a test names many files only as sample input. A test file tests the file of its
-name without .test, or with .check or .bash in place of .test, such as scripts/start-issue for
+test file, a file that it tests, a file that it sources, or a file that one of those names, and so on. The script
+follows no other names in the test file itself, because a test names many files only as sample input. A test file
+tests the file of its name without .test, or with .check or .bash in place of .test, such as scripts/start-issue for
 scripts/start-issue.test, and the files that TESTED_FILES gives it. A file names another file in scripts/, .claude/,
 .codex/ or .github/:
 
@@ -39,10 +39,10 @@ from pathlib import Path
 ROOT_FOLDERS = ("scripts", ".claude", ".codex", ".github")
 
 # A change to one of these files runs every test file. scripts/test-scripts runs the test files through
-# scripts/loop/run-heavy, and each test of the hooks reads testing.bash, which reads input.jq, helpers.bash and the
-# files that helpers.bash sources, and runs before-tool. The script doesn't follow the files that these name, because
-# before-tool runs scripts/loop/agent-log only for an Agent call, which no test of a check makes, and the Python tests
-# test the modules that run-heavy imports.
+# scripts/loop/run-heavy, and each test of the hooks reads testing.bash, which reads input.jq, helpers.bash, the files
+# that helpers.bash sources and reads, and the allowed repositories, and runs before-tool. The script doesn't follow
+# the files that these name, because before-tool runs scripts/loop/agent-log only for an Agent call, which no test of a
+# check makes, and the Python tests test the modules that run-heavy imports.
 EVERY_TEST = {
     "scripts/test-scripts",
     "scripts/missing-tools",
@@ -53,16 +53,31 @@ EVERY_TEST = {
     "scripts/hooks/helpers.bash",
     "scripts/loop-folder",
     "scripts/hooks/words-without-secrets.bash",
+    "scripts/token-shapes",
+    "scripts/fixtures/allowed-repositories",
     "scripts/hooks/simple-commands.bash",
     "scripts/hooks/command-prefixes.bash",
 }
 
-# The files that a test file tests, when its name doesn't give them.
+# The files that a test file tests or runs, when neither its name nor the code of the files that it tests gives them.
 TESTED_FILES = {
     "scripts/test-check": ["scripts/check"],
     "scripts/ci.test": [".github/workflows/ci.yml"],
     "scripts/draft-assets.test": ["scripts/fixtures/draft-assets.yml"],
     "scripts/hooks/settings.test": [".claude/settings.json", ".codex/hooks.json"],
+    "scripts/hooks/block-log.test": [
+        "scripts/hooks/forbidden-commands.check",
+        "scripts/hooks/instruction-files.check",
+        "scripts/hooks/maintainer-only.check",
+        "scripts/hooks/secret-files.check",
+    ],
+    "scripts/hooks/expansion-notes.test": [
+        "scripts/hooks/issues-and-labels.check",
+        "scripts/hooks/posted-text.check",
+        "scripts/hooks/pull-request-rules.check",
+    ],
+    # pull-request-rules.check reads the list from a folder that it works out when it runs.
+    "scripts/hooks/pull-request-rules.test": ["scripts/consequential-paths"],
 }
 
 # A path from the repository's root, which no letter, digit, period or dash comes right before, so that
@@ -77,6 +92,7 @@ PATH_FROM_FOLDER = re.compile(r"(?:\$\w+|[})])/([\w./-]+)")
 # no end.
 HERE_DOCUMENT = re.compile(r"(?<!<)<<-?\s*['\"]?([A-Za-z_]\w*)")
 IMPORT = re.compile(r"^\s*(?:import|from)\s+(\w+)")
+SOURCE = re.compile(r"^\s*(?:source|\.)\s")
 
 
 def main() -> int:
@@ -132,7 +148,7 @@ def affected_tests(test_files: list[str], changed: set[str], texts: dict[str, st
 
     affected = []
     for test_file in test_files:
-        unread = tested_files(test_file, known)
+        unread = [*tested_files(test_file, known), *files_sourced(test_file, texts.get(test_file, ""), known)]
         reached = {test_file, *unread}
         while unread:
             path = unread.pop()
@@ -150,6 +166,12 @@ def tested_files(test_file: str, known: set[str]) -> list[str]:
     stem = test_file.removesuffix(".test")
     by_name = [path for path in (stem, f"{stem}.check", f"{stem}.bash") if path != test_file and path in known]
     return by_name + TESTED_FILES.get(test_file, [])
+
+
+def files_sourced(path: str, text: str, known: set[str]) -> set[str]:
+    """The known files that a file names in its source commands."""
+    source_lines = (line for line in code_lines(text) if SOURCE.match(line))
+    return files_named(path, "\n".join(source_lines), known)
 
 
 def files_named(path: str, text: str, known: set[str]) -> set[str]:

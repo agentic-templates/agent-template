@@ -133,6 +133,19 @@ class AffectedTestsTest(unittest.TestCase):
         texts = {"scripts/tool.test": "scripts/sample\n", "scripts/tool": "", "scripts/sample": ""}
         self.assertEqual(affected(texts, "scripts/sample"), [])
 
+    def test_follows_the_files_that_a_test_file_sources(self) -> None:
+        texts = {
+            "scripts/tool.test": "source scripts/library\nrun scripts/sample\n",
+            "scripts/library": "scripts/helper\n",
+            "scripts/helper": "",
+            "scripts/sample": "",
+            "scripts/hooks/rule.test": '. "$hooks_folder/../shared.bash"\n',
+            "scripts/shared.bash": "",
+        }
+        self.assertEqual(affected(texts, "scripts/helper"), ["scripts/tool.test"])
+        self.assertEqual(affected(texts, "scripts/sample"), [])
+        self.assertEqual(affected(texts, "scripts/shared.bash"), ["scripts/hooks/rule.test"])
+
     def test_runs_every_test_file_when_the_branch_changes_a_file_that_every_test_uses(self) -> None:
         texts = {"scripts/tool.test": "", "scripts/hooks/rule.test": "", "scripts/test-check": ""}
         for shared in ("scripts/test-scripts", "scripts/hooks/testing.bash", "scripts/hooks/helpers.bash"):
@@ -165,6 +178,43 @@ class ThisRepositoryTest(unittest.TestCase):
     def test_runs_every_test_of_the_hooks_for_a_change_to_their_helpers(self) -> None:
         selected = affected_tests.affected_tests(self.test_files, {"scripts/hooks/helpers.bash"}, self.texts)
         self.assertEqual(selected, self.test_files)
+
+    def test_runs_every_test_file_for_a_change_to_a_file_that_the_helpers_read(self) -> None:
+        for shared in ("scripts/token-shapes", "scripts/fixtures/allowed-repositories"):
+            with self.subTest(shared):
+                selected = affected_tests.affected_tests(self.test_files, {shared}, self.texts)
+                self.assertEqual(selected, self.test_files)
+
+    def test_runs_the_test_files_that_source_a_test_helper(self) -> None:
+        selected = affected_tests.affected_tests(self.test_files, {"scripts/testing-required-checks.bash"}, self.texts)
+        expected = [
+            "scripts/hooks/after-tool.test",
+            "scripts/hooks/maintainer-commands.test",
+            "scripts/check-main-rules.test",
+            "scripts/merge-dependabot-pull-requests.test",
+            "scripts/stuck-pull-requests.test",
+            "scripts/wait-for-pull-requests.test",
+        ]
+        self.assertEqual(selected, expected)
+        selected = affected_tests.affected_tests(
+            self.test_files, {"scripts/hooks/plain-simple-commands.bash"}, self.texts
+        )
+        self.assertIn("scripts/hooks/simple-commands.test", selected)
+
+    def test_runs_the_test_files_that_check_what_a_check_blocks_or_reads(self) -> None:
+        cases = {
+            "scripts/hooks/secret-files.check": "scripts/hooks/block-log.test",
+            "scripts/hooks/forbidden-commands.check": "scripts/hooks/block-log.test",
+            "scripts/hooks/instruction-files.check": "scripts/hooks/block-log.test",
+            "scripts/hooks/maintainer-only.check": "scripts/hooks/block-log.test",
+            "scripts/hooks/posted-text.check": "scripts/hooks/expansion-notes.test",
+            "scripts/hooks/issues-and-labels.check": "scripts/hooks/expansion-notes.test",
+            "scripts/hooks/pull-request-rules.check": "scripts/hooks/expansion-notes.test",
+            "scripts/consequential-paths": "scripts/hooks/pull-request-rules.test",
+        }
+        for changed, test_file in cases.items():
+            with self.subTest(changed):
+                self.assertIn(test_file, affected_tests.affected_tests(self.test_files, {changed}, self.texts))
 
 
 class BranchTest(unittest.TestCase):
@@ -212,6 +262,12 @@ class BranchTest(unittest.TestCase):
     def test_runs_the_test_file_of_a_new_script_that_isnt_added_to_git(self) -> None:
         (self.folder / "scripts" / "new").write_text("")
         self.assertEqual(self.run_script("scripts/new.test"), ["scripts/new.test"])
+
+    def test_runs_the_test_file_of_a_script_that_the_branch_moves_out_of_scripts(self) -> None:
+        (self.folder / "docs").mkdir()
+        self.git("mv", "scripts/tool", "docs/tool.md")
+        self.commit("docs: move the tool")
+        self.assertEqual(self.run_script(), ["scripts/tool.test"])
 
     def test_runs_every_test_file_when_the_repository_has_no_origin_main(self) -> None:
         self.git("update-ref", "-d", "refs/remotes/origin/main")
