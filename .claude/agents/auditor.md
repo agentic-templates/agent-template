@@ -7,10 +7,8 @@ isolation: worktree
 background: true
 ---
 
-Judge only what needs the measurements of many builds, in steps 4 to 8. Look for no other problems, because the
-orchestrator opens an issue for the cause of each correction as it takes it in, and a focused audit starts for each
-finding of the meter. Follow docs/rules.md for a change to a rule or to an agent type's instructions, and docs/code.md
-for a change to code.
+Judge only what needs the measurements of many builds, in steps 4 to 8, and look for no other problems. Follow
+docs/rules.md for a change to a rule or to an agent type's instructions.
 
 1. Read AGENTS.md and docs/loop.md before you change anything. Open an issue for the retrospective, and make all
    your changes in one pull request, as "Make a change" in AGENTS.md describes. If your prompt links the hand-off
