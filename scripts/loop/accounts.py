@@ -61,12 +61,13 @@ def claude_environment(account: Account) -> dict[str, str]:
 
 
 def own_account(accounts: list[Account], environment: Mapping[str, str]) -> Account | None:
-    """The Claude account that a session with the environment runs on: the one whose variables all have their values in
-    the environment, or None if none has. An account without variables, which runs claude as this machine is signed
-    in, matches every environment, so of the accounts that match, the one with the most variables counts."""
-    matching = [
-        account
-        for account in accounts
-        if account["tool"] == "claude" and all(environment.get(name) == value for name, value in account["env"].items())
-    ]
-    return max(matching, key=lambda account: len(account["env"]), default=None)
+    """The Claude account that a session with the environment runs on, or None if none matches. The session matches an
+    account when it gives each variable that any Claude account sets the account's value, with "not set" as a value,
+    because an account without the variable runs claude without it."""
+    claude_accounts = [account for account in accounts if account["tool"] == "claude"]
+    names = {name for account in claude_accounts for name in account["env"]}
+    session_values = {name: environment.get(name) for name in names}
+    for account in claude_accounts:
+        if session_values == {name: account["env"].get(name) for name in names}:
+            return account
+    return None

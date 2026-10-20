@@ -158,13 +158,21 @@ class StartTest(AgentLogTest):
         ]
         (self.loop / "accounts.json").write_text(json.dumps({"accounts": accounts}))
         cases = [
+            ({}, "signed-in"),
+            ({"CODEX_HOME": "/codex"}, "signed-in"),
             ({"CLAUDE_CONFIG_DIR": "/second"}, "second"),
+            ({"CLAUDE_CONFIG_DIR": "/second", "ANTHROPIC_MODEL": "opus"}, None),
+            ({"CLAUDE_CONFIG_DIR": "/second/"}, None),
             ({"CLAUDE_CONFIG_DIR": "/third", "ANTHROPIC_MODEL": "opus"}, "third"),
-            ({"CLAUDE_CONFIG_DIR": "/third"}, "signed-in"),
-            ({"CLAUDE_CONFIG_DIR": "/other", "CODEX_HOME": "/codex"}, "signed-in"),
+            ({"CLAUDE_CONFIG_DIR": "/third"}, None),
+            ({"ANTHROPIC_MODEL": "opus"}, None),
+            ({"CLAUDE_CONFIG_DIR": "/other", "CODEX_HOME": "/codex"}, None),
         ]
         for variables, account in cases:
-            with self.subTest(variables=variables), mock.patch.dict(os.environ, variables):
+            with self.subTest(variables=variables), mock.patch.dict(os.environ):
+                for name in ("CLAUDE_CONFIG_DIR", "ANTHROPIC_MODEL", "CODEX_HOME"):
+                    os.environ.pop(name, None)
+                os.environ.update(variables)
                 self.run_script("start", agent_call("12 other", subagent_type="builder"))
                 self.assertEqual(self.lines()[-1]["account"], account)
 

@@ -55,6 +55,32 @@ class AccountTest(ReportTest):
             ],
         )
 
+    def test_writes_point_for_a_rise_of_1_and_points_for_a_rise_on_either_side_of_it(self) -> None:
+        self.log_agents(
+            on("one", start("run-1", 1)),
+            end("run-1", 10, output_tokens=700),
+            on("less", start("run-2", 2)),
+            end("run-2", 10, output_tokens=500),
+            on("more", start("run-3", 3)),
+            end("run-3", 10, output_tokens=900),
+        )
+        self.log_readings(
+            week_reading(0, "one", 10),
+            week_reading(0, "less", 10),
+            week_reading(0, "more", 10),
+            week_reading(30, "one", 11),
+            week_reading(30, "less", 10.5),
+            week_reading(30, "more", 11.5),
+        )
+        self.assertEqual(
+            self.account_lines(),
+            [
+                "Account less: 500 output tokens, 0.5 points of the weekly meter, 1000 output tokens per point",
+                "Account more: 900 output tokens, 1.5 points of the weekly meter, 600 output tokens per point",
+                "Account one: 700 output tokens, 1 point of the weekly meter, 700 output tokens per point",
+            ],
+        )
+
     def test_counts_a_new_weeks_meter_from_0(self) -> None:
         self.log_agents(on("claude", start("run-1", 1)), end("run-1", 50, output_tokens=1400))
         # The reset moves by minutes from one reading to the next, and a week later in a new week, whether or not the

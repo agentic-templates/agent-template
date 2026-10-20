@@ -38,7 +38,8 @@ def account_line(name: str, tokens: int, points: float) -> str:
     line = f"Account {name}: {tokens} output tokens"
     if not points:
         return f"{line}, no rise of the weekly meter"
-    return f"{line}, {points:g} points of the weekly meter, {tokens / points:.0f} output tokens per point"
+    unit = "point" if points == 1 else "points"
+    return f"{line}, {points:g} {unit} of the weekly meter, {tokens / points:.0f} output tokens per point"
 
 
 def read_week_readings(meter_log: str, since: dt.datetime) -> dict[str, list[dict[str, Any]]]:
