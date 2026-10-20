@@ -26,8 +26,6 @@ PARTS = (MODEL, CHECK, TEST_FILE, CI, SLEEP, COMMAND, TOOL, BACKGROUND_WAIT, ORC
 
 # The origin that Claude Code gives the line that tells an agent that one of its background tasks ended or printed
 TASK_NOTIFICATION = "task-notification"
-# The text of the line that Claude Code writes when the user interrupts an agent, which isn't a message for it
-INTERRUPTION = "[Request interrupted by user"
 # A here-document, whose body is text for a command rather than commands. Group 3 holds the rest of its first line.
 HERE_DOCUMENT = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1([^\n]*)\n(.*?\n)?[ \t]*\2[ \t]*(?=\n|$)", re.DOTALL)
 # A command substitution with no parentheses inside, whose command runs also inside double quotes
@@ -73,16 +71,10 @@ def part_until(following: dict[str, Any], running: dict[str, str]) -> str:
     """The part that the time until the following entry counts in, while the tool calls run."""
     if running:
         return next(iter(running.values()))
-    if not transcripts.is_prompt(following) or is_interruption(following):
+    if not transcripts.is_prompt(following) or transcripts.is_interruption(following):
         return MODEL
     origin = following.get("origin") or {}
     return BACKGROUND_WAIT if origin.get("kind") == TASK_NOTIFICATION else ORCHESTRATOR_WAIT
-
-
-def is_interruption(entry: dict[str, Any]) -> bool:
-    content = entry["message"].get("content")
-    texts = [content] if isinstance(content, str) else [block.get("text", "") for block in content]
-    return any(str(text).startswith(INTERRUPTION) for text in texts)
 
 
 def moment(entry: dict[str, Any]) -> dt.datetime:

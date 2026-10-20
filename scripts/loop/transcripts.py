@@ -14,16 +14,17 @@ OUTPUT_KEY = "output_tokens"
 # gh pr new is another name for gh pr create, which prints the new pull request's URL. The URL ends in its number.
 PR_CREATE = re.compile(r"\bgh pr (create|new)\b")
 PULL_REQUEST_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/([1-9][0-9]*)")
-# Claude Code gives each message that a person typed this origin, on a user line, or on an attachment line of the kind
-# QUEUED_MESSAGE if the message arrived while a turn ran. A task notification, an agent's message, a scheduled prompt
-# such as the loop's heartbeat, a hook's output and a compaction's summary have another origin or none.
-PERSON_ORIGIN = "human"
-QUEUED_MESSAGE = "queued_command"
 # Claude Code writes a system line when Claude's safety classifier stops a response. When Claude Code then asks once
 # for the rest of the response, the line's content holds these words. When the classifier refused the request, the
 # line's subtype starts with these words, as in model_refusal_no_fallback. Claude Code 2.1.303 writes them so.
 STOPPED_RESPONSE = "safeguards stopped the response"
 REFUSED_REQUEST = "model_refusal"
+# The text of the line that Claude Code writes when the user interrupts a session or an agent, which isn't a message
+# for it
+INTERRUPTION = "[Request interrupted by user"
+# The end of a transcript that holds its last call and its last message. An orchestrator's transcript of 218 MB took
+# 0.25 seconds and about 0.5 GB of memory to read whole.
+TAIL_BYTES = 400_000
 
 
 class Call(NamedTuple):
@@ -37,11 +38,6 @@ class Call(NamedTuple):
     tool_calls: int
     # The id of the request to the API, which Claude Code's events give too, or None if the transcript has none
     request_id: str | None = None
-
-
-class Message(NamedTuple):
-    at: dt.datetime
-    text: str
 
 
 def read_transcript(file: Path) -> tuple[list[Call], list[dt.datetime]]:
@@ -131,6 +127,36 @@ def is_prompt(entry: dict[str, Any]) -> bool:
     return not isinstance(content, list) or any(block.get("type") != "tool_result" for block in content)
 
 
+def tail_lines(file: Path) -> list[str]:
+    """The lines in the last TAIL_BYTES of a transcript. The first of them may be cut off."""
+    with file.open("rb") as handle:
+        handle.seek(max(0, file.stat().st_size - TAIL_BYTES))
+        return handle.read().decode(errors="replace").splitlines()
+
+
+def is_interrupted(file: Path) -> bool:
+    """Whether the last message in an agent's transcript is the line that says that the user interrupted the agent.
+    Claude Code runs no hook then, so the agent gets no end line. A message that the agent gets later comes after that
+    line, and the agent runs again."""
+    if not file.exists():
+        return False
+    for line in reversed(tail_lines(file)):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if has_message(entry):
+            return entry.get("type") == "user" and is_interruption(entry)
+    return False
+
+
+def is_interruption(entry: dict[str, Any]) -> bool:
+    """Whether a prompt is the line that Claude Code writes when the user interrupts a session or an agent."""
+    content = entry["message"].get("content")
+    texts = [content] if isinstance(content, str) else [block.get("text", "") for block in content]
+    return any(str(text).startswith(INTERRUPTION) for text in texts)
+
+
 def safety_stops(entries: list[dict[str, Any]]) -> list[dt.datetime]:
     """The times in a transcript's entries at which Claude's safety classifier stopped a response. A stop in the
     request that asks for the rest of a stopped response stops the same response, so it doesn't count again."""
@@ -179,31 +205,6 @@ def claude_code_versions(entries: list[dict[str, Any]], since: dt.datetime) -> s
         for entry in entries
         if entry.get("version") and dt.datetime.fromisoformat(entry["timestamp"]) >= since
     }
-
-
-def person_messages(file: Path) -> list[Message]:
-    """The messages that a person typed in a session, in the transcript's order."""
-    messages = []
-    for entry in timed_entries(file):
-        text = person_text(entry)
-        if text is not None:
-            messages.append(Message(dt.datetime.fromisoformat(entry["timestamp"]), text))
-    return messages
-
-
-def person_text(entry: dict[str, Any]) -> str | None:
-    """The text of the message that a person typed on a transcript's line, or None if the line holds no such message."""
-    if entry.get("type") == "user" and isinstance(entry.get("message"), dict):
-        origin, content = entry.get("origin"), entry["message"].get("content")
-    elif entry.get("type") == "attachment" and (entry.get("attachment") or {}).get("type") == QUEUED_MESSAGE:
-        origin, content = entry["attachment"].get("origin"), entry["attachment"].get("prompt")
-    else:
-        return None
-    if (origin or {}).get("kind") != PERSON_ORIGIN:
-        return None
-    if isinstance(content, str):
-        return content
-    return "\n".join(block["text"] for block in content if block.get("type") == "text")
 
 
 def blocks(entry: dict[str, Any], kind: str) -> list[dict[str, Any]]:

@@ -36,6 +36,11 @@ The steps:
 
 Work through these steps each time you wake, for a message or because an agent or a background task ended.
 
+Make a change of text yourself, such as a fix to a guide, when you already know each word of it, because a builder
+would only write the same words. Run `scripts/check` for it as a background task, and go on with the cycle while it
+runs. Give each change of code to a builder, even a change of one line, because a failing check in code can take many
+runs to fix, and a builder's runs don't keep you from acting.
+
 To give a builder something, such as a correction or a reviewer's errors, send it a message. A builder that
 `scripts/loop/run-builder` started can't take messages. Wait until its run ends, and then start a new builder with
 the message, of the type `builder` unless a step below names another type. Choose its account as "Read the meter"
@@ -111,14 +116,12 @@ Start an agent for each ready issue, as far as "Read the meter" allows:
 
 1. Run `scripts/take-next-issue`. It assigns you the next ready issue that can start, and prints its number and its
    kind, such as `12 other` or `13 research`. If it prints `none`, go on with "Land".
-2. If you know that the issue's change is one line, make it yourself, in a worktree of your own, as "Make a change"
-   in AGENTS.md describes.
+2. If the start of "Work through the cycle" says to make the issue's change yourself, make it in a worktree of your
+   own, as "Make a change" in AGENTS.md describes.
 3. Otherwise, choose the agent's type: `researcher` for a `research` issue, and otherwise the builder type whose
-   description fits the change. If it's a builder type and the meter's `machine` line says
-   `start no builder or test build`, start none on any account, and skip the issue as "Read the meter" describes for
-   an issue that no account can take. Otherwise, choose its account as "Read the meter" describes. If that's your own
-   account, start a background agent of that type. Don't give it a model, so that it runs at its type's model and
-   effort. After its prompt's first line, name the files to start from if you know them.
+   description fits the change. Choose its account as "Read the meter" describes. If that's your own account, start a
+   background agent of that type. Don't give it a model, so that it runs at its type's model and effort. After its
+   prompt's first line, name the files to start from if you know them.
 
 After each issue, go back to step 1. Start an auditor too when "Start a retrospective" says so, and a focused audit
 when "Start a focused audit" says so.
@@ -160,14 +163,15 @@ when "Start a focused audit" says so.
 
 ### Record
 
-Bring `.loop/state.md` up to date after each launch, merge or decision, so that a compaction can come at any time.
-Besides the `session:` and `pid:` lines, it holds:
+Bring `.loop/state.md` up to date after each launch, merge or decision, so that a `/clear` or a compaction can come
+at any time. Besides the `session:` and `pid:` lines, it holds:
 
 - the goal
 - each running agent, with its issue or pull request, and its agent id or `scripts/loop/run-builder` task
 - the drafts that a reviewer has read
 - the issues whose builder stopped once
-- the focused audits since the last retrospective, each with its finding, its issue and the time it started
+- the focused audits since the last auditor's pull request merged, each with its finding, its issue and the time it
+  started
 - the `BLOCKED` pull requests from your last pass
 - what you do next, and the open questions
 
@@ -188,10 +192,8 @@ heartbeat and schedule it again, because a recurring prompt ends 7 days after yo
 For each account in `.loop/accounts.json`, `scripts/loop/meter` prints a line that ends with the account's advice.
 The meter's last line starts with `machine`, and gives your context size and whether a retrospective is due. Of the
 parts that ` | ` separates on the line, each one that starts with `audit due:` names a finding for a focused audit.
-Once as many agents build as the machine has room for, the line has a part that gives their number and the limit,
-and ends with `start no builder or test build`. Reviewers and researchers still start then, because they rarely run
-`scripts/check`. The line before the `machine` line starts with `agents`, and gives the context size of each agent
-that runs. Run the meter once in each pass, before you launch.
+The line before it starts with `agents`, and gives the context size of each agent that runs. Run the meter once in
+each pass, before you launch.
 
 `scripts/loop/meter --wake` ends, and so wakes you, when an account's advice changes, when a reading has a finding for
 a focused audit whose subject wasn't on the last `machine` line that the meter printed, and when a hook tells an agent
@@ -215,19 +217,16 @@ usage that you still need until the weekly reset.
 The line after the accounts starts with `start on`, and names the Claude account for each type, or `no account`.
 Choose the account of each builder and researcher, and of each reviewer of a pull request, with
 `scripts/loop/meter --start-on <type>`, and start the agent on the account that it prints. It names the account as
-the `start on` line does, from the same reading, but it counts each agent that it named an account for since then.
-So one pass starts only as many agents on each account as fit. For a builder type, it also prints `no account` once
-the agents that build at the reading, with each builder that it named an account for since then, reach the limit, and
-then says so on its next line. If it prints `no account`, start no agent of that type on a Claude account. Start the
-auditor, and each reviewer that reviews no pull request, such as the reviewer of a release, on your own account, as an
-agent of your session.
+the `start on` line does, from the same reading, but counts each agent that it named an account for since then, so
+that one pass starts only as many agents on each account as fit. If it prints `no account`, start no agent of that
+type on a Claude account. Start the auditor, and each reviewer that reviews no pull request, such as the reviewer of a
+release, on your own account, as an agent of your session.
 
 A Codex account builds only the kinds `research` and `other`, and only while its advice is `go`. Start a builder or
 researcher on such a Codex account without running `--start-on`, when the Codex account's `week` percentage of use is
 lower than that of the account that the `start on` line names for the agent's type. Also start it on such a Codex
-account when `--start-on` prints `no account`. But start no builder on a Codex account while the `machine` line names
-the limit, or once `--start-on` said in this pass that the agents that build reached it. Each builder of the type
-`builder-deep`, and each builder or researcher that takes over a hand-off, can run only on a Claude account.
+account when `--start-on` prints `no account`. Each builder of the type `builder-deep`, and each builder or researcher
+that takes over a hand-off, can run only on a Claude account.
 
 To start an agent on another account, run one of these commands as a background task. For an issue, give the line
 that `scripts/take-next-issue` printed in place of `<issue> <kind>`. The command's last line says how the run ended,
@@ -242,18 +241,23 @@ If no account can take the issue that `scripts/take-next-issue` gave you, remove
 the script again, followed by the number of each issue that no account can take, such as
 `scripts/take-next-issue 12 15`, so that it skips them.
 
-## Compact your context
+## Clear your context
 
-Keep your shell in the main checkout, and run git in a worktree with `git -C <worktree>`. After a compaction, the
-session-start hook shows you your state file, this guide and `docs/writing.md` only when your shell is in the main
-checkout.
+Keep your shell in the main checkout, and run git in a worktree with `git -C <worktree>`. After a `/clear` or a
+compaction, the session-start hook shows you your state file, this guide and `docs/writing.md`, unless your shell is
+outside the main checkout.
 
-When `scripts/hooks/hand-off` tells you that your context has grown long enough to compact, ask for a compaction if the
-maintainer installed a compaction sender. That's a hook in the maintainer's own Claude Code settings that runs on both
-`Stop` and `StopFailure`, and types `/compact` when it finds `.loop/compact-request.txt`. Finish the step you're on,
-such as landing a pull request or starting a builder, and bring your state file up to date. Then write
-`.loop/compact-request.txt` with your session id on its first line and `Resume from .loop/state.md.` on its second, and
-end your turn. Without a sender, ask the maintainer to type `/compact`, and go on with the loop.
+When `scripts/hooks/hand-off` tells you that your context has grown long enough, clear it with `/clear`:
+
+1. Finish the step you're on, such as landing a pull request or starting a builder.
+2. Write into your state file what only this conversation holds, if the file lacks it: the maintainer's decisions that
+   no issue holds yet, the questions to the maintainer that are still open, and the agents that run inside this
+   session.
+3. A `/clear` sender is a hook in the maintainer's own settings that reads a request that you write, and types
+   `/clear` and then the request's second line. If the maintainer installed one, write the request:
+   `.loop/compact-request.txt` with your session id on its first line and `Resume the loop from .loop/state.md.` on
+   its second. Then end your turn. Without a sender, ask the maintainer to type `/clear` and then
+   `Resume the loop from .loop/state.md.`, and go on with the loop.
 
 ## Ask the maintainer
 
@@ -304,6 +308,4 @@ without waiting for the next retrospective:
    sandbox that can't reach GitHub, and so can't open an issue for each fix.
 4. Add the audit to the state file's list of focused audits, with the time it started.
 
-A focused audit doesn't count as a retrospective, so the meter goes on counting toward the next one. When an
-auditor's pull request merges, empty the state file's list of focused audits, because the retrospective looks back on
-the work that their findings came from.
+A focused audit doesn't count as a retrospective, so the meter goes on counting toward the next one.
