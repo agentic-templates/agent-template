@@ -629,9 +629,11 @@ done
 expect_allow Bash 'gh issue close 5 -c https://github.com/someone/else/issues/9'
 expect_allow Bash 'gh pr close 5 --comment https://github.com/someone/else/pull/9'
 expect_allow Bash 'gh pr review 5 -ab https://github.com/someone/else/pull/9'
-# The hooks list no flags of gh project create, whose -t and --template take a value.
+# The hooks list no flags of gh project create, whose -t and --template take a value, or of gh project link, whose -T
+# does.
 for command in 'gh project create -t https://github.com/someone/else/issues/9' \
-  'gh project create --template https://github.com/someone/else/issues/9'; do
+  'gh project create --template https://github.com/someone/else/issues/9' \
+  'gh project link 5 -T https://github.com/someone/else/issues/9'; do
   expect_allow Bash "$command"
 done
 expect_block Bash 'gh pr close 5 -R someone/else' "$(other_repository someone/else)"
