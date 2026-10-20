@@ -158,11 +158,14 @@ expect_repository_flags() {
   done
 }
 
-# Checks a gh command with words of its subcommand before the subcommand, and with the same words just after it, against
-# a fixed result: expect_before_and_after_subcommand <exit code> <message> <group> <words> <subcommand> <remaining words>
+# Checks a gh command with words of its subcommand before the group, between the group and the subcommand, and just
+# after the subcommand, against a fixed result:
+# expect_before_and_after_subcommand <exit code> <message> <group> <words> <subcommand> <remaining words>
+# The group can be a nested group, such as repo deploy-key.
 expect_before_and_after_subcommand() {
   local status=$1 message=$2 group=$3 words=$4 subcommand=$5 rest=$6 command
-  for command in "gh $group $words $subcommand $rest" "gh $group $subcommand $words $rest"; do
+  for command in "gh $words $group $subcommand $rest" "gh $group $words $subcommand $rest" \
+    "gh $group $subcommand $words $rest"; do
     run_hook "$(sample_input claude-code Bash "$command")"
     expect_result "The hook for $command" "$status" "$message"
   done

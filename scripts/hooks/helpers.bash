@@ -353,35 +353,66 @@ read_push_arguments() {
   fi
 }
 
-# Moves the words between a gh command group and its subcommand to just after the subcommand, in their order, so that
-# the checks read the subcommand and its flags wherever the command writes them. gh api has no subcommand, so its words
-# stay as written.
-# gh finds the subcommand as its command library, cobra, does. It skips each word that starts with a dash. When that
-# word is a single short flag or a long flag without =, other than --help, it also skips the next word, as in
-# -R jtmpl/other or --title Title, because it doesn't know yet whether the flag takes a value. It skips an empty word
-# too, and finds no subcommand after --.
+# Puts the group of a gh command, its subcommand and the subcommand of a nested group, such as add of
+# gh repo deploy-key, right after gh, in that order, and the other words after them, in their order. The checks then
+# read the group as the second word, the subcommand as the third and a nested group's subcommand as the fourth,
+# wherever the command writes the flags. gh api has no subcommand, so the words after api stay as written.
 move_flags_after_gh_subcommand() {
-  local index=2
-  if ((${#command_words[@]} < 3)) || [[ ${command_words[0]##*/} != gh || ${command_words[1]} == api ]]; then
+  if ((${#command_words[@]} < 2)) || [[ ${command_words[0]##*/} != gh ]]; then
     return 0
   fi
+  # Of the flags that take no value, gh's root command knows --help and --version, and each group knows only --help,
+  # as gh --help and gh <group> --help list them.
+  if ! move_gh_command_word 1 " --help --version " || [[ ${command_words[1]} == api ]]; then
+    return 0
+  fi
+  if ! move_gh_command_word 2 " --help " || ! is_nested_gh_group; then
+    return 0
+  fi
+  move_gh_command_word 3 " --help " || return 0
+}
+
+# Succeeds if the subcommand of the gh command's group is a nested group, with subcommands of its own, as in gh 2.102.
+is_nested_gh_group() {
+  case "${command_words[1]} ${command_words[2]}" in
+    "codespace ports" | "repo autolink" | "repo deploy-key" | "repo gitignore" | "repo license") return 0 ;;
+  esac
+  return 1
+}
+
+# Finds the next command word of a gh command, such as the group or a subcommand, from an index of command_words on,
+# and moves it to that index, with the words that it skipped after it. Fails when gh finds none:
+# move_gh_command_word <index> <the flags that the command before it knows to take no value>
+# gh finds each command word as its command library, cobra, does. It skips each word that starts with a dash. When that
+# word is a single short flag or a long flag without =, other than a flag that the command before it knows to take no
+# value, it also skips the next word, as in -R jtmpl/other or --title Title, because it doesn't know yet whether the
+# flag takes a value. It skips an empty word too, and finds no command word after --. gh looks for each command word
+# in all the words after the command words that it found, so it reads the words that it skipped again, with the flags
+# of the command that it found last.
+move_gh_command_word() {
+  local first=$1 flags_without_value=$2 index=$1 word
   while ((index < ${#command_words[@]})); do
-    case ${command_words[index]} in
-      --) return 0 ;;
-      --help | -*=*) index=$((index + 1)) ;;
-      -? | --*) index=$((index + 2)) ;;
+    word=${command_words[index]}
+    case $word in
+      --) return 1 ;;
+      -*=*) index=$((index + 1)) ;;
+      -? | --*)
+        index=$((index + 1))
+        if [[ $flags_without_value != *" $word "* ]]; then
+          index=$((index + 1))
+        fi
+        ;;
       "" | -*) index=$((index + 1)) ;;
       *) break ;;
     esac
   done
-  # The words stay as written when the subcommand comes first, or when gh finds none.
-  if ((index == 2 || index >= ${#command_words[@]})); then
-    return 0
+  if ((index >= ${#command_words[@]})); then
+    return 1
   fi
-  command_words=("${command_words[@]:0:2}" "${command_words[index]}"
-    "${command_words[@]:2:index-2}" "${command_words[@]:index+1}")
-  command_word_may_expand=("${command_word_may_expand[@]:0:2}" "${command_word_may_expand[index]}"
-    "${command_word_may_expand[@]:2:index-2}" "${command_word_may_expand[@]:index+1}")
+  command_words=("${command_words[@]:0:first}" "${command_words[index]}"
+    "${command_words[@]:first:index-first}" "${command_words[@]:index+1}")
+  command_word_may_expand=("${command_word_may_expand[@]:0:first}" "${command_word_may_expand[index]}"
+    "${command_word_may_expand[@]:first:index-first}" "${command_word_may_expand[@]:index+1}")
 }
 
 # The flags of gh api that take a value, as gh api --help lists them.
