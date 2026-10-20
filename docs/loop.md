@@ -277,12 +277,11 @@ issue where it wrote one, send the maintainer a push notification with the issue
 
 ## Start a retrospective
 
-When the meter's `machine` line says `retrospective due`, start an `auditor` agent, unless one runs or its pull
-request is still open. Start it on the account that `scripts/loop/meter --start-on auditor` prints, and start none
-while it prints `no account`. On your own account, start it in your session. On another account, open an
-issue for the retrospective, and write a message to a file in a folder of your own in `.loop/`, which says that the
-auditor runs the retrospective of that issue as its agent file describes, rather than building the issue, and opens
-no other issue for the retrospective. Then run
+When the meter's `machine` line says `retrospective due`, start an `auditor` agent, unless one runs or its pull request
+is still open. Start it on the account that `scripts/loop/meter --start-on auditor` prints. On your own account, start
+it in your session. On another account, open an issue for the retrospective. Then write a message to a file in a
+folder of your own in `.loop/`. Say in it that the auditor runs the retrospective of that issue as its agent file
+describes, rather than building the issue, and that it opens no other issue for the retrospective. Then run
 `scripts/loop/run-builder <issue> other --tool claude --type auditor --account <name> --message <file>` as a background
 task.
 
