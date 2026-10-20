@@ -138,11 +138,19 @@ expect_check "gh pr create --dry-run --title 'feat: skip imported expenses' --bo
 expect_check "gh issue create --title 'Skip imported expenses' --body-file body.md --help" 0 ""
 expect_check "gh issue comment 7 --body-file body.md" 0 ""
 
+# A reader has nothing to say about a body of nothing but white space.
+printf ' \n \n' >blank.md
+expect_check "gh pr edit 3 --body \"\"" 0 ""
+expect_check "gh issue create --title 'Skip imported expenses' --body-file blank.md" 0 ""
+
 # Without claude, scripts/fresh-reader can't run.
 path_with_claude=$PATH
 PATH=$no_claude
 expect_check "gh issue create --title 'Skip imported expenses' --body-file body.md" 0 ""
 PATH=$path_with_claude
+
+# After a cd to a folder that the check can't tell, it allows the command, though no reader has read body.md.
+expect_check "cd \"\$dir\" && gh issue create --title 'Skip imported expenses' --body-file body.md" 0 ""
 
 # Each repository has a record of its own, and a cd before gh changes the folder that the body file's path starts from
 # and the repository whose record counts. Outside a git repository, scripts/fresh-reader records nothing.

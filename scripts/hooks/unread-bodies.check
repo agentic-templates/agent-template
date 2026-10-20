@@ -13,6 +13,7 @@
 # - outside a git repository, where scripts/fresh-reader records nothing
 # - after a cd to a folder that it can't tell
 # - when the command gives no body, does a dry run of gh pr create, or shows its help
+# - when the body is nothing but white space, which a reader has nothing to say about
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 # shellcheck source=scripts/hooks/pages-read.bash
@@ -61,6 +62,9 @@ check_body() {
     return 0
   fi
   read_body "whether a fresh reader has read the body"
+  if [[ -z ${body//[[:space:]]/} ]]; then
+    return 0
+  fi
   if [[ -f $record ]] && grep -qxF -- "$(body_hash "$body")" "$record"; then
     return 0
   fi
