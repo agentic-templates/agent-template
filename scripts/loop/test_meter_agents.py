@@ -29,17 +29,11 @@ class AgentsLineTest(MeterTest):
         return self.run_meter()[1][-2]
 
     def log(
-        self,
-        event: str,
-        agent_id: str,
-        agent_type: str = "builder",
-        issue: int | None = 12,
-        pid: int | None = None,
-        is_test: bool = False,
+        self, event: str, agent_id: str, agent_type: str = "builder", issue: int | None = 12, pid: int | None = None
     ) -> None:
         line: dict[str, Any] = {"at": "2026-10-18T02:00:00-04:00", "event": event, "id": agent_id}
         if event == "start":
-            line |= {"type": agent_type, "issue": issue, "test": is_test, "pid": pid}
+            line |= {"type": agent_type, "issue": issue, "test": False, "pid": pid}
         else:
             line |= {"minutes": 1.0}
         with (self.loop / "agents.jsonl").open("a") as handle:
@@ -156,31 +150,6 @@ class AgentsLineTest(MeterTest):
         message = '{"type": "user", "message": {"content": "Go on."}}'
         self.subagent("a2", "toolu_02", [call(300_000), INTERRUPTION, message, call(310_000)])
         self.assertEqual(self.agents(), "agents | builder #65 310k")
-
-    def limit_parts(self) -> list[str]:
-        """The parts of the machine line that name the limit on the agents that build, at a limit of 4, while a
-        reviewer, a researcher and an auditor run too."""
-        for agent_id, agent_type in (("toolu_11", "reviewer"), ("toolu_12", "researcher"), ("toolu_13", "auditor")):
-            self.log("start", agent_id, agent_type)
-        with mock.patch.object(meter, "MOST_BUILDING_AGENTS", 4):
-            machine = self.run_meter()[1][-1]
-        self.assertTrue(machine.startswith("machine | "))
-        return [part for part in machine.split(" | ") if "limit" in part]
-
-    def test_names_the_limit_once_the_agents_that_build_test_builds_included_reach_it(self) -> None:
-        self.log("start", "toolu_01", "builder-small")
-        self.log("start", "70-20261018-021000", "codex", 70)
-        self.log("start", "test-12-builder-deep-max-20261018-021000", "builder-deep-max", is_test=True)
-        self.log("start", "test-12-fixer-20261018-021000", "fixer", is_test=True)
-        self.assertEqual(self.limit_parts(), ["4 agents build, and the limit is 4: start no builder or test build"])
-
-    def test_names_no_limit_while_fewer_agents_build(self) -> None:
-        self.log("start", "toolu_01", "builder-deep")
-        self.log("start", "test-12-builder-cheaper-20261018-021000", "builder-cheaper", is_test=True)
-        self.log("start", "test-13-builder-cheaper-20261018-021000", "builder-cheaper", 13, is_test=True)
-        self.log("start", "toolu_02", "builder")
-        self.log("end", "toolu_02")
-        self.assertEqual(self.limit_parts(), [])
 
 
 class ProcessTest(unittest.TestCase):

@@ -414,7 +414,7 @@ def command_of(entry: dict[str, Any]) -> room.Command:
         arrived=entry["arrived"],
         need=need_in(entry),
         started=entry["started"],
-        using=use_of(entry["using"]),
+        using=using_in(entry),
         # The copy of this script in a worktree of an older branch puts its commands in line without this field.
         is_retrospective=entry.get("is_retrospective", False),
     )
@@ -422,6 +422,12 @@ def command_of(entry: dict[str, Any]) -> room.Command:
 
 def need_in(entry: dict[str, Any]) -> room.Use | None:
     return None if entry["need"] is None else use_of(entry["need"])
+
+
+def using_in(entry: dict[str, Any]) -> room.Use:
+    """What a command in line uses. Another version of this script, such as on another branch, can leave it empty for
+    a command that waits, which uses nothing."""
+    return room.NOTHING if entry["using"] is None else use_of(entry["using"])
 
 
 def use_of(numbers: dict[str, Any]) -> room.Use:

@@ -4,11 +4,12 @@
 # threshold, because each call reads the whole context again, so a long context costs more on every step, and the agent
 # works worse.
 # The orchestrator is the session that the session: line of the state file names. Once its context passes
-# compact_tokens, it asks for a compaction, as "Compact your context" in docs/loop.md describes. It gets the note once
-# each time its context passes the threshold: the hook creates .loop/told-to-compact when it gives the note, and deletes
-# the file once the context is below the threshold again, as after a compaction. Until the note, the hook refuses the
-# orchestrator's request for a compaction: it deletes the request while the context is at or below compact_tokens,
-# because the note comes at the first tool call past that size.
+# compact_tokens, it asks for a /clear, as "Clear your context" in docs/loop.md describes. It gets the note once each
+# time its context passes the threshold: the hook creates .loop/told-to-compact when it gives the note, and deletes the
+# file once the context is below the threshold again, as after a /clear or a compaction. After a /clear, that's once
+# the orchestrator wrote its new session id in the state file. Until the note, the hook refuses the orchestrator's
+# request for a /clear: it deletes the request while the context is at or below compact_tokens, because the note comes
+# at the first tool call past that size.
 # A builder, an auditor, a reviewer or a researcher hands off its work. These are the subagents of those types that the
 # orchestrator's session starts itself, and the agents that scripts/loop/run-builder starts, which have their type in
 # LOOP_HAND_OFF and the name of their run's folder in LOOP_RUN. Each type gets the steps of its own hand-off. Other
@@ -33,6 +34,8 @@
 compact_tokens=300000
 soon_tokens=400000
 now_tokens=500000
+# The message that the orchestrator asks to get after its /clear
+resume="Resume the loop from .loop/state.md."
 # The latest reply is near the end of the transcript, followed only by the results of its tool calls.
 transcript_tail_bytes=400000
 
@@ -92,18 +95,18 @@ tell() {
   jq -n --arg message "$1" '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $message}}'
 }
 
-# Deletes the orchestrator's request for a compaction, and prints why: refuse_request <request> <context size>
+# Deletes the orchestrator's request for a /clear, and prints why: refuse_request <request> <context size>
 refuse_request() {
-  local why="because your context is $(($2 / 1000))k tokens. Go on with the loop, and ask for a compaction only after the hook tells you that your context has passed $((compact_tokens / 1000))k tokens."
+  local why="because your context is $(($2 / 1000))k tokens. Go on with the loop, and ask for a /clear only after the hook tells you that your context has passed $((compact_tokens / 1000))k tokens."
   if rm -f "$1" 2>/dev/null; then
-    echo "scripts/hooks/hand-off deleted your request for a compaction, $1, $why"
+    echo "scripts/hooks/hand-off deleted your request for a /clear, $1, $why"
   else
-    echo "scripts/hooks/hand-off refuses your request for a compaction, $1, $why It couldn't delete the file, so delete it."
+    echo "scripts/hooks/hand-off refuses your request for a /clear, $1, $why It couldn't delete the file, so delete it."
   fi
 }
 
-# Tells the orchestrator to ask for a compaction, once each time its context passes compact_tokens, and refuses a
-# request for one before then.
+# Tells the orchestrator to ask for a /clear, once each time its context passes compact_tokens, and refuses a request
+# for one before then.
 tell_orchestrator() {
   local loop size told request message=""
   loop=$(find_loop_folder) || return 0
@@ -131,7 +134,7 @@ tell_orchestrator() {
   if ! claim_note "$told"; then
     return 0
   fi
-  message="Your context has passed $((compact_tokens / 1000))k tokens. If the maintainer installed a compaction sender, ask for a compaction, as \"Compact your context\" in docs/loop.md describes: finish the step you're on, and bring your state file up to date. Then write $request with $session_id on its first line and \"Resume from .loop/state.md.\" on its second, and end your turn. Without a sender, ask the maintainer to type /compact, and go on with the loop."
+  message="Your context has passed $((compact_tokens / 1000))k tokens. Ask for a /clear, as \"Clear your context\" in docs/loop.md describes: finish the step you're on, and write in your state file what only this conversation holds. If the maintainer installed a /clear sender, write $request with $session_id on its first line and \"$resume\" on its second, and end your turn. Without a sender, ask the maintainer to type /clear and then \"$resume\", and go on with the loop."
   if [[ -n $unwritten ]]; then
     message+=" scripts/hooks/hand-off couldn't write${unwritten}, so it may give this note again."
   fi
