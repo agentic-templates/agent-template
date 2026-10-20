@@ -4,7 +4,7 @@ import unittest
 from typing import Any
 
 import waste
-from test_meter import MeterTest, github_answer
+from test_meter import NOW, MeterTest, github_answer, usage_output
 from test_meter_retrospective import new_york
 
 
@@ -61,12 +61,17 @@ def check_runs(before: list[float], since: list[float]) -> list[dict[str, Any]]:
 class AuditTest(MeterTest):
     """The meter reads at 03:08 in New York, and the last retrospective merged at 1:00."""
 
-    def audits(self, agents: list[list[str]], heavy_lines: list[dict[str, Any]] | None = None) -> list[str]:
-        """The parts of the machine line that name a finding for an audit."""
+    def write_logs(self, agents: list[list[str]], heavy_lines: list[dict[str, Any]] | None = None) -> None:
         lines = [line for lines in agents for line in lines]
         (self.loop / "agents.jsonl").write_text("".join(f"{line}\n" for line in lines))
         (self.loop / "heavy.jsonl").write_text("".join(json.dumps(line) + "\n" for line in heavy_lines or []))
-        machine_line = self.run_meter()[1][-1]
+
+    def audits(
+        self, agents: list[list[str]], heavy_lines: list[dict[str, Any]] | None = None, *arguments: str
+    ) -> list[str]:
+        """The parts of the machine line that name a finding for an audit."""
+        self.write_logs(agents, heavy_lines)
+        machine_line = self.run_meter(*arguments)[1][-1]
         self.assertTrue(machine_line.startswith("machine | "))
         return [part for part in machine_line.split(" | ") if part.startswith("audit due")]
 
@@ -138,8 +143,8 @@ class LongWaitTest(AuditTest):
         cases = {
             601: [
                 (
-                    "audit due: builders waited 10.0 min in run-heavy's line per hour of builder work in the last "
-                    "hour, more than 10"
+                    "audit due: heavy commands waited 10.0 min in run-heavy's line per hour of builder work in the "
+                    "last hour, more than 10"
                 )
             ],
             600: [],
@@ -212,6 +217,51 @@ class SlowerCheckTest(AuditTest):
     def test_names_nothing_before_the_first_retrospective(self) -> None:
         self.answer("gh", github_answer(merges=()))
         self.assertEqual(self.audits([], check_runs([60, 61, 62, 63, 64], [80, 81, 82, 83, 84])), [])
+
+
+class WakeTest(AuditTest):
+    """While the account's advice is go, meter --wake reads every 30 minutes. The advice turns to watch at the fifth
+    reading of the account, so a wake that misses a finding ends then."""
+
+    LONG_BUILD = (
+        "audit due: builder #208 took 100 min, more than 4 times the median of 10 min of its type's earlier builds"
+    )
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.answer("claude", [*[usage_output(8)] * 4, usage_output(8, week=85)])
+
+    def test_wakes_at_the_reading_with_a_finding_that_the_meter_had_not_printed(self) -> None:
+        self.write_logs(earlier_builds(10))
+        later = [*earlier_builds(10), build("long", "03:20:00", 100, issue=208)]
+        self.clock.alarms.append((NOW + dt.timedelta(minutes=10), lambda: self.write_logs(later)))
+        self.assertEqual(self.run_meter("--wake")[1][-1].split(" | ")[-1], self.LONG_BUILD)
+        self.assertEqual(self.clock.time - NOW, dt.timedelta(minutes=30))
+
+    def test_wakes_at_once_for_a_finding_from_before_it_started(self) -> None:
+        agents = [*earlier_builds(10), build("long", "03:00:00", 100, issue=208)]
+        self.assertEqual(self.audits(agents, None, "--wake"), [self.LONG_BUILD])
+        self.assertEqual(self.clock.time, NOW)
+
+    def test_wakes_for_the_other_findings_when_github_does_not_say_when_the_last_retrospective_merged(self) -> None:
+        self.answer("gh", {"status": 1, "stderr": "HTTP 401: Bad credentials\n"})
+        agents = [*earlier_builds(10), build("long", "03:00:00", 100, issue=208)]
+        slower = check_runs([60, 61, 62, 63, 64], [80, 81, 82, 83, 84])
+        self.assertEqual(self.audits(agents, slower, "--wake"), [self.LONG_BUILD])
+        self.assertEqual(self.clock.time, NOW)
+
+    def test_does_not_wake_for_a_finding_that_the_meter_printed_last_time(self) -> None:
+        agents = [*earlier_builds(10), build("long", "03:00:00", 100, issue=208)]
+        self.assertEqual(self.audits(agents), [self.LONG_BUILD])
+        self.assertEqual(self.audits(agents, None, "--wake"), [])
+        self.assertEqual(self.clock.time - NOW, dt.timedelta(minutes=90))
+
+    def test_does_not_wake_again_while_the_numbers_of_a_finding_change(self) -> None:
+        waits = [heavy("start", "03:00:00", waited_seconds=900)]
+        self.assertEqual(len(self.audits([build("a", "03:08:00", 60)], waits)), 1)
+        self.write_logs([build("a", "03:08:00", 60)], [*waits, heavy("start", "03:05:00", waited_seconds=300)])
+        self.run_meter("--wake")
+        self.assertEqual(self.clock.time - NOW, dt.timedelta(minutes=90))
 
 
 class PValueTest(unittest.TestCase):

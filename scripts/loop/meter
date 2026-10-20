@@ -34,12 +34,14 @@ until the last line of its transcript. The test builds and the auditors don't co
 
 The last line ends with a part that starts with "audit due:" for each sign of clear waste, so that the orchestrator
 starts a focused audit of it. scripts/loop/waste.py gives the thresholds of the three signs: a build of a builder type
-that took far longer than the median of its type, builders that waited long in scripts/loop/run-heavy's line over the
-last hour, and passing runs of scripts/check that grew slower since the last retrospective.
+that took far longer than the median of its type, heavy commands that waited long in scripts/loop/run-heavy's line over
+the last hour, and passing runs of scripts/check that grew slower since the last retrospective. The meter writes the
+subjects of the signs that it printed to .loop/printed-findings.json.
 
 With --wake, the meter keeps reading, and prints and ends when an account's advice changes, when an account gives no
-reading, when scripts/hooks/hand-off tells an agent to hand off its work, and 50 minutes after it started while an
-account's advice is stop. Run it in the background, so that its end wakes the orchestrator.
+reading, when a reading has a sign of waste whose subject the meter didn't print last time, when scripts/hooks/hand-off
+tells an agent to hand off its work, and 50 minutes after it started while an account's advice is stop. Run it in the
+background, so that its end wakes the orchestrator.
 
 .loop/accounts.json in the main checkout lists the accounts, each with the environment variables that select it:
 
@@ -62,6 +64,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -113,6 +116,9 @@ OUTPUT_TOKENS_PER_RETROSPECTIVE: int | None = None
 HOURS_PER_RETROSPECTIVE = 30.0
 # A retrospective doesn't look back on the work of an earlier one.
 AUDITOR = "auditor"
+# The subjects of the findings of scripts/loop/waste.py that the meter printed last, so that meter --wake wakes only
+# for a new one
+PRINTED_FINDINGS = "printed-findings.json"
 
 
 class Advice(NamedTuple):
@@ -160,8 +166,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     log = loop_folder / "meter.jsonl"
     hand_offs = loop_folder / FOLDER_NAME
-    readings = wait_for_wake(accounts, log, hand_offs) if options.wake else read_accounts(accounts, log)
     checkout = paths.main_checkout()
+    printed = loop_folder / PRINTED_FINDINGS
+    if options.wake:
+        readings = wait_for_wake(accounts, log, hand_offs, lambda: has_new_finding(loop_folder, checkout, printed))
+    else:
+        readings = read_accounts(accounts, log)
     agents = agents_line(running_agents(loop_folder, checkout), hand_off_thresholds(note_files(hand_offs)))
     runs = agent_log.read_runs(loop_folder / "agents.jsonl")
     transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
@@ -172,12 +182,14 @@ def main(argv: list[str] | None = None) -> int:
         retrospective = f"retrospective unknown: {error}"
     else:
         retrospective = retrospective_note(last, runs, transcripts, loop_folder)
+    findings = waste_findings(runs, transcripts, loop_folder, last)
     machine = machine_line(
         readings.machine,
         context=orchestrator_context(loop_folder / "state.md", checkout),
         retrospective=retrospective,
-        findings=waste_findings(runs, transcripts, loop_folder, last),
+        findings=[finding.text for finding in findings],
     )
+    printed.write_text(json.dumps([finding.subject for finding in findings]) + "\n")
     print("\n".join([*readings.lines, agents, machine]))
     return 0 if readings.has_every_account else 1
 
@@ -192,14 +204,15 @@ def now() -> dt.datetime:
     return dt.datetime.now().astimezone()
 
 
-def wait_for_wake(accounts: list[Account], log: Path, hand_offs: Path) -> Readings:
-    """Reads until an account's advice differs from its advice at the first reading, until scripts/hooks/hand-off
-    writes a new note in the folder hand_offs, or until the orchestrator needs a wake while it waits for a reset."""
+def wait_for_wake(accounts: list[Account], log: Path, hand_offs: Path, has_new_finding: Callable[[], bool]) -> Readings:
+    """Reads until an account's advice differs from its advice at the first reading, until a reading has a new finding
+    of waste, until scripts/hooks/hand-off writes a new note in the folder hand_offs, or until the orchestrator needs a
+    wake while it waits for a reset."""
     started = now()
     notes_at_start = note_files(hand_offs)
     first = read_accounts(accounts, log)
     readings = first
-    while readings.has_every_account:
+    while readings.has_every_account and not has_new_finding():
         wait = readings.wait_seconds
         if is_waiting_for_reset(readings):
             wait = min(wait, max(0, math.ceil((started + WAKE_EVERY - now()).total_seconds())))
@@ -627,9 +640,22 @@ def retrospective_note(
     return hours_note(last, minutes / 60)
 
 
+def has_new_finding(loop_folder: Path, checkout: Path, printed: Path) -> bool:
+    """Whether the logs give a finding of waste whose subject isn't in the file printed. When GitHub doesn't say when
+    the last retrospective merged, the time of scripts/check has nothing to compare with."""
+    try:
+        last = max(retrospective_merges(checkout), default=None)
+    except GitHubError:
+        last = None
+    runs = agent_log.read_runs(loop_folder / "agents.jsonl")
+    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
+    subjects = {finding.subject for finding in waste_findings(runs, transcripts, loop_folder, last)}
+    return bool(subjects - set(json.loads(printed.read_text()) if printed.exists() else []))
+
+
 def waste_findings(
     runs: list[agent_log.AgentRun], transcripts: dict[str, Path], loop_folder: Path, last: dt.datetime | None
-) -> list[str]:
+) -> list[waste.Finding]:
     """The findings of scripts/loop/waste.py. Without a last retrospective, the time of scripts/check has nothing to
     compare with."""
     reading_time = now()

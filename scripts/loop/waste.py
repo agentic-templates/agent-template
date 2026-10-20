@@ -7,7 +7,7 @@ import itertools
 import math
 import shlex
 import statistics
-from typing import Any
+from typing import Any, NamedTuple
 
 from agent_log import AgentRun
 
@@ -16,7 +16,8 @@ BUILDER_TYPES = frozenset(("builder", "builder-deep", "builder-small"))
 LONG_BUILD_TIMES = 4
 # The earlier builds of a type that ended, which its median needs
 EARLIER_BUILDS = 5
-# The meter reads the machine at least every 50 minutes, so each reading in this time names a finding at least once.
+# While an account isn't parked, scripts/loop/meter --wake reads at least every 50 minutes, and ends when a reading
+# has a finding that the meter hadn't printed. So the meter prints each finding of this time at least once.
 RECENT = dt.timedelta(hours=1)
 WAIT_MINUTES_PER_BUILDER_HOUR = 10.0
 CHECK = "scripts/check"
@@ -26,7 +27,13 @@ CHECK_GROWTH = 1.2
 CHECK_P_VALUE = 0.01
 
 
-def long_builds(runs: list[AgentRun], now: dt.datetime) -> list[str]:
+class Finding(NamedTuple):
+    # What the finding is about, which stays the same from one reading to the next while the numbers in text change
+    subject: str
+    text: str
+
+
+def long_builds(runs: list[AgentRun], now: dt.datetime) -> list[Finding]:
     """A finding for each build that ended in the last hour after more than 4 times the median minutes of the earlier
     builds of its type that ended, once there are 5 of them. A test build of a retrospective doesn't count."""
     builds = [
@@ -46,10 +53,11 @@ def long_builds(runs: list[AgentRun], now: dt.datetime) -> list[str]:
             continue
         median = statistics.median(earlier)
         if end["minutes"] > LONG_BUILD_TIMES * median:
-            findings.append(
+            text = (
                 f"{build_name(start)} took {end['minutes']:.0f} min, more than {LONG_BUILD_TIMES} times the median of "
                 f"{median:.0f} min of its type's earlier builds"
             )
+            findings.append(Finding(f"build {start['id']}", text))
     return findings
 
 
@@ -62,9 +70,10 @@ def build_name(start: dict[str, Any]) -> str:
     return f"{start['type']} #{issue}" if issue else start["type"]
 
 
-def long_waits(heavy_entries: list[dict[str, Any]], builder_minutes: float, now: dt.datetime) -> str | None:
-    """A finding when the waits in scripts/loop/run-heavy's line that ended came to more than 10 minutes per hour of
-    builder work over the last hour. A wait ends on a start line or a stop line of .loop/heavy.jsonl."""
+def long_waits(heavy_entries: list[dict[str, Any]], builder_minutes: float, now: dt.datetime) -> Finding | None:
+    """A finding when the waits of all heavy commands in scripts/loop/run-heavy's line that ended came to more than 10
+    minutes per hour of builder work over the last hour. A wait ends on a start line or a stop line of
+    .loop/heavy.jsonl, which doesn't say which agent waited."""
     if builder_minutes <= 0:
         return None
     since = now - RECENT
@@ -78,13 +87,14 @@ def long_waits(heavy_entries: list[dict[str, Any]], builder_minutes: float, now:
     per_hour = waited_seconds / 60 / (builder_minutes / 60)
     if per_hour <= WAIT_MINUTES_PER_BUILDER_HOUR:
         return None
-    return (
-        f"builders waited {per_hour:.1f} min in run-heavy's line per hour of builder work in the last hour, more than "
-        f"{WAIT_MINUTES_PER_BUILDER_HOUR:g}"
+    text = (
+        f"heavy commands waited {per_hour:.1f} min in run-heavy's line per hour of builder work in the last hour, more "
+        f"than {WAIT_MINUTES_PER_BUILDER_HOUR:g}"
     )
+    return Finding("waits", text)
 
 
-def slower_check(heavy_entries: list[dict[str, Any]], last_retrospective: dt.datetime | None) -> str | None:
+def slower_check(heavy_entries: list[dict[str, Any]], last_retrospective: dt.datetime | None) -> Finding | None:
     """A finding when the median time of scripts/check's passing runs since the last retrospective is at least 20%
     above its median before it, and a one-sided Mann-Whitney test gives p < 0.01."""
     if last_retrospective is None:
@@ -104,10 +114,11 @@ def slower_check(heavy_entries: list[dict[str, Any]], last_retrospective: dt.dat
     p_value = p_of_larger(since, before)
     if p_value >= CHECK_P_VALUE:
         return None
-    return (
+    text = (
         f"{CHECK}'s passing runs took a median of {median_since:.0f} s since the last retrospective, against "
         f"{median_before:.0f} s before it (p = {p_value:.1g})"
     )
+    return Finding("check", text)
 
 
 def p_of_larger(larger: list[float], smaller: list[float]) -> float:
