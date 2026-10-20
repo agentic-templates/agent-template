@@ -2,14 +2,18 @@
 # Creates a security advisory's temporary private fork, in which an agent builds the fix:
 # scripts/create-private-fork <GHSA ID>
 # Step 1 of "Fix a security vulnerability" in docs/releasing.md runs it. It prints the fork's full name.
+# It adds the fork as a git remote named after the GHSA ID in lowercase, such as ghsa-2c5x-3m4v-7q8r, so that the
+# orchestrator can push a fix to the fork, which the hooks block for a URL. It leaves a remote of that name unchanged.
 # GitHub copies each of the repository's branches into the fork, and step 1 of "Publish a release" would report a
 # copy as a waiting fix. GitHub makes the copies after it creates the fork, so the script waits until the fork has
 # main, and then deletes every other branch from it. It prints a line for each branch it deleted.
-# When the advisory has a private fork already, the script prints the fork's name and changes nothing, because the
-# fork's branches can hold a fix in progress.
-# It stops with an error, and exits with code 1, without admin access, when main doesn't appear in the fork in time,
-# when it can't delete a branch, and when gh fails. It asks gh about the repository of this checkout, or the one in
-# GH_REPO.
+# When the advisory has a private fork already, the script prints the fork's name, adds its remote, and changes
+# nothing in the fork, because the fork's branches can hold a fix in progress.
+# When git can't add the remote to a new fork, the script still deletes the copied branches, so that running it again
+# finishes the fork by adding the remote.
+# It stops with an error, and exits with code 1, without admin access, when git can't add the remote, when main
+# doesn't appear in the fork in time, when it can't delete a branch, and when gh fails. It asks gh about the repository
+# of this checkout, or the one in GH_REPO.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=scripts/admin-access
@@ -27,6 +31,20 @@ branch_filter='.[] | [.name, (.name | @uri | gsub("%2F"; "/"))] | @tsv'
 stop() {
   echo "error: $1" >&2
   exit 1
+}
+
+# Adds the fork as the remote fork_remote, unless a remote of that name exists, and fails with an error when git
+# can't add it: add_fork_remote
+add_fork_remote() {
+  local answer
+  if git remote get-url "$fork_remote" >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! answer=$(git remote add "$fork_remote" "https://github.com/$fork.git" 2>&1); then
+    echo "error: can't add the private fork $fork as the git remote $fork_remote, because git failed: $answer" >&2
+    echo "Once git can add it, run scripts/create-private-fork $ghsa_id again, which adds the remote." >&2
+    return 1
+  fi
 }
 
 # Lists the fork's branches in branches, and succeeds if main is one of them. GitHub creates the fork in the
@@ -56,6 +74,7 @@ if [[ ! $1 =~ ^GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$ ]]; then
   stop "scripts/create-private-fork takes the GHSA ID of a security advisory, such as GHSA-2c5x-3m4v-7q8r, and it got \"$1\"."
 fi
 ghsa_id=$1
+fork_remote=ghsa${ghsa_id#GHSA}
 
 if ! repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>&1); then
   stop "can't read the repository's name, because gh failed: $repo"
@@ -70,6 +89,7 @@ if ! fork=$(gh api "repos/$repo/security-advisories/$ghsa_id" --jq '.private_for
 fi
 if [[ -n $fork ]]; then
   printf '%s\n' "$fork"
+  add_fork_remote || exit 1
   exit 0
 fi
 
@@ -77,6 +97,8 @@ if ! fork=$(gh api --method POST "repos/$repo/security-advisories/$ghsa_id/forks
   stop "can't create a private fork for the security advisory $ghsa_id, because gh failed: $fork"
 fi
 printf '%s\n' "$fork"
+is_remote_added=true
+add_fork_remote || is_remote_added=false
 
 branches_page=https://github.com/$fork/branches
 copies="because they're copies of the branches of $repo, not fixes"
@@ -105,4 +127,7 @@ while IFS=$'\t' read -r name path; do
 done <<<"$branches"
 if [[ -n $failed_deletes ]]; then
   stop "can't delete these branches from the private fork $fork, because gh failed:"$'\n'"$failed_deletes""Delete them at $branches_page, $copies."
+fi
+if [[ $is_remote_added == false ]]; then
+  exit 1
 fi
