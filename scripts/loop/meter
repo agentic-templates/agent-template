@@ -74,10 +74,11 @@ that took far longer than the median of its type, heavy commands that waited lon
 the last hour, and passing runs of scripts/check that grew slower since the last retrospective. The meter writes the
 subjects of the signs that it printed to .loop/printed-findings.json.
 
-With --wake, the meter keeps reading, and prints and ends when an account's advice changes, when an account gives no
-reading, when a reading has a sign of waste whose subject the meter didn't print last time, when scripts/hooks/hand-off
-tells an agent to hand off its work, and 50 minutes after it started while an account's advice is stop. Run it in the
-background, so that its end wakes the orchestrator.
+With --wake, the meter keeps reading, and prints and ends when an account's advice changes, when an account loses the
+reading that it had at the start or gets back the one that it didn't have, when a reading has a sign of waste whose
+subject the meter didn't print last time, when scripts/hooks/hand-off tells an agent to hand off its work, and 50
+minutes after it started while an account's advice is stop. While an account has no reading, it reads at least every
+{retry} minutes. Run it in the background, so that its end wakes the orchestrator.
 
 .loop/accounts.json in the main checkout lists the accounts, each with the environment variables that select it:
 
@@ -142,6 +143,9 @@ CODEX_SNAPSHOT_AGE = dt.timedelta(days=8)
 TRANSCRIPT_TAIL_BYTES = 400_000
 # How often meter --wake looks for a new note of scripts/hooks/hand-off between two readings
 HAND_OFF_CHECK_SECONDS = 60
+# The longest that meter --wake waits between two readings while an account has no reading, so that it sees the
+# reading come back
+NO_READING_WAIT_SECONDS = 10 * 60
 # The most agents that build that the machine has room for. Each runs scripts/check, which waits in
 # scripts/loop/run-heavy while the machine has no room for it. A retrospective changes this from the "Machine" lines of
 # scripts/loop/report, which give the readings for each number of agents that worked.
@@ -246,8 +250,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def help_text() -> str:
-    """The docstring, with the numbers that the code keeps in place of {hours}, {period}, {gap}, {start} and
-    {building}, so that changing a number takes one edit. The docstring's JSON example has braces of its own, so
+    """The docstring, with the numbers that the code keeps in place of {hours}, {period}, {gap}, {start}, {building}
+    and {retry}, so that changing a number takes one edit. The docstring's JSON example has braces of its own, so
     str.format can't fill it in."""
     numbers = {
         "{hours}": f"{HOURS_PER_RETROSPECTIVE:g}",
@@ -255,6 +259,7 @@ def help_text() -> str:
         "{gap}": f"{LONGEST_READING_GAP.total_seconds() / 60:g}",
         "{start}": f"{OLDEST_START_READING.total_seconds() / 60:g}",
         "{building}": str(MOST_BUILDING_AGENTS),
+        "{retry}": f"{NO_READING_WAIT_SECONDS / 60:g}",
     }
     text = str(__doc__)
     for placeholder, number in numbers.items():
@@ -267,15 +272,17 @@ def now() -> dt.datetime:
 
 
 def wait_for_wake(accounts: list[Account], log: Path, hand_offs: Path, has_new_finding: Callable[[], bool]) -> Readings:
-    """Reads until an account's advice differs from its advice at the first reading, until a reading has a new finding
-    of waste, until scripts/hooks/hand-off writes a new note in the folder hand_offs, or until the orchestrator needs a
-    wake while it waits for a reset."""
+    """Reads until an account's advice differs from its advice at the first reading, which it does too when the account
+    loses or gets back its reading, until a reading has a new finding of waste, until scripts/hooks/hand-off writes a
+    new note in the folder hand_offs, or until the orchestrator needs a wake while it waits for a reset."""
     started = now()
     notes_at_start = note_files(hand_offs)
     first = read_accounts(accounts, log)
     readings = first
-    while readings.has_every_account and not has_new_finding():
+    while not has_new_finding():
         wait = readings.wait_seconds
+        if not readings.has_every_account:
+            wait = min(wait, NO_READING_WAIT_SECONDS)
         if is_waiting_for_reset(readings):
             wait = min(wait, max(0, math.ceil((started + WAKE_EVERY - now()).total_seconds())))
         if sleep_until_hand_off(wait, hand_offs, notes_at_start):
