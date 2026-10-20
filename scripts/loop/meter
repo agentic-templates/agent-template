@@ -32,6 +32,12 @@ agents have worked {hours} hours since the last retrospective instead. The hours
 last end line in .loop/agents.jsonl, which scripts/loop/agent_log.py describes. An agent without an end line counts
 until the last line of its transcript. The test builds and the auditors don't count.
 
+A retrospective is due too when one of Claude Code's aliases opus, sonnet, haiku and fable names a model ID that
+.claude/tested-models.json doesn't list. At most once a day, the meter sends one short request for each alias, on the
+first Claude account, and reads the IDs from the result. It keeps them in .loop/models.json. The last line has a part
+that starts with "retrospective due:" for each such ID, and one that starts with "model of" for each alias whose
+request failed.
+
 The last line ends with a part that starts with "audit due:" for each sign of clear waste, so that the orchestrator
 starts a focused audit of it. scripts/loop/waste.py gives the thresholds of the three signs: a build of a builder type
 that took far longer than the median of its type, heavy commands that waited long in scripts/loop/run-heavy's line over
@@ -70,10 +76,11 @@ from typing import Any, NamedTuple
 
 import agent_log
 import heavy_log
+import models
 import paths
 import request_events
 import waste
-from accounts import Account, AccountsError, claude_environment, load_accounts
+from accounts import SIGNED_IN, Account, AccountsError, claude_environment, load_accounts
 from github import GitHubError, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, note_files
 from machine import Machine, read_machine
@@ -182,11 +189,13 @@ def main(argv: list[str] | None = None) -> int:
         retrospective = f"retrospective unknown: {error}"
     else:
         retrospective = retrospective_note(last, runs, transcripts, loop_folder)
+    model_account = next((account for account in accounts if account["tool"] == "claude"), SIGNED_IN)
+    model_notes = models.notes(models.current(loop_folder, model_account, now()), models.tested())
     findings = waste_findings(runs, transcripts, loop_folder, last)
     machine = machine_line(
         readings.machine,
         context=orchestrator_context(loop_folder / "state.md", checkout),
-        retrospective=retrospective,
+        retrospective=" | ".join([retrospective, *model_notes]),
         findings=[finding.text for finding in findings],
     )
     printed.write_text(json.dumps([finding.subject for finding in findings]) + "\n")

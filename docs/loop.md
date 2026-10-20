@@ -236,7 +236,13 @@ issue where it wrote one, send the maintainer a push notification with the issue
 ## Start a retrospective
 
 When the meter's `machine` line says `retrospective due`, start an `auditor` agent, unless one runs or its pull
-request is still open.
+request is still open. When the part that says it names a model, as in `retrospective due: fable names
+claude-fable-5-2, which no retrospective tested`, name that model in the auditor's prompt.
+
+A retrospective for a new model tests it on the orchestrator, on `builder-deep`, on the auditor, and on each other
+type whose last test chose the highest effort. Its pull request adds the model to `.claude/tested-models.json`, with
+the pull request's number, whatever the tests choose. That file lists each model that a retrospective tested or that
+the maintainer chose not to test, and the meter names each model that it doesn't list.
 
 Each agent file in `.claude/agents` names the full ID of its model, such as `claude-opus-5-5`, and not an alias such
 as `opus`, so that its type keeps its model when Anthropic points the alias at a newer one. A retrospective that tests
