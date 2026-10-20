@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any
 
 import agent_log
+import paths
+from accounts import AccountsError, load_accounts, own_account
 
 # The type that Claude Code gives an Agent call without a subagent_type
 DEFAULT_TYPE = "general-purpose"
@@ -57,8 +59,27 @@ def start_line(hook_input: dict[str, Any]) -> dict[str, Any]:
     issue, kind = agent_log.prompt_subject(call.get("prompt", ""))
     label = agent_log.type_label(issue_labels(issue)) if issue else None
     return agent_log.start_line(
-        hook_input["tool_use_id"], agent_type, settings, issue, label, kind, is_test=False, pid=claude_process()
+        hook_input["tool_use_id"],
+        agent_type,
+        settings,
+        issue,
+        label,
+        kind,
+        is_test=False,
+        pid=claude_process(),
+        account=session_account(),
     )
+
+
+def session_account() -> str | None:
+    """The name of the session's own account, or None. An accounts file that can't be read leaves the line without an
+    account, because scripts/loop/meter reports the problem, and the agent's start line counts more than its account."""
+    try:
+        accounts = load_accounts(paths.loop_dir() / "accounts.json")
+    except AccountsError:
+        return None
+    account = own_account(accounts, os.environ)
+    return account["name"] if account else None
 
 
 def claude_process() -> int | None:
