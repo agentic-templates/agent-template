@@ -157,6 +157,21 @@ if [[ $status != 1 || $message != "$expected" ]]; then
   echo "error: a test file whose hook doesn't return in a case must exit with code 1 and the message \"$expected\", but it exited with code $status and the message \"$message\"." >&2
   failed_cases=$((failed_cases + 1))
 fi
+
+# A test file stops a run_check that runs for more than the time limit, even in $( ), where the stop kills all of
+# run_check. The next case passes, and finish_tests fails the test file.
+# shellcheck disable=SC2016 # The lines are the test's code, so their $ stays as written.
+printf '%s\n' "source '$hooks_folder/testing.bash'" \
+  'output=$(run_check hangs "$(sample_input claude-code Bash "echo hang")") || true' 'expect_allow Bash ls' \
+  finish_tests >"$copies/check-hangs.test"
+case_count=$((case_count + 1))
+status=0
+message=$(HOOK_TESTS_WAKE_SECONDS=2 bash "$copies/check-hangs.test" 2>&1) || status=$?
+expected="error: a hook in $copies/check-hangs.test ran for more than 2 seconds, so the test stopped it."
+if [[ $status != 1 || $message != "$expected" ]]; then
+  echo "error: a test file whose run_check doesn't return must exit with code 1 and the message \"$expected\", but it exited with code $status and the message \"$message\"." >&2
+  failed_cases=$((failed_cases + 1))
+fi
 rm "$hooks_folder/hangs.check"
 
 # finish_tests fails a test that defines a function of helpers.bash again, because the hook would call the test's.

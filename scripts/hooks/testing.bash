@@ -66,10 +66,12 @@ if [[ ! $hook_wake_seconds =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 # run_hook and run_check write running to hook_state_file before the hook runs, and returned after it. watch_hooks
-# creates stopped_hook_file when it stops a hook.
+# creates stopped_hook_file when it stops a hook. A stop that no case reported before the next hook starts moves to
+# unreported_stop_file.
 hook_watch_folder=$(mktemp -d)
 hook_state_file=$hook_watch_folder/hook-state
 stopped_hook_file=$hook_watch_folder/stopped-hook
+unreported_stop_file=$hook_watch_folder/unreported-stop
 printf 'returned\n' >"$hook_state_file"
 
 # Stops a process, the processes that it started, and theirs: stop_process_tree <process id>
@@ -98,6 +100,8 @@ watch_hooks() {
     read -r hook_state <"$hook_state_file" || true
     if [[ $hook_state == running && ! $hook_state_file -nt $round_start ]]; then
       : >"$stopped_hook_file"
+      # The stop can kill the code that would write returned, such as all of a run_check in $( ).
+      printf 'returned\n' >"$hook_state_file"
       for child in $(pgrep -P "$test_process"); do
         stop_process_tree "$child"
       done
@@ -224,12 +228,22 @@ become_hook_shell() {
   unset lowercase_names MARKER
 }
 
+# Tells watch_hooks that a hook starts. A stop of an earlier hook that no case reported, such as of a run_check whose
+# test checks the result itself, moves to unreported_stop_file, so that expect_result doesn't blame this hook for it,
+# and finish_tests reports it.
+start_watched_hook() {
+  if [[ -e $stopped_hook_file ]]; then
+    mv "$stopped_hook_file" "$unreported_stop_file"
+  fi
+  printf 'running\n' >"$hook_state_file"
+}
+
 # Runs one check on an input, with the variables that scripts/hooks/before-tool sets for the checks, and prints what
 # the check prints:
 # run_check <check, such as posted-text> <input>
 run_check() {
   local fields status=0
-  printf 'running\n' >"$hook_state_file"
+  start_watched_hook
   fields=$(jq -r -f "$hooks_folder/input.jq" <<<"$2")
   (
     eval "$fields"
@@ -247,7 +261,7 @@ run_check() {
 # Runs the hook on an input, and sets hook_status and hook_message: run_hook <input>
 run_hook() {
   hook_status=0
-  printf 'running\n' >"$hook_state_file"
+  start_watched_hook
   hook_message=$(
     export HOME=$test_home
     become_hook_shell
@@ -374,7 +388,7 @@ expect_before_and_after_subcommand() {
 
 finish_tests() {
   local is_hook_stopped=""
-  if [[ -e $stopped_hook_file ]]; then
+  if [[ -e $stopped_hook_file || -e $unreported_stop_file ]]; then
     is_hook_stopped=yes
   fi
   kill "$hook_watcher" 2>/dev/null || true
