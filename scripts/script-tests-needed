@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
-# Succeeds if a change needs the tests of the scripts and hooks, and fails with code 1 if it doesn't. It reads the paths
-# of the changed files from standard input, one to a line: scripts/script-tests-needed
+# Succeeds if a change needs the tests of the scripts and hooks, and fails with code 1 if it doesn't. It reads the
+# changed files from standard input, as the JSON objects that GitHub's API gives for them, one after another:
+# scripts/script-tests-needed
 # The tests test the files in scripts/, .github/, .claude/ and .codex/, so a change to other files, such as the docs,
-# doesn't need them. The changes job in .github/workflows/ci.yml runs it.
+# doesn't need them. Nor does a change to the text after the frontmatter of an agent file in .claude/agents/, because
+# the tests read only its frontmatter. The script finds where the frontmatter ends in the agent files of the current
+# folder, so the folder must hold them as the change leaves them. A change to an agent file needs the tests unless
+# GitHub gives the file the status modified and its patch, because a file that the change adds, renames or copies into
+# .claude/agents/ is a new agent file.
+# The changes job in .github/workflows/ci.yml runs the script.
 set -euo pipefail
 
 if (($# > 0)); then
@@ -10,10 +16,48 @@ if (($# > 0)); then
   exit 2
 fi
 
-paths=$(cat)
-while IFS= read -r path; do
-  case $path in
-    scripts/* | .github/* | .claude/* | .codex/*) exit 0 ;;
-  esac
-done <<<"$paths"
-exit 1
+# The number of the line that ends the frontmatter of each agent file in the current folder that has frontmatter, by
+# its path.
+frontmatter_ends='{}'
+for agent_file in .claude/agents/*.md; do
+  if [[ -f $agent_file ]]; then
+    end=$(awk 'NR == 1 && $0 != "---" { exit } NR > 1 && $0 == "---" { print NR; exit }' "$agent_file")
+    if [[ -n $end ]]; then
+      frontmatter_ends=$(jq --arg path "$agent_file" --argjson end "$end" '.[$path] = $end' <<<"$frontmatter_ends")
+    fi
+  fi
+done
+
+needs_tests=$(jq -n --argjson frontmatter_ends "$frontmatter_ends" '
+  # The number of the line in the new file that the first changed line of the patch adds, or that follows the line it
+  # removes. Each line of a patch starts with a space, + or -, other than the first line of each hunk, as in
+  # @@ -12,3 +12,4 @@, where a missing count means 1, and a line that starts with \, as in \ No newline at end of file.
+  # The number is 0 when a line comes before the first hunk or has another form, and null when the patch changes no
+  # line.
+  def first_changed_line:
+    reduce (split("\n")[]) as $line ({next: null, first: null};
+      if .first != null then .
+      elif $line | startswith("@@") then
+        (($line | capture("^@@ -[0-9]+(,[0-9]+)? \\+(?<start>[0-9]+)(,(?<count>[0-9]+))? @@")) // null) as $hunk
+        | if $hunk == null then .first = 0
+          # A hunk that adds no line names the line before its place.
+          elif $hunk.count == "0" then .next = ($hunk.start | tonumber) + 1
+          else .next = ($hunk.start | tonumber) end
+      elif .next == null then .first = 0
+      elif $line | startswith("+") or startswith("-") then .first = .next
+      elif $line | startswith(" ") then .next += 1
+      elif $line | startswith("\\") then .
+      else .first = 0 end)
+    | .first;
+
+  def changes_only_agent_text:
+    .status == "modified" and .patch != null and $frontmatter_ends[.filename] != null
+    and (.patch | first_changed_line) > $frontmatter_ends[.filename];
+
+  any(inputs;
+    (changes_only_agent_text | not)
+    and any(.filename, .previous_filename // empty; test("^(scripts|\\.github|\\.claude|\\.codex)/")))
+')
+if [[ $needs_tests == false ]]; then
+  exit 1
+fi

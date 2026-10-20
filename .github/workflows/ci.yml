@@ -48,9 +48,9 @@ jobs:
           SKIP_SCRIPT_TESTS: 1
           SKIP_PYTHON_TESTS: ${{ needs.changes.outputs.python_tests == 'false' && '1' || '' }}
 
-  # Says whether the change needs the tests of the scripts and hooks, as scripts/script-tests-needed decides from the
-  # files it changes, and whether it needs the Python tests, as scripts/python-tests-needed decides. When it can't list
-  # the files, the tests run.
+  # Says whether the change needs the tests of the scripts and hooks, as scripts/script-tests-needed decides from
+  # GitHub's objects for the files it changes, and whether it needs the Python tests, as scripts/python-tests-needed
+  # decides from their paths. When gh can't list the files, the tests run.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -61,8 +61,11 @@ jobs:
       script_tests: ${{ steps.decide.outputs.script_tests }}
       python_tests: ${{ steps.decide.outputs.python_tests }}
     steps:
+      # scripts/script-tests-needed reads the agent files as the change leaves them, which for a pull request is its
+      # head, not the merge commit that the other jobs check out.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       # GitHub's compare API lists at most 300 files, so a merge group with more runs the tests.
@@ -75,26 +78,28 @@ jobs:
           BASE: ${{ github.event.merge_group.base_sha }}
           HEAD: ${{ github.event.merge_group.head_sha }}
         run: |
-          paths=scripts/
+          # A made-up file in scripts/ stands for the files that gh can't list, so that the tests run.
+          unlisted='{"filename": "scripts/"}'
+          files=$unlisted
           case $EVENT in
             pull_request)
-              paths=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST/files" \
-                --jq '.[] | .filename, (.previous_filename // empty)') || paths=scripts/
+              files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST/files" --jq '.[]') ||
+                files=$unlisted
               ;;
             merge_group)
-              paths=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE...$HEAD" \
-                --jq 'if (.files | length) < 300 then (.files[] | .filename, (.previous_filename // empty)) else "scripts/" end') ||
-                paths=scripts/
+              files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE...$HEAD" \
+                --jq 'if (.files | length) < 300 then .files[] else {filename: "scripts/"} end') || files=$unlisted
               ;;
           esac
           # Only code 1 means that the change doesn't need the tests.
           needed=0
-          scripts/script-tests-needed <<<"$paths" || needed=$?
+          scripts/script-tests-needed <<<"$files" || needed=$?
           script_tests=true
           if ((needed == 1)); then
             script_tests=false
           fi
           echo "script_tests=$script_tests" >>"$GITHUB_OUTPUT"
+          paths=$(jq -r '.filename, (.previous_filename // empty)' <<<"$files") || paths=scripts/
           needed=0
           scripts/python-tests-needed <<<"$paths" || needed=$?
           python_tests=true
