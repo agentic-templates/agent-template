@@ -233,8 +233,8 @@ request is still open.
 For each finding after `audit due:` on the meter's `machine` line, start a focused audit, without waiting for the next
 retrospective:
 
-1. Skip a finding if the state file lists an audit of the same subject whose issue is still open. A finding's subject
-   is one of these:
+1. Skip a finding if the state file lists an audit whose finding has the same subject, and whose issue is still open.
+   A finding's subject is one of these:
    - a build, which the finding names by the builder's type and issue, such as `builder #208`
    - the builders' waits for room on the machine
    - the time of `scripts/check`
