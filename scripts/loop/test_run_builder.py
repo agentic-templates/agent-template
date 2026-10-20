@@ -16,6 +16,7 @@ from typing import Any
 from unittest import mock
 
 import agent_log
+import paths
 import request_events
 from test_paths import GIT_ENVIRONMENT
 from test_request_events import needs_tcp_port
@@ -28,7 +29,8 @@ run_builder.__file__ = str(RUN_BUILDER)
 importlib.machinery.SourceFileLoader("run_builder", str(RUN_BUILDER)).exec_module(run_builder)
 
 # A stand-in for gh, claude, codex and uv. It writes each call to calls.jsonl in STANDIN_DIR, with its arguments, the
-# folder it runs in, the HEAD of that folder's worktree and its environment. It gives the answers in answers.json there
+# folder it runs in, the HEAD and the names of the files in the git folder of that folder's worktree, and its
+# environment. It gives the answers in answers.json there
 # under the longest start of its arguments, such as "pr create", one answer for each call, and the last one again when
 # they run out. An answer can run another program with the same arguments in the stand-in's place, print to stdout and
 # stderr, exit with a status, write files in the folder it runs in, write codex's report, and push a branch from
@@ -39,12 +41,14 @@ import json, os, sys
 folder, tool, args = os.environ["STANDIN_DIR"], os.path.basename(sys.argv[0]), sys.argv[1:]
 answers = json.load(open(os.path.join(folder, "answers.json")))[tool]
 start = max((key for key in answers if args[: len(key.split())] == key.split()), key=len)
-head = None
+head, git_files = None, None
 if os.path.isfile(".git"):
-    head = open(os.path.join(open(".git").read().split(":", 1)[1].strip(), "HEAD")).read().strip()
+    git_folder = open(".git").read().split(":", 1)[1].strip()
+    head, git_files = open(os.path.join(git_folder, "HEAD")).read().strip(), sorted(os.listdir(git_folder))
 log = os.path.join(folder, "calls.jsonl")
 with open(log, "a") as handle:
-    call = {"tool": tool, "start": start, "args": args, "cwd": os.getcwd(), "head": head, "env": dict(os.environ)}
+    call = {"tool": tool, "start": start, "args": args, "cwd": os.getcwd(), "head": head, "git_files": git_files}
+    call["env"] = dict(os.environ)
     handle.write(json.dumps(call) + "\\n")
 calls = [json.loads(line) for line in open(log)]
 count = sum(call["tool"] == tool and call["start"] == start for call in calls)
@@ -463,12 +467,13 @@ class ClaudeTest(RunBuilderTest):
         [call] = self.calls("claude")
         brief = (self.run_folder() / "brief.md").read_text()
         settings = ["--model", "opus", "--effort", "high", "--append-system-prompt", "Build it."]
-        self.assertEqual(call["args"], [*run_builder.CLAUDE_COMMAND[1:], *settings, brief])
+        self.assertEqual(call["args"], [*run_builder.CLAUDE_COMMAND[1:], *settings, "--", brief])
         self.assertTrue(brief.startswith("Issue #12: Fix the importer\n\nIt drops rows.\n"))
         self.assertIn(
             'of the kind `other`, for the orchestrator of this repository\'s loop. Read only\n"Build one issue"', brief
         )
         self.assertEqual((call["cwd"], call["head"]), (str(self.worktree), f"ref: refs/heads/{BRANCH}"))
+        self.assertNotIn(paths.RETROSPECTIVE_MARK, call["git_files"])
         environment = call["env"]
         self.assertEqual(environment["CLAUDE_CONFIG_DIR"], "/claude-main")
         self.assertEqual(environment["CLAUDE_CODE_RETRY_WATCHDOG"], "1")

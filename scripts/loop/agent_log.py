@@ -319,6 +319,22 @@ def working_periods(run: AgentRun, transcripts_by_id: dict[str, Path], runs_fold
     return []
 
 
-def minutes_after(periods: list[Period], moment: dt.datetime) -> float:
-    """The minutes of the periods after a moment."""
-    return sum(max(0.0, (end - max(start, moment)).total_seconds() / 60) for start, end in periods)
+def session_periods(transcript: Path) -> list[Period]:
+    """The periods when a session worked, from its transcript, or none if the transcript doesn't exist. It reads the
+    transcript a line at a time, because an orchestrator's transcript grows past 150 MB, and keeping its entries would
+    take about 0.5 GB of memory."""
+    if not transcript.exists():
+        return []
+    with transcript.open(errors="replace") as handle:
+        timed = (transcripts.timed_entry(line) for line in handle)
+        entries = (entry for entry in timed if entry is not None and transcripts.has_message(entry))
+        return transcripts.working_periods(*transcripts.entry_calls(entries))
+
+
+def minutes_after(periods: list[Period], moment: dt.datetime | None) -> float:
+    """The minutes of the periods after a moment, or all of them without one."""
+    minutes = 0.0
+    for start, end in periods:
+        start = max(start, moment) if moment else start
+        minutes += max(0.0, (end - start).total_seconds() / 60)
+    return minutes

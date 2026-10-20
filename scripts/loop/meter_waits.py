@@ -2,7 +2,8 @@
 
 import datetime as dt
 
-READ_EVERY_SECONDS = {"go": 30 * 60, "watch": 10 * 60, "near": 150}
+# "some" is the advice that names the types that fit when only some do.
+READ_EVERY_SECONDS = {"go": 30 * 60, "some": 10 * 60}
 # Less than an hour, so that the orchestrator wakes while a prompt cache that lasts an hour still holds its context.
 WAKE_EVERY = dt.timedelta(minutes=50)
 # The time that the meter takes to read the accounts, and that the orchestrator takes to start it again

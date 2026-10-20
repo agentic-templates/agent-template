@@ -40,6 +40,8 @@ class Command(NamedTuple):
     started: float | None = None
     # What its processes used at their last sample
     using: Use = NOTHING
+    # Whether a retrospective's test build or auditor runs it
+    is_retrospective: bool = False
 
 
 class Run(NamedTuple):
@@ -114,27 +116,40 @@ def room_alone(free: Use, running: list[Command]) -> Use:
 
 
 def commands_to_start(waiting: list[Command], running: list[Command], alone: Use) -> list[str]:
-    """The ids of the waiting commands that start now, in the order in which they came, given the commands that run
-    and the room that the machine would have with none of them.
+    """The ids of the waiting commands that start now, given the commands that run and the room that the machine would
+    have with none of them. A retrospective's command starts only when no other agent's command waits, because each
+    minute that a builder's command waits is a minute of its run. Its test builds all wait alike, so its comparison of
+    them stays fair."""
+    others = [command for command in waiting if not command.is_retrospective]
+    started = starting_in_line(others, running, alone)
+    if len(started) < len(others):
+        return [command.id for command in started]
+    retrospectives = [command for command in waiting if command.is_retrospective]
+    started += starting_in_line(retrospectives, [*running, *started], alone)
+    return [command.id for command in started]
+
+
+def starting_in_line(waiting: list[Command], running: list[Command], alone: Use) -> list[Command]:
+    """The waiting commands that start now, in the order in which they came.
 
     The first in line starts when it fits. When no heavy command runs, it starts even if it doesn't fit, so that a
     command that is too big for the machine still runs. A command behind it starts ahead of it only if both fit once
     the commands that run now end, so that it can't keep the first in line waiting longer."""
     room = room_now(alone, running)
-    started: list[str] = []
+    started: list[Command] = []
     head: Command | None = None
     room_behind_head = NO_ROOM
     for command in sorted(waiting, key=lambda command: (command.arrived, command.id)):
         if head is None:
             if has_room(command.need, room) or not (running or started):
-                started.append(command.id)
+                started.append(command)
                 room = taken(room, command.need)
             else:
                 head = command
                 room_behind_head = room_behind(head, running, alone)
             continue
         if command.need is not None and has_room(command.need, room) and has_room(command.need, room_behind_head):
-            started.append(command.id)
+            started.append(command)
             room = taken(room, command.need)
             room_behind_head = taken(room_behind_head, command.need)
     return started

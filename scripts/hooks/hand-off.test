@@ -21,10 +21,10 @@ notes=$repository/.loop/hand-offs
 
 soon="Your context has passed 400k tokens. Hand off your work at your next stopping point, so that a fresh agent continues it."
 now="Your context has passed 500k tokens. Hand off your work as soon as the step you're on ends, so that a fresh agent continues it."
-how="To hand off, push your branch. Then write a comment on your issue or pull request with what's done, what's left, the commands you ran and where their outputs are, and the open questions. End with a report that says that you handed off, with the comment's link."
+how="To hand off, push your branch. Then write a comment on your issue or pull request with what's done, what's left, the commands you ran and where their outputs are, and the open questions. End with a report that says that you handed off, with the comment's link and the GHSA ID of each vulnerability that you recorded privately."
 reviewer_how="To hand off, end with a report that says that you handed off, with the errors that you have found so far, and the parts of the diff that you haven't read yet."
 researcher_how="To hand off, write a comment on your issue with what you have found so far, what's left to find out, and the open questions. End with a report that says that you handed off, with the comment's link."
-compact="Your context has passed 300k tokens. If the maintainer installed a compaction sender, ask for a compaction, as \"Compact your context\" in docs/loop.md describes: finish the step you're on, and bring your state file up to date. Then write $repository/.loop/compact-request.txt with $orchestrator on its first line and \"Resume from .loop/state.md.\" on its second, and end your turn. Without a sender, ask the maintainer to type /compact, and go on with the loop."
+compact="Your context has passed 300k tokens. Ask for a /clear, as \"Clear your context\" in docs/loop.md describes: finish the step you're on, and write in your state file what only this conversation holds. If the maintainer installed a /clear sender, write $repository/.loop/compact-request.txt with $orchestrator on its first line and \"Resume the loop from .loop/state.md.\" on its second, and end your turn. Without a sender, ask the maintainer to type /clear and then \"Resume the loop from .loop/state.md.\", and go on with the loop."
 
 # Prints a reply of a transcript, whose call read the given number of tokens: reply <tokens>
 # The call's input splits into its three parts, so that a hook that leaves one out reads a smaller size.
@@ -96,7 +96,7 @@ expect_note_files() {
   fi
 }
 
-# Checks whether the orchestrator's request for a compaction is in place: expect_request <description> <kept or deleted>
+# Checks whether the orchestrator's request for a /clear is in place: expect_request <description> <kept or deleted>
 request=$repository/.loop/compact-request.txt
 expect_request() {
   local actual=deleted
@@ -105,14 +105,14 @@ expect_request() {
     actual=kept
   fi
   if [[ $actual != "$2" ]]; then
-    echo "error: $1, the hook must leave the request for a compaction $2, but it left it $actual." >&2
+    echo "error: $1, the hook must leave the request for a /clear $2, but it left it $actual." >&2
     failed_cases=$((failed_cases + 1))
   fi
 }
 
-# Writes the orchestrator's request for a compaction, as "Compact your context" in docs/loop.md describes.
+# Writes the orchestrator's request for a /clear, as "Clear your context" in docs/loop.md describes.
 write_request() {
-  printf '%s\nResume from .loop/state.md.\n' "$orchestrator" >"$request"
+  printf '%s\nResume the loop from .loop/state.md.\n' "$orchestrator" >"$request"
 }
 
 # Checks that the hook didn't create the file of the orchestrator's note: expect_no_compact_file <description>
@@ -225,22 +225,37 @@ add_reply "$orchestrator" "" 310000
 run_hook "$orchestrator" ""
 expect_note "For the orchestrator past 300k tokens after a compaction that the transcript marks" "$compact"
 
-# The orchestrator's request for a compaction, before and after the hook tells it to ask for one
+# The orchestrator after a /clear, which gives it a new session id and a new transcript. The state file names the new
+# session once the orchestrator writes it on the session: line.
+cleared=88888888-aaaa-4bbb-8ccc-000000000008
+add_reply "$cleared" "" 40000
+run_hook "$cleared" ""
+expect_note "For the orchestrator after a /clear, before it wrote its new session id" ""
+echo "session: $cleared" >"$repository/.loop/state.md"
+run_hook "$cleared" ""
+expect_note "For the orchestrator after a /clear, once it wrote its new session id" ""
+expect_no_compact_file "For the orchestrator after a /clear, once it wrote its new session id"
+add_reply "$cleared" "" 300001
+run_hook "$cleared" ""
+expect_note "For the orchestrator just past 300k tokens after a /clear" "${compact//$orchestrator/$cleared}"
+echo "session: $orchestrator" >"$repository/.loop/state.md"
+
+# The orchestrator's request for a /clear, before and after the hook tells it to ask for one
 refused="because your context is"
-go_on="Go on with the loop, and ask for a compaction only after the hook tells you that your context has passed 300k tokens."
+go_on="Go on with the loop, and ask for a /clear only after the hook tells you that your context has passed 300k tokens."
 add_reply "$orchestrator" "" 40000
 run_hook "$orchestrator" ""
 write_request
 add_reply "$orchestrator" "" 261000
 run_hook "$orchestrator" ""
 expect_note "For a request at 261k tokens" \
-  "scripts/hooks/hand-off deleted your request for a compaction, $request, $refused 261k tokens. $go_on"
+  "scripts/hooks/hand-off deleted your request for a /clear, $request, $refused 261k tokens. $go_on"
 expect_request "For a request at 261k tokens" deleted
 write_request
 add_reply "$orchestrator" "" 300000
 run_hook "$orchestrator" ""
 expect_note "For a request at 300k tokens" \
-  "scripts/hooks/hand-off deleted your request for a compaction, $request, $refused 300k tokens. $go_on"
+  "scripts/hooks/hand-off deleted your request for a /clear, $request, $refused 300k tokens. $go_on"
 expect_request "For a request at 300k tokens" deleted
 add_reply "$orchestrator" "" 300001
 run_hook "$orchestrator" ""
@@ -252,7 +267,7 @@ expect_request "For a request after the note" kept
 add_reply "$orchestrator" "" 241000
 run_hook "$orchestrator" ""
 expect_note "For a request after the note, once the context is below 300k tokens again" \
-  "scripts/hooks/hand-off deleted your request for a compaction, $request, $refused 241k tokens. $go_on"
+  "scripts/hooks/hand-off deleted your request for a /clear, $request, $refused 241k tokens. $go_on"
 expect_request "For a request after the note, once the context is below 300k tokens again" deleted
 write_request
 add_reply "$orchestrator" "" 320000
@@ -267,7 +282,7 @@ mkdir "$request"
 add_reply "$orchestrator" "" 250000
 run_hook "$orchestrator" ""
 expect_note "For a request that the hook can't delete" \
-  "scripts/hooks/hand-off refuses your request for a compaction, $request, $refused 250k tokens. $go_on It couldn't delete the file, so delete it."
+  "scripts/hooks/hand-off refuses your request for a /clear, $request, $refused 250k tokens. $go_on It couldn't delete the file, so delete it."
 rmdir "$request"
 
 # Agents that get no note

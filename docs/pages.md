@@ -10,7 +10,7 @@
 
 ## Write a README
 
-A README opens with what the reader can do with the project. Then it covers these parts, in this order, each under a heading that follows the rule above:
+A README opens with what the reader can do with the project. Then it covers these parts, in this order, each under its own heading:
 
 1. A demo of the project as it works today, if there is one: a screenshot, a recording or a live link.
 2. Setup.
@@ -20,7 +20,7 @@ Until the example ends, explain only what the reader needs in order to use the p
 
 ## Review a changed page with a fresh reader
 
-Before you open the pull request, give each README or docs page where you added or rewrote text to a reader who knows nothing else about the project:
+Give each README or docs page where you added or rewrote text to a fresh reader, one who has seen only that page:
 
-1. Run `scripts/fresh-reader "<reader>" <page>`, where `<reader>` is the page's reader and what they want to do, such as "a developer who wants to use this project". The script prints the sentences that the reader had to read twice, didn't need or found repeated elsewhere on the page, each with the reader's reason. If `claude` isn't installed, start a new agent with no other context. Give it the input that the code of `scripts/fresh-reader` builds for `claude`, with `<reader>` filled in.
-2. In the text you added or rewrote, rewrite each sentence that you agree is unclear, so that it says the same thing in clearer words, and cut each one that you agree isn't needed. Merge each pair of sentences that you agree repeat each other into one sentence, even when one of them was on the page before your change. In each later reading of the page, change only a sentence that the reader misread or that isn't true.
+1. Run `scripts/fresh-reader "<reader>" <page>`, where `<reader>` is the page's reader and what they want to do, such as "a developer who wants to use this project". The script prints the sentences that the reader had to read twice, didn't need or found repeated elsewhere on the page, each with the reader's reason. If the script can't run because `claude` isn't installed, start the fresh reader as a new agent, and give it the text that the script builds in its variable `input`, with `<reader>` filled in. Start that agent before you open the pull request, and again before each later push that adds or rewrites text in the page.
+2. In the text you added or rewrote, rewrite each sentence that you agree is unclear, so that it says the same thing in clearer words, and cut each one that you agree isn't needed. When you agree that a sentence in that text repeats another sentence, merge the two, even when the other was on the page before your change.

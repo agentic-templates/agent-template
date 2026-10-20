@@ -62,12 +62,12 @@ The lines are:
                             the sessions in the main checkout, as scripts/loop/context_growth.py measures them: how
                             many agents or sessions it covers, the median and the largest of their peak context, and
                             the share of them whose peak passed the threshold at which scripts/hooks/hand-off tells a
-                            builder to hand off, or for the sessions, tells the orchestrator to compact. Then the
-                            context that the results of their tool calls added, per tool call, and how many steps it
-                            leaves out because their call has no event in .loop/requests.jsonl. Then how many of the
-                            agents the hook told to hand off, their compactions, and the three kinds of tool calls
-                            whose results added the most, by their share, as the Agents' time line groups the tool
-                            calls.
+                            builder to hand off, or for the sessions, tells the orchestrator to clear its context.
+                            Then the context that the results of their tool calls added, per tool call, and how many
+                            steps it leaves out because their call has no event in .loop/requests.jsonl. Then how many
+                            of the agents the hook told to hand off, their compactions, and the three kinds of tool
+                            calls whose results added the most, by their share, as the Agents' time line groups the
+                            tool calls.
   Heavy command             A line for each command that scripts/loop/run-heavy ran, from .loop/heavy.jsonl: how many
                             runs started and ended, and the median minutes, cores and memory of those that ended.
                             Then how many runs waited, those that a signal stopped while they waited included, their
@@ -94,9 +94,6 @@ With --issues, the report also gives a line for each agent that built an issue, 
 with its numbers, those of its pull request, its peak context, the context added per tool call in the steps that
 have an event, and the minutes of each part of its time.
 
-With --messages, the report also gives each message that a person typed in a session in the main checkout, such as
-the maintainer's messages to the orchestrator, with its time.
-
 The input tokens count the cached tokens too.
 
 An agent starts on the issue or pull request whose number starts its prompt, as docs/loop.md asks. A pull request
@@ -105,7 +102,7 @@ builder when an agent of another type started on it or on its issue after the ag
 
 The report counts the CI runs, the agents and the calls that started after the moment. It reads the transcripts that
 Claude Code keeps for the main checkout, for the account that the report runs on and for each Claude account in
-.loop/accounts.json, and prints none of their text other than the messages that --messages asks for.
+.loop/accounts.json, and prints none of their text.
 """
 
 import argparse
@@ -132,11 +129,9 @@ from hand_offs import FOLDER_NAME, hand_off_thresholds, hook_threshold, note_fil
 from meter_waits import LONGEST_READING_GAP
 from transcripts import (
     Call,
-    Message,
     claude_code_versions,
     entry_calls,
     has_message,
-    person_messages,
     safety_stops,
     timed_entries,
 )
@@ -259,9 +254,6 @@ def main(argv: list[str] | None = None) -> int:
         "--since", required=True, type=moment, help="an ISO time with its zone, such as 2026-10-11T14:00:00Z"
     )
     parser.add_argument("--issues", action="store_true", help="also give a line for each agent that built an issue")
-    parser.add_argument(
-        "--messages", action="store_true", help="also give the messages that a person typed in the main checkout"
-    )
     options = parser.parse_args(argv)
     since: dt.datetime = options.since
     checkout = paths.main_checkout()
@@ -318,8 +310,6 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if options.issues:
         lines += issue_lines(recent, results, event_tokens, splits, contexts)
-    if options.messages:
-        lines += message_lines(read_messages(project_folders, since))
     print("\n".join(lines))
     return 0
 
@@ -422,24 +412,6 @@ def count_once(transcripts: list[Transcript], since: dt.datetime) -> list[Agent]
         if calls:
             agents.append(Agent(transcript.role, transcript.file, calls))
     return agents
-
-
-def read_messages(project_folders: list[Path], since: dt.datetime) -> list[Message]:
-    """The messages that a person typed in the sessions in the folders after the time, in order of time. A resumed
-    session's transcript starts with copies of the earlier transcript's messages, so each message counts once."""
-    messages: set[Message] = set()
-    for session in (session for folder in project_folders for session in folder.glob("*.jsonl")):
-        if session.stat().st_mtime >= since.timestamp():
-            messages.update(message for message in person_messages(session) if message.at >= since)
-    return sorted(messages)
-
-
-def message_lines(messages: list[Message]) -> list[str]:
-    lines = [f"Messages that a person typed: {len(messages)}"]
-    for message in messages:
-        lines.append(f"Message at {message.at.isoformat()}:")
-        lines += [f"  {text_line}" for text_line in message.text.splitlines()]
-    return lines
 
 
 class PeriodBefore(NamedTuple):
@@ -726,12 +698,12 @@ def contexts_by_type(runs: list[AgentRun], contexts: dict[str, Context]) -> dict
 def context_lines(by_type: dict[str, list[Context]], orchestrator: list[Context]) -> list[str]:
     """A line for each type of the agents with a transcript, measured against the threshold at which
     scripts/hooks/hand-off tells a builder to hand off, and one for the orchestrator's sessions, measured against the
-    threshold at which it tells the orchestrator to compact."""
+    threshold at which it tells the orchestrator to clear its context."""
     hand_off = ("the hand-off threshold", hook_threshold("soon_tokens"))
-    compaction = ("the compaction threshold", hook_threshold("compact_tokens"))
+    clear = ("the /clear threshold", hook_threshold("compact_tokens"))
     lines = [context_line(f"type {name}", "agents", by_type[name], hand_off, True) for name in sorted(by_type)]
     # The hook never tells the orchestrator to hand off.
-    return [*lines, context_line("the orchestrator", "sessions", orchestrator, compaction, False)]
+    return [*lines, context_line("the orchestrator", "sessions", orchestrator, clear, False)]
 
 
 def context_line(

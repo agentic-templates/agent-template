@@ -220,6 +220,30 @@ expect_hook PostToolUse claude-code "$other" "$repository" '*'
 expect_hook PreToolUse claude-code "$checkouts/plain" "$repository"
 expect_hook PreToolUse claude-code "$checkouts/missing" "$repository"
 
+# scripts/hooks/session-start prints its notes when it runs without an argument, and a part of the files that it shows
+# when it runs with the part's number. The SessionStart commands must run it once for its notes, and once for each part
+# up to the number on its part_hooks line, in any order.
+part_hooks=$(sed -n 's/^part_hooks=\([0-9][0-9]*\)$/\1/p' scripts/hooks/session-start)
+case_count=$((case_count + 1))
+if [[ -z $part_hooks ]]; then
+  echo "error: scripts/hooks/session-start has no line part_hooks=<number>, so this test can't tell how many SessionStart commands must run it for a part. Restore the line, or change this test to read the number from its new place." >&2
+  failed_cases=$((failed_cases + 1))
+else
+  # shellcheck disable=SC2016 # $1 expands when the stand-in runs.
+  printf '#!/bin/sh\ncat >/dev/null\necho "part ${1:-none}"\n' >"$repository/scripts/hooks/session-start"
+  session_input=$(jq -n --arg cwd "$repository" '{session_id: "abc123", cwd: $cwd, hook_event_name: "SessionStart", source: "compact"}')
+  printed_parts=$(
+    while IFS= read -r encoded_command; do
+      (cd "$repository" && HOME=$test_home sh -c "$(jq -r . <<<"$encoded_command")" <<<"$session_input" 2>&1) || true
+    done < <(jq -c '.hooks.SessionStart[]?.hooks[]?.command? | strings' "$settings") | sort
+  )
+  expected_parts=$( (echo "part none" && seq "$part_hooks" | sed 's/^/part /') | sort)
+  if [[ $printed_parts != "$expected_parts" ]]; then
+    echo "error: The SessionStart commands in .claude/settings.json must run scripts/hooks/session-start once without an argument and once with each number from 1 to $part_hooks, but they ran it as: $(tr '\n' ',' <<<"$printed_parts")" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+fi
+
 # Claude Code keeps an agent running when the SubagentStop command exits with code 2, so the command turns a failure of
 # scripts/loop/agent-log with that code, as from argparse, into code 1.
 printf '#!/bin/sh\ncat >/dev/null\necho "usage: agent-log" >&2\nexit 2\n' >"$repository/scripts/loop/agent-log"

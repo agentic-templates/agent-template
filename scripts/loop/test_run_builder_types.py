@@ -9,6 +9,7 @@ import re
 from typing import Any
 from unittest import mock
 
+import paths
 from test_run_builder import (
     BRANCH,
     BUILDER_FILE,
@@ -60,16 +61,32 @@ class TypeTest(RunBuilderTest):
         self.assertEqual((status, errors), (0, ""))
         [call] = self.calls("claude")
         self.assertEqual(
-            call["args"][len(run_builder.CLAUDE_COMMAND) - 1 : -1],
-            ["--tools", "Read, Grep, Bash", "--disallowedTools", "Bash(git push *), WebFetch", "--max-turns", "40"],
+            call["args"][len(run_builder.CLAUDE_COMMAND) - 1 :],
+            [
+                "--tools",
+                "Read, Grep, Bash",
+                "--disallowedTools",
+                "Bash(git push *), WebFetch",
+                "--max-turns",
+                "40",
+                "--",
+                (self.run_folder() / "brief.md").read_text(),
+            ],
         )
+
+    def test_puts_the_brief_after_a_double_dash_when_the_agent_file_disallows_tools(self) -> None:
+        (self.agents / "builder-cheaper.md").write_text("---\nname: builder-cheaper\ndisallowedTools: Bash\n---\n")
+        status, _, errors = self.run_builder("--tool", "claude", agent_type="builder-cheaper")
+        self.assertEqual((status, errors), (0, ""))
+        [call] = self.calls("claude")
+        self.assertEqual(call["args"][-3:], ["Bash", "--", (self.run_folder() / "brief.md").read_text()])
 
     def test_runs_claude_without_the_settings_that_the_agent_file_lacks(self) -> None:
         (self.agents / "builder-small.md").write_text("---\nname: builder-small\nmodel: sonnet\n---\n")
         status, _, _ = self.run_builder("--tool", "claude", agent_type="builder-small")
         self.assertEqual(status, 0)
         [call] = self.calls("claude")
-        self.assertEqual(call["args"][len(run_builder.CLAUDE_COMMAND) - 1 : -1], ["--model", "sonnet"])
+        self.assertEqual(call["args"][len(run_builder.CLAUDE_COMMAND) - 1 : -1], ["--model", "sonnet", "--"])
 
 
 class AgentLinesTest(RunBuilderTest):
@@ -279,6 +296,7 @@ class TestBuildTest(RunBuilderTest):
         self.assertRegex(printed, rf"^issue 12 \| claude main \| test finished, changes in {changes} \| [0-9.]+ min \|")
         [call] = self.calls("claude")
         self.assertEqual((call["cwd"], call["head"]), (str(self.worktree), self.base))
+        self.assertIn(paths.RETROSPECTIVE_MARK, call["git_files"])
         self.assertEqual(call["env"]["LOOP_RUN"], "1")
         self.assertNotIn("LOOP_HAND_OFF", call["env"])
         self.assertIn("This build is a test", call["args"][-1])

@@ -5,6 +5,8 @@ set -euo pipefail
 source "${BASH_SOURCE[0]%/*}/testing.bash"
 # shellcheck source=scripts/hooks/check-passed.bash
 source "$hooks_folder/check-passed.bash"
+# shellcheck source=scripts/hooks/pages-read.bash
+source "$hooks_folder/pages-read.bash"
 
 # The cases run in repositories in a temporary folder, and git looks for no repository above it.
 # The repositories have no remote, so scripts/hooks/pull-request-rules.check allows each command that opens a pull
@@ -40,6 +42,13 @@ record_pass() {
 
 forget_pass() {
   rm -f "$(pass_record_path)"
+}
+
+# Records that a fresh reader read the body that the cases give, as scripts/fresh-reader does, for the repository or
+# worktree in the current folder, because scripts/hooks/unread-bodies.check blocks gh pr create without it when claude
+# is installed.
+record_reading() {
+  body_hash "Closes #1" >>"$(pages_read_path)"
 }
 
 # The cases for the repository or worktree in the current folder, which starts with notes.txt committed.
@@ -101,6 +110,8 @@ git add notes.txt
 git commit --quiet -m "Add notes"
 git branch first
 git worktree add --quiet -b work "$worktree"
+record_reading
+(cd "$worktree" && record_reading)
 
 # In the worktree, which has a record of its own. A pass in the repository's folder doesn't count there,
 # though the files are the same.
@@ -116,6 +127,7 @@ mkdir "$repository/docs"
 work_in "$repository/docs"
 forget_pass
 expect_block Bash 'gh pr create --title "Add notes" --body "Closes #1"' "$not_checked"
+expect_block_behind_wrappers 'gh pr create --title "Add notes" --body "Closes #1"' "$not_checked"
 record_pass
 expect_allow Bash 'gh pr create --title "Add notes" --body "Closes #1"'
 
@@ -132,6 +144,12 @@ record_pass
 (cd "$worktree" && forget_pass)
 expect_block Bash "cd $worktree && gh pr create --title 'Add notes' --body 'Closes #1'" "$not_checked"
 expect_allow Bash "(cd $worktree) && gh pr create --title 'Add notes' --body 'Closes #1'"
+# The hook blocks a cd that the shell may run as a program, after time, command or noglob, because it couldn't tell
+# which folder's pass counts.
+for wrapper in time "'time'" command noglob; do
+  expect_block Bash "cd $worktree && $wrapper cd $repository && gh pr create --title 'Add notes' --body 'Closes #1'" \
+    "$cd_after_wrapper"
+done
 
 # The branch that --head names, alone or after a person's name and a colon. The branch first has only the first commit.
 work_in "$repository"
@@ -174,6 +192,7 @@ work_in "$base/outside"
 expect_allow Bash 'gh pr create --title "Add notes" --body "Closes #1"'
 git init --quiet --initial-branch=main "$base/empty"
 work_in "$base/empty"
+record_reading
 expect_allow Bash 'gh pr create --title "Add notes" --body "Closes #1"'
 
 finish_tests

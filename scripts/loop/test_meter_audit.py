@@ -139,12 +139,12 @@ class LongBuildTest(AuditTest):
 
 
 class LongWaitTest(AuditTest):
-    def test_names_waits_of_more_than_10_minutes_per_hour_of_builder_work_in_the_last_hour(self) -> None:
+    def test_names_waits_of_more_than_10_minutes_per_hour_of_agent_work_in_the_last_hour(self) -> None:
         cases = {
             601: [
                 (
-                    "audit due: heavy commands waited 10.0 min in run-heavy's line per hour of builder work in the "
-                    "last hour, more than 10"
+                    "audit due: heavy commands waited 10.0 min in run-heavy's line per hour of agent work in the last "
+                    "hour, more than 10"
                 )
             ],
             600: [],
@@ -157,13 +157,13 @@ class LongWaitTest(AuditTest):
                 ]
                 self.assertEqual(self.audits([build("a", "03:08:00", 60)], waits), audits)
 
-    def test_divides_by_the_hours_of_builder_work_alone(self) -> None:
+    def test_divides_by_the_hours_of_work_of_every_agent_type(self) -> None:
         agents = [
             build("a", "03:08:00", 20),
-            build("b", "03:00:00", 10, "builder-small"),
-            build("c", "03:08:00", 60, "reviewer"),
+            build("b", "03:00:00", 10, "builder-deep-max", is_test=True),
+            build("c", "03:08:00", 30, "auditor"),
         ]
-        audits = self.audits(agents, [heavy("start", "03:00:00", waited_seconds=450)])
+        audits = self.audits(agents, [heavy("start", "03:00:00", waited_seconds=900)])
         self.assertEqual(len(audits), 1)
         self.assertIn("waited 15.0 min", audits[0])
 
@@ -177,8 +177,8 @@ class LongWaitTest(AuditTest):
         waits = [heavy("wait", "02:30:00"), heavy("end", "03:00:00", exit_code=0, seconds=1800)]
         self.assertEqual(self.audits([build("a", "03:08:00", 60)], waits), [])
 
-    def test_names_nothing_without_builder_work_in_the_last_hour(self) -> None:
-        agents = [build("a", "02:00:00", 60), build("b", "03:08:00", 60, "reviewer")]
+    def test_names_nothing_without_agent_work_in_the_last_hour(self) -> None:
+        agents = [build("a", "02:00:00", 60), build("b", "02:08:00", 60, "reviewer")]
         self.assertEqual(self.audits(agents, [heavy("start", "03:00:00", waited_seconds=1800)]), [])
 
 
@@ -220,7 +220,7 @@ class SlowerCheckTest(AuditTest):
 
 
 class WakeTest(AuditTest):
-    """While the account's advice is go, meter --wake reads every 30 minutes. The advice turns to watch at the fifth
+    """While the account's advice is go, meter --wake reads every 30 minutes. The advice turns to stop at the fifth
     reading of the account, so a wake that misses a finding ends then."""
 
     LONG_BUILD = (
@@ -229,7 +229,7 @@ class WakeTest(AuditTest):
 
     def setUp(self) -> None:
         super().setUp()
-        self.answer("claude", [*[usage_output(8)] * 4, usage_output(8, week=85)])
+        self.answer("claude", [*[usage_output(8)] * 4, usage_output(98)])
 
     def test_wakes_at_the_reading_with_a_finding_that_the_meter_had_not_printed(self) -> None:
         self.write_logs(earlier_builds(10))

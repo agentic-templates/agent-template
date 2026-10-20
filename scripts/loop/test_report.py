@@ -15,7 +15,7 @@ from unittest import mock
 
 import paths
 from test_agent_time import message_line
-from test_transcripts import START, at, call_line, command_line, prompt_line, result_line, typed_line
+from test_transcripts import START, at, call_line, command_line, prompt_line, result_line
 
 REPORT = Path(__file__).with_name("report")
 # The report's file name has no .py, so the tests load it by its path.
@@ -650,67 +650,6 @@ class OrchestratorTest(ReportTest):
         self.transcript("session", lines)
         self.transcript("builder", [call_line("b", 1, tokens=100)], session="session", agent_type="builder")
         self.assertEqual(self.line("Orchestrator"), "Orchestrator's share of the input tokens: 50%")
-
-
-class MessageTest(ReportTest):
-    def messages(self) -> list[str]:
-        status, lines, errors = self.run_report("--since", SINCE.isoformat(), "--messages")
-        self.assertEqual(status, 0, errors)
-        return lines[lines.index(next(line for line in lines if line.startswith("Messages"))) :]
-
-    def test_gives_the_messages_that_a_person_typed_in_each_session_in_order_of_time(self) -> None:
-        self.transcript("first", [typed_line(5, "Stop guessing the times.\nRead the clock."), prompt_line(6, "no")])
-        self.transcript("second", [typed_line(2, "Start the loop.")])
-        self.assertEqual(
-            self.messages(),
-            [
-                "Messages that a person typed: 2",
-                "Message at 2026-10-11T14:02:00+00:00:",
-                "  Start the loop.",
-                "Message at 2026-10-11T14:05:00+00:00:",
-                "  Stop guessing the times.",
-                "  Read the clock.",
-            ],
-        )
-
-    def test_gives_a_message_that_a_resumed_session_copied_once(self) -> None:
-        earlier = self.transcript("earlier", [typed_line(1, "Start the loop.")])
-        modified = (SINCE + dt.timedelta(minutes=5)).timestamp()
-        os.utime(earlier, (modified, modified))
-        self.transcript("resumed", [typed_line(1, "Start the loop."), typed_line(6, "Continue.")])
-        self.assertEqual(self.messages()[0], "Messages that a person typed: 2")
-
-    def test_gives_only_the_messages_of_the_sessions_after_the_time(self) -> None:
-        self.transcript("session", [typed_line(-5, "Before."), typed_line(1, "After.")])
-        old = self.transcript("old", [typed_line(1, "In an old transcript.")])
-        modified = (SINCE - dt.timedelta(minutes=1)).timestamp()
-        os.utime(old, (modified, modified))
-        self.transcript("builder", [typed_line(2, "To an agent.")], session="session", agent_type="builder")
-        self.assertEqual(
-            self.messages(), ["Messages that a person typed: 1", "Message at 2026-10-11T14:01:00+00:00:", "  After."]
-        )
-
-    def test_gives_the_messages_of_the_sessions_in_the_folder_of_each_claude_account(self) -> None:
-        other = self.list_accounts("claude-config", "other-config")
-        other.mkdir(parents=True)
-        (other / "other.jsonl").write_text(json.dumps(typed_line(2, "On the other account.")) + "\n")
-        self.transcript("session", [typed_line(1, "On this account.")])
-        self.assertEqual(
-            self.messages(),
-            [
-                "Messages that a person typed: 2",
-                "Message at 2026-10-11T14:01:00+00:00:",
-                "  On this account.",
-                "Message at 2026-10-11T14:02:00+00:00:",
-                "  On the other account.",
-            ],
-        )
-
-    def test_gives_no_messages_without_the_messages_option(self) -> None:
-        self.transcript("session", [typed_line(1, "Start the loop.")])
-        status, lines, errors = self.run_report()
-        self.assertEqual(status, 0, errors)
-        self.assertFalse([line for line in lines if "Start the loop." in line or line.startswith("Message")])
 
 
 class TranscriptFolderTest(ReportTest):

@@ -3,9 +3,10 @@
 ## Review a pull request
 
 - Compare the change with its issue's "Done when" list and the definition of done in AGENTS.md.
-- Report only errors: wrong behavior, a missing test, a security problem, or text or code that breaks AGENTS.md or a guide in `docs/`. Don't ask for changes that a formatter would make, or for work outside the issue.
+- Report only errors: wrong behavior, a missing test, a security problem, or text or code that breaks AGENTS.md or a guide in `docs/`. Such text includes each sentence that the pull request adds to AGENTS.md, the README, a guide, an agent type in `.claude/agents` or the pull request's description, and that breaks `docs/writing.md`, `docs/pages.md` or `docs/rules.md`. Don't ask for changes that a formatter would make, or for work outside the issue.
 - Give each error a case that shows it, such as an input and the wrong result it gives, or a sentence and the rule it breaks. Then say what to change and why. For a security problem, leave out the case, and describe the problem as AGENTS.md says.
 - For each security problem that you report and that main has too, say whether it's a vulnerability, as "Record a vulnerability privately" in `docs/releasing.md` defines one. Record each vulnerability that isn't public yet as that section describes, and give its GHSA ID in your report.
+- Run `scripts/check` only on a commit that CI doesn't check, such as a fix in an advisory's private fork.
 - If a maintainer opened the pull request and you need to run its code, such as to check a case, check it out in the worktree that you start in, never in the main checkout:
 
   ```sh
@@ -13,7 +14,7 @@
   git switch --detach FETCH_HEAD
   ```
 
-  Don't use `gh pr checkout`, because auto mode sometimes denies it, and after a few denials auto mode stops to ask the maintainer.
+  Don't use `gh pr checkout`, because auto mode sometimes denies it, and after a few denials auto mode stops to ask the maintainer. Once you've checked the code out, run only the tests that the case needs.
 - If an error shows only with an input that someone would have to craft on purpose, and nobody outside the project can give that input, report the error as a note after the other errors, because it needn't block the merge. But if the pull request changes a hook, and the changed hook lets through a command that the hook on main blocks, report that as an error with the command as its case, even when only a command written on purpose would get through.
 - Report to whoever asked for the review. Other than the checkout above and recording a vulnerability, don't change files or labels, make commits, or post comments or reviews. If you find no errors, say so in one line.
 

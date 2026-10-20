@@ -36,6 +36,11 @@ The steps:
 
 Work through these steps each time you wake, for a message or because an agent or a background task ended.
 
+Make a change of text yourself, such as a fix to a guide, when you already know each word of it, because a builder
+would only write the same words. Run `scripts/check` for it as a background task, and go on with the cycle while it
+runs. Give each change of code to a builder, even a change of one line, because a failing check in code can take many
+runs to fix, and a builder's runs don't keep you from acting.
+
 To give a builder something, such as a correction or a reviewer's errors, send it a message. A builder that
 `scripts/loop/run-builder` started can't take messages. Wait until its run ends, and then start a new builder with
 the message, of the type `builder` unless a step below names another type. Choose its account as "Read the meter"
@@ -62,9 +67,11 @@ on.
   line of your state file, write `taken in: now` in its place, and read the issues and comments that the maintainer
   wrote on GitHub since the time you noted. Open or rewrite issues for each goal and idea, and for the cause of each
   correction, without stopping the builders that run. Treat each mistake of your own or of an agent that the loop could
-  make again, such as a time that you guessed, as a correction, even when you fixed the mistake itself. Add the
-  `priority` label to each issue for the cause of a correction, and to each issue that the maintainer asks to have
-  built first. If a correction changes the issue of a running builder, give the builder the change.
+  make again, such as a time that you guessed, as a correction, even when you fixed the mistake itself. Write each
+  correction, with the issue for its cause, in `.loop/corrections.md` rather than your state file, because the
+  auditor judges the fixes there. Add the `priority` label to each issue for the cause of a correction, and to each
+  issue that the maintainer asks to have built first. If a correction changes the issue of a running builder, give the
+  builder the change.
 - **Answers.** For each issue with `needs-decision` that the maintainer answered in a comment, carry out the answer,
   as "Labels" in `docs/planning.md` describes.
 - **Other people's issues.** Triage them, as "Triage issues that others open" in `docs/planning.md` describes.
@@ -109,8 +116,8 @@ Start an agent for each ready issue, as far as "Read the meter" allows:
 
 1. Run `scripts/take-next-issue`. It assigns you the next ready issue that can start, and prints its number and its
    kind, such as `12 other` or `13 research`. If it prints `none`, go on with "Land".
-2. If you know that the issue's change is one line, make it yourself, in a worktree of your own, as "Make a change"
-   in AGENTS.md describes.
+2. If the start of "Work through the cycle" says to make the issue's change yourself, make it in a worktree of your
+   own, as "Make a change" in AGENTS.md describes.
 3. Otherwise, choose the agent's type: `researcher` for a `research` issue, and otherwise the builder type whose
    description fits the change. Choose its account as "Read the meter" describes. If that's your own account, start a
    background agent of that type. Don't give it a model, so that it runs at its type's model and effort. After its
@@ -157,16 +164,24 @@ when "Start a focused audit" says so.
 
 ### Record
 
-Bring `.loop/state.md` up to date after each launch, merge or decision, so that a compaction can come at any time.
-Besides the `session:` and `pid:` lines, it holds:
+Bring `.loop/state.md` up to date after each launch, merge or decision, so that a `/clear` or a compaction can come
+at any time. Besides the `session:` and `pid:` lines, it holds:
 
 - the goal
 - each running agent, with its issue or pull request, and its agent id or `scripts/loop/run-builder` task
 - the drafts that a reviewer has read
 - the issues whose builder stopped once
-- the focused audits since the last retrospective, each with its finding, its issue and the time it started
+- the focused audits since the last auditor's pull request merged, each with its finding, its issue and the time it
+  started
 - the `BLOCKED` pull requests from your last pass
 - what you do next, and the open questions
+
+It holds nothing that a query of GitHub gives, such as the ready issues, their blockers or what merged. It holds no
+lasting rule either, because each rule lives in a guide or a hook, where a new orchestrator, or one that lost the file,
+still finds it.
+
+When an entry changes, rewrite it in place rather than add a new one. Delete an entry once it no longer tells you what
+to do next, such as a pull request that merged or an agent that ended.
 
 A hook writes the clock's time into the file: on its `updated:` line each time you write the file, on its `taken in:`
 line each time you write `now` there, and on its `heartbeat:` line each time you schedule the heartbeat. Keep these
@@ -187,22 +202,32 @@ to hand off its work, so that you can plan the agent that takes over. Start it a
 ends.
 
 Your own account is the Claude account in `.loop/accounts.json` whose `env` values match this session's
-environment, such as `CLAUDE_CONFIG_DIR`. For each builder and researcher, and for each reviewer of a pull request,
-choose the account whose line has the lowest `week` percentage, among the accounts whose advice lets you start the
-agent. A Codex account builds only the kinds `research` and `other`. Each reviewer of a pull request, each builder of
-the type `builder-deep`, and each builder or researcher that takes over a hand-off can run only on a Claude account.
-Start each reviewer that reviews no pull request, such as the reviewer of a release, on your own account, in your
-session. Start the auditor as "Start a retrospective" describes. Each account's advice says what you can start on that
-account:
+environment, such as `CLAUDE_CONFIG_DIR`. Each account's advice names the agent types that the account has room for:
+those whose long run, as `scripts/loop/meter --help` defines it, fits in what is left of both its 5-hour and weekly
+limits, after subtracting what its running agents still need. On your own account, the advice also leaves room for the
+usage that you still need until the weekly reset.
 
-- **go:** start any agent.
-- **watch:** keep the number of agents that run on the account from growing, and start no auditor.
-- **near:** start only reviewers, and agents for the issues that fit the types `builder-small` or `researcher`.
+- **go:** start an agent of any type.
+- **a list of types,** such as `builder-small, researcher, reviewer`: start only agents of those types.
 - **stop:** start nothing on the account.
 - **parked:** start nothing on the account. If it's your own account, also delete the heartbeat, because the meter
   wakes you a minute after the reset instead. Schedule the heartbeat again then.
 - **no reading:** start nothing on the account, and fix what the account's line names, or ask the maintainer if the
   fix needs them.
+
+The line after the accounts starts with `start on`, and names the Claude account for each type, or `no account`.
+Choose the account of each builder and researcher, and of each reviewer of a pull request, with
+`scripts/loop/meter --start-on <type>`, and start the agent on the account that it prints. It names the account as
+the `start on` line does, from the same reading, but counts each agent that it named an account for since then, so
+that one pass starts only as many agents on each account as fit. If it prints `no account`, start no agent of that
+type on a Claude account. Start each reviewer that reviews no pull request, such as the reviewer of a release, on your
+own account, as an agent of your session. Start the auditor as "Start a retrospective" describes.
+
+A Codex account builds only the kinds `research` and `other`, and only while its advice is `go`. Start a builder or
+researcher on such a Codex account without running `--start-on`, when the Codex account's `week` percentage of use is
+lower than that of the account that the `start on` line names for the agent's type. Also start it on such a Codex
+account when `--start-on` prints `no account`. Each builder of the type `builder-deep`, and each builder or researcher
+that takes over a hand-off, can run only on a Claude account.
 
 To start an agent on another account, run one of these commands as a background task. For an issue, give the line
 that `scripts/take-next-issue` printed in place of `<issue> <kind>`. The command's last line says how the run ended,
@@ -217,17 +242,23 @@ If no account can take the issue that `scripts/take-next-issue` gave you, remove
 the script again, followed by the number of each issue that no account can take, such as
 `scripts/take-next-issue 12 15`, so that it skips them.
 
-## Compact your context
+## Clear your context
 
-Keep your shell in the main checkout, and run git in a worktree with `git -C <worktree>`. After a compaction, the
-session-start hook shows you your state file only when your shell is in the main checkout.
+Keep your shell in the main checkout, and run git in a worktree with `git -C <worktree>`. After a `/clear` or a
+compaction, the session-start hook shows you your state file, this guide and `docs/writing.md`, unless your shell is
+outside the main checkout.
 
-When `scripts/hooks/hand-off` tells you that your context has grown long enough to compact, ask for a compaction if the
-maintainer installed a compaction sender. That's a hook in the maintainer's own Claude Code settings that runs on both
-`Stop` and `StopFailure`, and types `/compact` when it finds `.loop/compact-request.txt`. Finish the step you're on,
-such as landing a pull request or starting a builder, and bring your state file up to date. Then write
-`.loop/compact-request.txt` with your session id on its first line and `Resume from .loop/state.md.` on its second, and
-end your turn. Without a sender, ask the maintainer to type `/compact`, and go on with the loop.
+When `scripts/hooks/hand-off` tells you that your context has grown long enough, clear it with `/clear`:
+
+1. Finish the step you're on, such as landing a pull request or starting a builder.
+2. Write into your state file what only this conversation holds, if the file lacks it: the maintainer's decisions that
+   no issue holds yet, the questions to the maintainer that are still open, and the agents that run inside this
+   session.
+3. A `/clear` sender is a hook in the maintainer's own settings that reads a request that you write, and types
+   `/clear` and then the request's second line. If the maintainer installed one, write the request:
+   `.loop/compact-request.txt` with your session id on its first line and `Resume the loop from .loop/state.md.` on
+   its second. Then end your turn. Without a sender, ask the maintainer to type `/clear` and then
+   `Resume the loop from .loop/state.md.`, and go on with the loop.
 
 ## Ask the maintainer
 
@@ -247,8 +278,8 @@ issue where it wrote one, send the maintainer a push notification with the issue
 ## Start a retrospective
 
 When the meter's `machine` line says `retrospective due`, start an `auditor` agent, unless one runs or its pull
-request is still open. Start it on the Claude account whose line has the lowest `week` percentage, among the accounts
-whose advice lets you start an auditor. On your own account, start it in your session. On another account, open an
+request is still open. Start it on the account that `scripts/loop/meter --start-on auditor` prints, and start none
+while it prints `no account`. On your own account, start it in your session. On another account, open an
 issue for the retrospective, and write a message to a file in a folder of your own in `.loop/`, which says that the
 auditor runs the retrospective of that issue as its agent file describes, rather than building the issue, and opens
 no other issue for the retrospective. Then run
@@ -289,6 +320,4 @@ without waiting for the next retrospective:
    sandbox that can't reach GitHub, and so can't open an issue for each fix.
 4. Add the audit to the state file's list of focused audits, with the time it started.
 
-A focused audit doesn't count as a retrospective, so the meter goes on counting toward the next one. When an
-auditor's pull request merges, empty the state file's list of focused audits, because the retrospective looks back on
-the work that their findings came from.
+A focused audit doesn't count as a retrospective, so the meter goes on counting toward the next one.

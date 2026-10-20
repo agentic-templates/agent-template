@@ -128,6 +128,16 @@ record_reading() {
   git hash-object README.md docs/code.md >>"$(pages_read_path)"
 }
 
+# Records that a fresh reader read bodies with these texts, as scripts/fresh-reader does, because
+# scripts/hooks/unread-bodies.check blocks gh pr create and gh pr edit without it when claude is installed:
+# record_bodies_read <text>...
+record_bodies_read() {
+  local text
+  for text in "$@"; do
+    body_hash "$text" >>"$(pages_read_path)"
+  done
+}
+
 # A repository on GitHub, as a bare repository, whose main has notes.txt and scripts/configure-github,
 # and a clone of it with two branches:
 # - work adds a file in one commit.
@@ -162,6 +172,7 @@ not_a_type="The title \"skip the expenses that were already imported\" doesn't f
 
 work_in "$clone"
 record_pass
+record_bodies_read "$body" "$(<"$base/no-closing-line.md")" "Bumps jq from 1.7 to 1.8."
 
 # A title and body that the scripts pass, from --body, from --body-file, and from a path relative to the folder
 expect_allow Bash "gh pr create --title '$title' --body '$body'"
@@ -174,6 +185,7 @@ expect_allow Bash "gh pr create --base main --title '$title' --body-file ../body
 expect_block Bash "gh pr create --title 'skip the expenses that were already imported' --body-file ../body.md" \
   "$(blocked "$not_a_type")"
 expect_block Bash "gh pr create --title '$title' --body-file ../no-closing-line.md" "$(blocked "$no_closing_line")"
+expect_block_behind_wrappers "gh pr create --title '$title' --body-file ../no-closing-line.md" "$(blocked "$no_closing_line")"
 expect_block Bash "git push && GH_DEBUG=1 gh pr new --body-file ../no-closing-line.md --title 'skip the expenses that were already imported'" \
   "$(blocked "$not_a_type" "$no_closing_line")"
 
@@ -217,6 +229,7 @@ expect_allow Bash "gh pr create --head ana:20-show-the-totals --title '$title' -
 
 # Bodies from here-documents and standard input, with quotes in the text, which would end a quoted word
 quoted_body=${body/"skips the expenses"/skips the \"imported\" expenses}
+record_bodies_read "$quoted_body"
 expect_allow Bash "gh pr create --title '$title' --body \"\$(cat <<'EOF'
 $quoted_body
 EOF
@@ -445,7 +458,7 @@ expect_result "With no line break after the last pattern, the hook" 2 "$(draft_n
 worktree=$base/rules-worktree
 git worktree add --quiet --detach "$worktree" rules
 cp "$base/body.md" "$worktree/pr-body.md"
-(cd "$worktree" && record_pass && record_reading)
+(cd "$worktree" && record_pass && record_reading && record_bodies_read "$body")
 expect_block Bash "cd $worktree && gh pr create --title '$title' --body-file ../body.md" "$rules_need_draft"
 expect_allow Bash "cd $worktree && gh pr create --draft --title '$title' --body-file pr-body.md"
 expect_allow Bash "(cd $worktree) && gh pr create --title '$title' --body-file ../body.md"
@@ -478,6 +491,7 @@ git init --quiet --initial-branch=main "$base/no-remote"
 work_in "$base/no-remote"
 git commit --quiet --allow-empty -m "chore: start the project"
 record_pass
+record_bodies_read "$body"
 expect_allow Bash "gh pr create --title 'skip the expenses that were already imported' --body-file ../body.md"
 mkdir "$base/outside"
 work_in "$base/outside"
