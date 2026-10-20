@@ -1,7 +1,7 @@
 ---
 name: researcher
 description: Answers one research issue, such as whether a library can do the job, and writes the answer on the issue.
-model: opus
+model: claude-opus-5-5
 effort: high
 isolation: worktree
 background: true
