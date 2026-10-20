@@ -148,9 +148,9 @@ expand_home() {
 # Write and Edit, or each file that a patch of Codex's apply_patch adds, changes or moves to. A patch names each file
 # on a line of its own. The files that a patch deletes aren't on the list.
 # Claude Code's Write and Edit resolve each .. in a path as text before they write, so a .. after a symlink leads to
-# the folder that holds the link. The system leads to the parent of the link's target instead, and another tool may
-# leave the path to it. So each path with a .. is on the list twice: as written, and as an absolute path with each .
-# and .. resolved as text. A relative path starts from the folder the agent works in.
+# the folder that holds the link. Another tool may pass the path to the system unchanged, and the system leads to the
+# parent of the link's target instead. So each path with a .. is on the list twice: as written, and as an absolute
+# path with each . and .. resolved as text. A relative path starts from the folder the agent works in.
 read_tool_paths() {
   local line path
   tool_paths=()
@@ -170,12 +170,10 @@ read_tool_paths() {
     if [[ /$path/ != */../* ]]; then
       continue
     fi
-    # expand_home fails on a $, but no shell reads this path, so a $ in it is only part of a name.
-    expand_home "$path" || true
-    if [[ $expanded_path != /* ]]; then
-      expanded_path=${cwd:-$PWD}/$expanded_path
+    if [[ $path != /* ]]; then
+      path=${cwd:-$PWD}/$path
     fi
-    tool_paths+=("$(textual_path "$expanded_path")")
+    tool_paths+=("$(textual_path "$path")")
   done
 }
 
