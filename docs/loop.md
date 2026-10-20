@@ -130,10 +130,10 @@ when "Start a focused audit" says so.
 
 - **Drafts.** For each draft pull request that the loop opened, and that no reviewer has read yet, start a `reviewer`
   agent with the pull request's number. Give each error that the reviewer reports to the builder that opened the draft,
-  and ask it to fix the cause that the reviewer's case shows, with a test of each case that has that cause when the
-  error is in code, because a fix of the reviewer's case alone leaves the next reviewer another case of the same error.
-  If you opened the draft, fix the errors yourself. If the draft changes code that the loop's safety depends on, which
-  is the first kind in the description of `builder-deep`, start a new reviewer on it after each round of fixes, until a
+  and ask it to fix the cause that the reviewer's case shows, because a fix of that case alone leaves the next reviewer
+  another case of the same error. When the error is in code, ask for a test of each case that has that cause. If you
+  opened the draft, fix the errors yourself. If the draft changes code that the loop's safety depends on, which is the
+  first kind in the description of `builder-deep`, start a new reviewer on it after each round of fixes, until a
   reviewer reports no error. When no error remains, run `gh pr ready <number>` and `gh pr merge <number>`. If it's the
   auditor's pull request and it lacks the label `retrospective`, add the label before you run those commands, because
   the meter counts the agents' output tokens since the newest merged pull request with that label.

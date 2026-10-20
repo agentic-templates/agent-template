@@ -320,11 +320,8 @@ def working_periods(run: AgentRun, transcripts_by_id: dict[str, Path], runs_fold
 
 
 def session_periods(transcript: Path) -> list[Period]:
-    """The periods when a session worked, from its transcript, or none if the transcript doesn't exist. It reads the
-    transcript a line at a time, because an orchestrator's transcript grows past 150 MB, and keeping its entries would
-    take about 0.5 GB of memory."""
-    if not transcript.exists():
-        return []
+    """The periods when a session worked, from its transcript. It reads the transcript a line at a time, because an
+    orchestrator's transcript grows past 150 MB, and keeping its entries would take about 0.5 GB of memory."""
     with transcript.open(errors="replace") as handle:
         timed = (transcripts.timed_entry(line) for line in handle)
         entries = (entry for entry in timed if entry is not None and transcripts.has_message(entry))

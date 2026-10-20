@@ -399,7 +399,9 @@ def start_candidates(
     """The Claude accounts with a reading from the last OLDEST_START_READING, each with the types that fit its room."""
     earlier_runs = run_minutes_by_type(runs)
     orchestrators = own_account(accounts, os.environ)
-    transcript = orchestrator_transcript(log.parent / "state.md", claude_project_folders(paths.main_checkout(), accounts))
+    transcript = orchestrator_transcript(
+        log.parent / "state.md", claude_project_folders(paths.main_checkout(), accounts)
+    )
     orchestrator_periods = agent_log.session_periods(transcript) if transcript else []
     candidates: list[account_room.Candidate] = []
     for account in accounts:
