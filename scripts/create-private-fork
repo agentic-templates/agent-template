@@ -18,6 +18,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=scripts/admin-access
 source scripts/admin-access
+# shellcheck source=scripts/ghsa-id
+source scripts/ghsa-id
 
 # How often the script checks whether the fork has main, and how long it waits for main
 check_interval_seconds=5
@@ -69,8 +71,7 @@ fork_has_main() {
 if (($# != 1)); then
   stop "scripts/create-private-fork takes one argument, the GHSA ID of a security advisory, and it got $#."
 fi
-# The ID goes into the paths of GitHub's API, where a character such as / would change which request gh sends.
-if [[ ! $1 =~ ^GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$ ]]; then
+if ! is_ghsa_id "$1"; then
   stop "scripts/create-private-fork takes the GHSA ID of a security advisory, such as GHSA-2c5x-3m4v-7q8r, and it got \"$1\"."
 fi
 ghsa_id=$1

@@ -1,0 +1,7 @@
+# shellcheck shell=bash
+# Succeeds if a word is the GHSA ID of a security advisory as GitHub writes it, such as GHSA-2c5x-3m4v-7q8r. A script
+# checks an ID with it before it puts the ID in a path of GitHub's API, where a character such as / would change which
+# request gh sends: is_ghsa_id <word>
+is_ghsa_id() {
+  [[ $1 =~ ^GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$ ]]
+}

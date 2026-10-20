@@ -771,45 +771,138 @@ expect_allow Bash 'gh repo create jtmpl/listed --public'
 expect_block Bash 'gh pr comment 5 -R someone/else --body Hello' "$(other_repository someone/else)"
 hooks_folder=$project/scripts/hooks test_cwd=$project
 
-# Writing the file of reviewed fixes in the main checkout's loop folder. Only the orchestrator's session, the one that
-# the state file names, may write it. A builder runs as a subagent of that session, with an agent id of its own, or in
-# a session of its own.
+# Writing the files in the main checkout's loop folder that a release reads. Only the orchestrator's session, the one
+# that the state file names, may write them. A builder runs as a subagent of that session, with an agent id of its own,
+# or in a session of its own.
 orchestrator=11111111-aaaa-4bbb-8ccc-000000000001
 printf '%s\n' "session: $orchestrator" "goal: the release" >"$project/.loop/state.md"
-reviewed_fixes=$project/.loop/reviewed-fixes
+# Prints the message that blocks a write to the file whose reason is in reason:
+# only_orchestrator <the file's path as the message names it>
 only_orchestrator() {
-  echo "Blocked: only the orchestrator writes $1, because a release includes each fix that it marks as reviewed without asking the maintainer. Go on with the other work, and list the change in your report."
+  echo "Blocked: only the orchestrator writes $1, because $reason. Go on with the other work, and list the change in your report."
+}
+# Checks that the hook blocks an action with a message, unless the orchestrator's session takes it:
+# expect_only_from_orchestrator <tool name> <command, patch or path> <message>
+expect_only_from_orchestrator() {
+  expect_action_from abc123 "" "$1" "$2" 2 "$3"
+  expect_action_from "$orchestrator" agent-7 "$1" "$2" 2 "$3"
+  expect_action_from "$orchestrator" "" "$1" "$2" 0 ""
 }
 # Checks that the hook blocks an action that writes the file, unless the orchestrator's session takes it:
 # expect_only_orchestrator <tool name> <command, patch or path> <the file's path as the message names it>
 expect_only_orchestrator() {
-  expect_action_from abc123 "" "$1" "$2" 2 "$(only_orchestrator "$3")"
-  expect_action_from "$orchestrator" agent-7 "$1" "$2" 2 "$(only_orchestrator "$3")"
-  expect_action_from "$orchestrator" "" "$1" "$2" 0 ""
+  expect_only_from_orchestrator "$1" "$2" "$(only_orchestrator "$3")"
 }
-mark='refs/private-fork/GHSA-1234-5678-9abc/fix 0123456789abcdef0123456789abcdef01234567'
-expect_only_orchestrator Bash "echo '$mark' >> .loop/reviewed-fixes" .loop/reviewed-fixes
-expect_only_orchestrator Bash "echo '$mark' >'$reviewed_fixes'" "$reviewed_fixes"
-expect_only_orchestrator Bash "printf '%s\n' '$mark' | tee -a .loop/reviewed-fixes" .loop/reviewed-fixes
-expect_only_orchestrator Bash "cd .loop && echo '$mark' >> reviewed-fixes" reviewed-fixes
-expect_only_orchestrator Bash 'cp /tmp/reviewed-fixes .loop/' .loop/reviewed-fixes
-expect_only_orchestrator Bash 'mv marks.txt .loop/reviewed-fixes' .loop/reviewed-fixes
-expect_only_orchestrator Bash "sed -i '' 's/0123/4567/' .loop/reviewed-fixes" .loop/reviewed-fixes
-expect_only_orchestrator Bash "perl -pi -e 's/0123/4567/' .loop/reviewed-fixes" .loop/reviewed-fixes
-# macOS finds a file by its name in any case.
-expect_only_orchestrator Bash "echo '$mark' >> .loop/Reviewed-Fixes" .loop/Reviewed-Fixes
-expect_only_orchestrator Write "$reviewed_fixes" "$reviewed_fixes"
-expect_only_orchestrator Edit "$reviewed_fixes" "$reviewed_fixes"
-expect_only_orchestrator apply_patch $'*** Begin Patch\n*** Add File: .loop/reviewed-fixes\n+'"$mark"$'\n*** End Patch\n' \
-  .loop/reviewed-fixes
-expect_allow Bash 'cat .loop/reviewed-fixes'
-expect_allow Bash "grep -c GHSA .loop/reviewed-fixes > counts.txt"
-expect_allow Bash "echo '$mark' >> notes/reviewed-fixes"
+for name in reviewed-fixes advisory-marks; do
+  case $name in
+    reviewed-fixes)
+      reason="a release includes each fix that it marks as reviewed without asking the maintainer"
+      mark='refs/private-fork/GHSA-1234-5678-9abc/fix 0123456789abcdef0123456789abcdef01234567'
+      other_case=Reviewed-Fixes
+      ;;
+    advisory-marks)
+      reason="a release waits for the fix of each advisory that it marks as holding the release"
+      mark='GHSA-1234-5678-9abc fix-merged 0123456789abcdef0123456789abcdef01234567'
+      other_case=Advisory-Marks
+      ;;
+  esac
+  file=$project/.loop/$name
+  expect_only_orchestrator Bash "echo '$mark' >> .loop/$name" ".loop/$name"
+  expect_only_orchestrator Bash "echo '$mark' >'$file'" "$file"
+  expect_only_orchestrator Bash "printf '%s\n' '$mark' | tee -a .loop/$name" ".loop/$name"
+  expect_only_orchestrator Bash "cd .loop && echo '$mark' >> $name" "$name"
+  expect_only_orchestrator Bash "cp /tmp/$name .loop/" ".loop/$name"
+  expect_only_orchestrator Bash "mv marks.txt .loop/$name" ".loop/$name"
+  expect_only_orchestrator Bash "sed -i '' 's/0123/4567/' .loop/$name" ".loop/$name"
+  expect_only_orchestrator Bash "perl -pi -e 's/0123/4567/' .loop/$name" ".loop/$name"
+  # macOS finds a file by its name in any case.
+  expect_only_orchestrator Bash "echo '$mark' >> .loop/$other_case" ".loop/$other_case"
+  expect_only_orchestrator Write "$file" "$file"
+  expect_only_orchestrator Edit "$file" "$file"
+  expect_only_orchestrator apply_patch $'*** Begin Patch\n*** Add File: .loop/'"$name"$'\n+'"$mark"$'\n*** End Patch\n' \
+    ".loop/$name"
+  expect_allow Bash "cat .loop/$name"
+  expect_allow Bash "grep -c GHSA .loop/$name > counts.txt"
+  expect_allow Bash "echo '$mark' >> notes/$name"
+  # A worktree's own loop folder holds no file that a release reads.
+  test_cwd=$worktree
+  expect_block Bash "echo '$mark' >> '$file'" "$(only_orchestrator "$file")"
+  expect_allow Bash "echo '$mark' >> .loop/$name"
+  test_cwd=$project
+done
 expect_allow Write "$project/.loop/allowed-repositories"
+
+# Deleting or moving away the file of advisory marks, or a folder that holds it. Without the file, a release waits for
+# no advisory, so only the orchestrator's session may take it away. Without reviewed-fixes, a release asks the
+# maintainer about each fix, so any session may take that file away.
+# Checks that the hook blocks a command that takes away the file of advisory marks, unless the orchestrator's session
+# runs it: expect_takes_away <command> <the command's name> <what the command would do, as in "delete .loop">
+expect_takes_away() {
+  expect_only_from_orchestrator Bash "$1" "Blocked: $2 would $3, which takes away $project/.loop/advisory-marks. Only the orchestrator deletes or moves that file, because a release waits for the fix of each advisory that it marks as holding the release. Delete or move only other files, and list in your report any change that the file needs."
+}
+for name in rm unlink shred srm trash; do
+  expect_takes_away "$name .loop/advisory-marks" "$name" 'delete .loop/advisory-marks'
+done
+expect_takes_away "rm -f '$project/.loop/advisory-marks'" rm "delete $project/.loop/advisory-marks"
+expect_takes_away 'cd .loop && rm advisory-marks' rm 'delete advisory-marks'
+expect_takes_away 'rm .loop/Advisory-Marks' rm 'delete .loop/Advisory-Marks'
+expect_takes_away 'rm -rf .loop' rm 'delete .loop'
+expect_takes_away "rm -rf '$project/.loop/'" rm "delete $project/.loop/"
+# The shell fills in a wildcard before rm runs.
+expect_takes_away 'rm -rf .loop/*' rm 'delete .loop/*'
+expect_takes_away 'rm .loop/advisory-mark?' rm 'delete .loop/advisory-mark?'
+expect_takes_away 'find .loop -delete' find 'delete files in .loop'
+expect_takes_away 'find . -name advisory-marks -delete' find 'delete files in .'
+expect_takes_away "find .loop -name '*-marks' -exec rm {} +" find 'delete files in .loop'
+expect_takes_away 'mv .loop/advisory-marks /tmp/old-marks' mv 'move .loop/advisory-marks'
+expect_takes_away 'mv .loop/advisory-marks .loop/old-marks' mv 'move .loop/advisory-marks'
+expect_takes_away 'mv -t /tmp .loop/advisory-marks' mv 'move .loop/advisory-marks'
+expect_takes_away 'mv .loop .loop-old' mv 'move .loop'
+# The shell turns a word with a brace expansion into several words before the command runs, so the last word of mv can
+# turn into a source too.
+expect_takes_away 'mv .loop/advisory-marks{,.old}' mv 'move .loop/advisory-marks{,.old}'
+expect_takes_away 'mv .loop/blocks.log .loop{,-old}' mv 'move .loop{,-old}'
+expect_takes_away 'rm .loop/advisory-marks{,.bak}' rm 'delete .loop/advisory-marks{,.bak}'
+expect_takes_away 'rm -rf .loop/{runs,advisory-marks}' rm 'delete .loop/{runs,advisory-marks}'
+expect_takes_away 'rm .loop/advisory-mark{r..t}' rm 'delete .loop/advisory-mark{r..t}'
+# git clean -x or -X deletes the files that git ignores, such as the loop's folder, and git stash -a or --all stashes
+# them, also when git runs in a folder inside the main checkout.
+for command in 'git clean -fdx' 'git clean -f -X' 'cd scripts && git clean -fdx' 'git -C scripts clean -fdx'; do
+  expect_takes_away "$command" git "delete the files that it ignores in $project"
+done
+for command in 'git stash -a' 'git stash push --all -m wip' 'git stash push --al' 'git stash save -ka wip'; do
+  expect_takes_away "$command" git "stash the files that it ignores in $project"
+done
+expect_allow Bash 'rm -rf .loop/runs/review-1 .loop/blocks.log'
+expect_allow Bash 'rm .loop/advisory-marks.bak'
+expect_allow Bash 'find .loop/runs -delete'
+expect_allow Bash 'mv .loop/runs/review-1 .loop/runs/review-2'
+expect_allow Bash 'cp .loop/advisory-marks /tmp/marks'
+expect_allow Bash 'mv .loop/blocks{,.old}.log'
+expect_allow Bash 'rm .loop/advisory-marks.{bak,old}'
+expect_allow Bash 'rm -rf .loop/runs/{review-1,review-2}'
+expect_allow Bash 'git clean -fd'
+# The letters after -e are the pattern that git clean keeps, and the ones after -m are the stash's message.
+expect_allow Bash "git clean -fd -e'*.xml'"
+expect_allow Bash 'git stash -u'
+expect_allow Bash 'git stash list'
+expect_allow Bash "git stash push -m'keep all'"
+# The hook can't tell the folder that git runs in.
+# shellcheck disable=SC2016 # The command is the text that the agent sends, so $folder stays as written.
+expect_allow Bash 'cd "$folder" && git clean -fdx'
+for session in abc123 "$orchestrator"; do
+  expect_from "$session" agent-7 'rm .loop/reviewed-fixes' 0 ""
+  expect_from "$session" agent-7 'mv .loop/reviewed-fixes /tmp/old-fixes' 0 ""
+done
 # A worktree's own loop folder holds no file that a release reads.
 test_cwd=$worktree
-expect_block Bash "echo '$mark' >> '$reviewed_fixes'" "$(only_orchestrator "$reviewed_fixes")"
-expect_allow Bash "echo '$mark' >> .loop/reviewed-fixes"
+expect_takes_away "rm -rf '$project/.loop'" rm "delete $project/.loop"
+expect_takes_away "git -C '$project' clean -fdx" git "delete the files that it ignores in $project"
+expect_takes_away "GIT_DIR='$project/.git' GIT_WORK_TREE='$project' git stash -a" git \
+  "stash the files that it ignores in $project"
+expect_allow Bash 'rm -rf .loop'
+expect_allow Bash 'git clean -fdx'
+expect_allow Bash 'git stash -a'
 test_cwd=$project
 
 # Without an origin, the hook can't tell which repository is this one.
