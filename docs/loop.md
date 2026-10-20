@@ -167,7 +167,8 @@ Besides the `session:` and `pid:` lines, it holds:
 - each running agent, with its issue or pull request, and its agent id or `scripts/loop/run-builder` task
 - the drafts that a reviewer has read
 - the issues whose builder stopped once
-- the focused audits since the last retrospective, each with its finding, its issue and the time it started
+- the focused audits since the last auditor's pull request merged, each with its finding, its issue and the time it
+  started
 - the `BLOCKED` pull requests from your last pass
 - what you do next, and the open questions
 
@@ -304,6 +305,4 @@ without waiting for the next retrospective:
    sandbox that can't reach GitHub, and so can't open an issue for each fix.
 4. Add the audit to the state file's list of focused audits, with the time it started.
 
-A focused audit doesn't count as a retrospective, so the meter goes on counting toward the next one. When an
-auditor's pull request merges, empty the state file's list of focused audits, because the meter then compares the time
-of `scripts/check` with the new retrospective.
+A focused audit doesn't count as a retrospective, so the meter goes on counting toward the next one.
