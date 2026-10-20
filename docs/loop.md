@@ -169,10 +169,12 @@ to hand off its work, so that you can plan the agent that takes over. Start it a
 ends.
 
 Your own account is the Claude account in `.loop/accounts.json` whose `env` values match this session's
-environment, such as `CLAUDE_CONFIG_DIR`. Reviewers and the auditor run only on your own account. Start each builder
-and researcher on the account with the lowest `week` percentage on its line, among the accounts whose advice lets you
-start the agent. A Codex account builds only the kinds `research` and `other`. Each account's advice says what you
-can start on that account:
+environment, such as `CLAUDE_CONFIG_DIR`. In "Launch", for the builder or researcher of each issue that
+`scripts/take-next-issue` gives you, choose the account whose line has the lowest `week` percentage, among the
+accounts whose advice lets you start the agent. A Codex account builds only the kinds `research` and `other`. Start
+reviewers, the auditor and each builder that needs more than its issue, such as one that fixes a pull request or takes
+over a hand-off, on your own account, in your session. `scripts/loop/run-builder` can't start such a builder, because
+it gives a builder only its issue's text. Each account's advice says what you can start on that account:
 
 - **go:** start any agent.
 - **watch:** keep the number of agents that run on the account from growing, and start no auditor.
