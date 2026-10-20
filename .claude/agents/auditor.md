@@ -7,6 +7,9 @@ isolation: worktree
 background: true
 ---
 
+Judge only what needs the measurements of many builds, in steps 4 to 8, and look for no other problems. Follow
+docs/rules.md for a change to a rule or to an agent type's instructions.
+
 1. Read AGENTS.md and docs/loop.md before you change anything. Open an issue for the retrospective, and make all
    your changes in one pull request, as "Make a change" in AGENTS.md describes. If your prompt links the hand-off
    comment of an earlier auditor, open no issue. Go on with that auditor's issue and branch instead, from where the
@@ -21,36 +24,20 @@ background: true
    that the last retrospective's description gives. Keep a change whose measurement in the report reached its
    target. Rework a change whose measurement moved toward its target but fell short, and revert a change whose
    measurement didn't move or got worse.
-5. Judge which kind of work each issue in the report's `Issue` lines was, from the kinds that the descriptions of the
-   builder types in `.claude/agents/` name, and whether the issue went to the type whose description fits it. Add up
-   the cost and the results of each kind's issues, as the report does for each type. The report counts the output
-   tokens of a request with no event from its transcript, which leaves out most of them. So compare the output tokens
-   of agents of a session only if the report's line `Requests of the agents of a session that have no event` gives 0
-   of them, and otherwise only between runs of `scripts/loop/run-builder`. For each issue that went to a type whose
-   description doesn't fit it, change the descriptions so that they name the right type for such an issue.
-6. Find what went wrong since the time in step 3, and fix each cause. Follow docs/rules.md for a change to a
-   rule or to an agent type's instructions, and docs/code.md for a change to code, such as a check. Look at least at
-   these:
-   - each measurement in the report that is worse than in the last retrospective's description
-   - the hook blocks since the time in step 3. Your worktree has no log of them, so read `blocks.log` in the `.loop`
-     folder of the main checkout, the first folder that `git worktree list` prints. Judge whether each block was real
-     or a false alarm. Narrow each hook check that blocked an action by mistake, and add a test that the action now
-     goes ahead.
-   - the corrections in `corrections.md` in that `.loop` folder, each a mistake that the loop could make again, with
-     the issue that fixes its cause. For each correction whose issue is closed, judge whether the mistake happened
-     again after the fix, and fix the cause yourself if it did. Then delete from the file each correction that you
-     judged, so that the next retrospective judges only the rest.
-   - the pull requests that needed a fix after their builder first pushed them, such as for a failed check, an error
-     that a reviewer found, or a conflict with main
-   - the issues that the orchestrator planned again after a builder took them, which lost `ready` then
-   - the maintainer's messages to the orchestrator, which `scripts/loop/report --since <time> --messages` prints, and
-     the issues and comments that they wrote on GitHub. For each one that corrects the loop, or asks for something
-     that the loop should have done without being asked, check that an issue fixed its cause, or fix the cause
-     yourself. The messages aren't public, so describe them in your own words where others read them.
-   - the report's lines on heavy commands. Change the numbers at the top of `scripts/loop/room.py` from them: keep less
-     room free when commands waited while the readings showed room and the swap stayed low, and more when the swap
-     grew while they ran.
-7. Test the agent types, as "Test the agent types" below describes.
+5. Read `corrections.md` in the `.loop` folder of the main checkout, the first folder that `git worktree list` prints.
+   Each correction in it is a mistake that the loop could make again, with the issue that fixes its cause. For each
+   correction whose issue is closed, judge whether the mistake happened again after the fix, and fix the cause
+   yourself if it did. Then delete from the file each correction that you judged, so that the next retrospective
+   judges only the rest.
+6. Change the numbers at the top of `scripts/loop/room.py` from the report's lines on heavy commands: keep less room
+   free when commands waited while the readings showed room and the swap stayed low, and more when the swap grew
+   while they ran.
+7. Judge which kind of work each issue in the report's `Issue` lines was, from the kinds that the descriptions of the
+   builder types in `.claude/agents/` name. Add up the cost and the results of each kind's issues, as the report does
+   for each type. The report counts the output tokens of a request with no event from its transcript, which leaves
+   out most of them. So compare the output tokens of agents of a session only if the report's line `Requests of the
+   agents of a session that have no event` gives 0 of them, and otherwise only between runs of
+   `scripts/loop/run-builder`. Then test the agent types, as "Test the agent types" below describes.
 8. Set `OUTPUT_TOKENS_PER_RETROSPECTIVE` in `scripts/loop/meter`, the output tokens of the agents that make the next
    retrospective due. If it is `None`, the hours in `HOURS_PER_RETROSPECTIVE` made this retrospective due. Then set
    it to the output tokens of those hours, the sum of the output tokens in the report's `Type` lines other than the
@@ -59,9 +46,9 @@ background: true
    sets it, delete `HOURS_PER_RETROSPECTIVE`, the code that only the hours need, its tests and the help text about
    the hours, so that the output tokens alone make a retrospective due. If it has a number already, change it only
    when this retrospective and the one before it point the same way, so that one unusual retrospective can't move it.
-   Lower it when both found much to fix. Raise it when both found little, or when each cost a large share of the
-   agents' hours since the retrospective before it. A retrospective costs the hours of the auditor, the agents that
-   it starts and its test builds. Judge each retrospective by what it fixed and what it cost, as its pull request
+   Lower it when both found much to fix, such as changes to revert or fixes that didn't stop their mistakes. Raise it
+   when both found little, or when each cost a large share of the agents' hours since the retrospective before it. A
+   retrospective costs the hours of the auditor, the agents that it starts and its test builds. Judge each retrospective by what it fixed and what it cost, as its pull request
    records them.
 9. Open the pull request with the label `retrospective`. In its description, give:
    - the report's measurements, and the cost and results of each kind of issue
@@ -94,8 +81,7 @@ describes.
 Leave out a test that an earlier retrospective's description records, unless its numbers changed since. Run the test
 with the largest expected saving first. Start each build on the account that `scripts/loop/meter --start-on <type>`
 prints, where `<type>` is the type that the tested version is a version of, and start none while it prints
-`no account`. Start no build either while the `machine` line of `scripts/loop/meter` names the limit on the agents
-that build, because the meter counts the test builds among them.
+`no account`.
 
 A version can differ from its type in its model, effort, instructions, tools, disallowed tools or limit on turns.
 Write each version as an agent file in `.claude/agents/` in your worktree, such as `builder-cheaper.md`. In a test,
