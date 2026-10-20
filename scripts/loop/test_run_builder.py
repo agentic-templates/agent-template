@@ -463,7 +463,7 @@ class ClaudeTest(RunBuilderTest):
         [call] = self.calls("claude")
         brief = (self.run_folder() / "brief.md").read_text()
         settings = ["--model", "opus", "--effort", "high", "--append-system-prompt", "Build it."]
-        self.assertEqual(call["args"], [*run_builder.CLAUDE_COMMAND[1:], *settings, brief])
+        self.assertEqual(call["args"], [*run_builder.CLAUDE_COMMAND[1:], *settings, "--", brief])
         self.assertTrue(brief.startswith("Issue #12: Fix the importer\n\nIt drops rows.\n"))
         self.assertIn(
             'of the kind `other`, for the orchestrator of this repository\'s loop. Read only\n"Build one issue"', brief
@@ -473,7 +473,7 @@ class ClaudeTest(RunBuilderTest):
         self.assertEqual(environment["CLAUDE_CONFIG_DIR"], "/claude-main")
         self.assertEqual(environment["CLAUDE_CODE_RETRY_WATCHDOG"], "1")
         self.assertEqual(environment["LOOP_RUN"], "1")
-        self.assertEqual(environment["LOOP_HAND_OFF"], "1")
+        self.assertEqual(environment["LOOP_HAND_OFF"], "builder")
         self.assertEqual(environment["GH_REPO"], "owner/repo")
         self.assertEqual([name for name in caller if name in environment], ["CLAUDE_CONFIG_DIR"])
         events = request_events.event_variables(self.receiver.port)
