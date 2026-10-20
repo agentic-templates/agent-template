@@ -98,9 +98,10 @@ Start an agent for each ready issue, as far as "Read the meter" allows:
    kind, such as `12 other` or `13 research`. If it prints `none`, go on with "Land".
 2. If you know that the issue's change is one line, make it yourself, in a worktree of your own, as "Make a change"
    in AGENTS.md describes.
-3. Otherwise, start a background agent of the type that fits the issue: `researcher` for a `research` issue, and
-   otherwise the builder type whose description fits the change. Don't give it a model, so that it runs at its type's
-   model and effort. After its prompt's first line, name the files to start from if you know them.
+3. Otherwise, choose the agent's type: `researcher` for a `research` issue, and otherwise the builder type whose
+   description fits the change. Choose its account as "Read the meter" describes. If that's your own account, start a
+   background agent of that type. Don't give it a model, so that it runs at its type's model and effort. After its
+   prompt's first line, name the files to start from if you know them.
 
 After each issue, go back to step 1. Start an auditor too when "Start a retrospective" says so.
 
@@ -168,9 +169,10 @@ to hand off its work, so that you can plan the agent that takes over. Start it a
 ends.
 
 Your own account is the Claude account in `.loop/accounts.json` whose `env` values match this session's
-environment, such as `CLAUDE_CONFIG_DIR`. Start an agent on another account only when your own account's advice
-doesn't let you start it. Reviewers and the auditor run only on your own account. On each account, follow its own
-advice:
+environment, such as `CLAUDE_CONFIG_DIR`. Reviewers and the auditor run only on your own account. Start each builder
+and researcher on the account with the lowest `week` percentage on its line, among the accounts whose advice lets you
+start the agent. A Codex account builds only the kinds `research` and `other`. Each account's advice says what you
+can start on that account:
 
 - **go:** start any agent.
 - **watch:** keep the number of agents that run on the account from growing, and start no auditor.
@@ -185,8 +187,7 @@ To start an agent for an issue on another account, run one of these commands as 
 that `scripts/take-next-issue` printed as `<issue> <kind>`. Its last line says how the run ended, and where the
 agent's report is.
 
-- `scripts/loop/run-builder <issue> <kind> --tool codex --account <name>` for a Codex account, which builds only the
-  kinds `research` and `other`
+- `scripts/loop/run-builder <issue> <kind> --tool codex --account <name>` for a Codex account
 - `scripts/loop/run-builder <issue> <kind> --tool claude --account <name> --type <type>` for a Claude account, with
   the type that fits the issue, as step 3 of "Launch" chooses it
 
