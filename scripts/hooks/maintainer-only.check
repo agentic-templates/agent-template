@@ -663,11 +663,11 @@ text_flags=" -b --body -t --title -c --comment -F --body-file --description -n -
 #   a pull request
 # - GH_REPO, whose value check_gh puts in gh_repo
 # - the remote named origin of the folder that the command runs in
-# It also sets guessed_repository, as find_named_repository describes.
+# It also sets guessed_repositories, as find_named_repository describes.
 # For gh api, run read_arguments first.
 find_destination() {
   local origin
-  destination="" guessed_repository=""
+  destination="" guessed_repositories=()
   if [[ ${command_words[1]:-} == api ]]; then
     if [[ ! $argument =~ ^/?repos/([^/]+/[^/?#]+) ]]; then
       return 0
@@ -716,17 +716,10 @@ read_command_flags_with_value() {
   esac
 }
 
-# Sets destination to the repository that the words of a gh command other than gh api name, or to empty. It reads -R
-# and --repo as read_arguments in helpers.bash reads them, with the command's flags that take a value.
-# For a command whose flags the hooks don't list, it reads each flag other than -R and --repo as one that takes no
-# value, as in -dRowner/name, which it reads as -d -R owner/name. But a -R of such a command can be part of the value
-# of a flag before it, in the same word or the word before, and gh then posts to the repository that the command names
-# without it. So the function sets guessed_repository to the repository after -R, and goes on as if the command gave
-# no -R.
-find_named_repository() {
-  local i word command_flags_with_value
-  destination="" guessed_repository=""
-  # These commands take the repository as their argument, and take no -R.
+# Sets destination to the repository that gh repo edit, delete, archive or unarchive in command_words takes as its
+# argument, or to empty for another command or when the command names none. These commands take no -R.
+read_repository_argument() {
+  destination=""
   case "${command_words[1]:-} ${command_words[2]:-}" in
     "repo edit")
       read_arguments 3 "$repo_edit_flags_with_value"
@@ -737,6 +730,29 @@ find_named_repository() {
       destination=$argument
       ;;
   esac
+}
+
+# Adds the repository of each -R and --repo that read_arguments found to guessed_repositories.
+add_guessed_repositories() {
+  local i
+  for ((i = 0; i < ${#last_flags[@]}; i++)); do
+    if [[ ${last_flags[i]} == -R || ${last_flags[i]} == --repo ]]; then
+      guessed_repositories+=("${flag_values[i]}")
+    fi
+  done
+}
+
+# Sets destination to the repository that the words of a gh command other than gh api name, or to empty. It reads -R
+# and --repo as read_arguments in helpers.bash reads them, with the command's flags that take a value.
+# For a command whose flags the hooks don't list, it reads each flag other than -R and --repo as one that takes no
+# value, as in -dRowner/name, which it reads as -d -R owner/name. But a -R of such a command can be part of the value
+# of a flag before it, in the same word or the word before. gh then takes an earlier -R, or without one, posts to the
+# repository that the command names without -R. So the function adds the repository of each -R and --repo to
+# guessed_repositories, and goes on as if the command gave no -R.
+find_named_repository() {
+  local i word command_flags_with_value
+  guessed_repositories=()
+  read_repository_argument
   if [[ -n $destination ]]; then
     return 0
   fi
@@ -749,7 +765,7 @@ find_named_repository() {
     fi
   else
     read_arguments 2 " -R --repo "
-    guessed_repository=${repository[1]:-}
+    add_guessed_repositories
   fi
   if [[ ${command_words[1]:-} == repo ]]; then
     return 0
@@ -777,14 +793,17 @@ block_if_other_repository() {
 }
 
 # Blocks a gh command that posts to a repository other than this one, unless the list of allowed repositories names
-# it. When the command's -R can be part of the value of a flag before it, the command can post to either repository,
-# so both must be allowed.
+# it. When a -R of the command can be part of the value of a flag before it, the command can post to the repository of
+# any -R, or to the one it names without -R, so all of them must be allowed.
 check_destination() {
+  local guessed
   if ! gh_posts; then
     return 0
   fi
   find_destination
-  block_if_other_repository "$guessed_repository"
+  for guessed in ${guessed_repositories[@]+"${guessed_repositories[@]}"}; do
+    block_if_other_repository "$guessed"
+  done
   block_if_other_repository "$destination"
 }
 

@@ -500,6 +500,11 @@ for command in 'GH_REPO=someone/else gh run rerun 12 -jRjtmpl/project' \
   'GH_REPO=someone/else gh run rerun 12 -j -Rjtmpl/project'; do
   expect_block Bash "$command" "$(other_repository someone/else)"
 done
+# gh takes the last -R that is a flag, so a later -R that can be the value of a flag before it can hide an earlier one.
+for command in 'gh run rerun 12 -R someone/else -j -Rjtmpl/project' \
+  'gh run rerun 12 -Rsomeone/else -jRjtmpl/project' 'gh run rerun 12 --repo=someone/else --job -R=jtmpl/project'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
 expect_allow Bash 'gh run rerun 12 -dRjtmpl/listed'
 # gh repo edit, delete, archive and unarchive take no -R, so a -R there is part of the value of a flag before it, such
 # as the -d of gh repo edit, which takes a description.
