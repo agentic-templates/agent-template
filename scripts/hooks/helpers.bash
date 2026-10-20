@@ -353,27 +353,28 @@ read_push_arguments() {
   fi
 }
 
-# Moves repository flags between a gh command group and its subcommand just after the subcommand,
-# so that the checks read the same words and flags in either position. Other flags and groups stay as written.
-# A repository flag gives the repository in the next word, as in -R jtmpl/other, or in the same word, as in
-# -Rjtmpl/other, -R=jtmpl/other or --repo=jtmpl/other.
-move_gh_repository_flags() {
+# Moves the words between a gh command group and its subcommand to just after the subcommand, in their order, so that
+# the checks read the subcommand and its flags wherever the command writes them. gh api has no subcommand, so its words
+# stay as written.
+# gh finds the subcommand as its command library, cobra, does. It skips each word that starts with a dash. When that
+# word is a single short flag or a long flag without =, other than --help, it also skips the next word, as in
+# -R jtmpl/other or --title Title, because it doesn't know yet whether the flag takes a value. It skips an empty word
+# too, and finds no subcommand after --.
+move_flags_after_gh_subcommand() {
   local index=2
-  if ((${#command_words[@]} < 3)) || [[ ${command_words[0]##*/} != gh ]]; then
+  if ((${#command_words[@]} < 3)) || [[ ${command_words[0]##*/} != gh || ${command_words[1]} == api ]]; then
     return 0
   fi
-  case ${command_words[1]} in
-    pr | issue | label | release) ;;
-    *) return 0 ;;
-  esac
   while ((index < ${#command_words[@]})); do
     case ${command_words[index]} in
-      -R | --repo) index=$((index + 2)) ;;
-      -R?* | --repo=*) index=$((index + 1)) ;;
+      --) return 0 ;;
+      --help | -*=*) index=$((index + 1)) ;;
+      -? | --*) index=$((index + 2)) ;;
+      "" | -*) index=$((index + 1)) ;;
       *) break ;;
     esac
   done
-  # An incomplete flag or a command without a subcommand starts no subcommand check.
+  # The words stay as written when the subcommand comes first, or when gh finds none.
   if ((index == 2 || index >= ${#command_words[@]})); then
     return 0
   fi

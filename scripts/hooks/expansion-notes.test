@@ -141,7 +141,7 @@ expect_note pull-request-rules 'echo "$folder"; gh pr create --label "$label" --
 expect_note issues-and-labels 'gh issue create --label bug --body ""' no
 expect_note pull-request-rules 'gh pr create --title "" --body ""' no
 # A repository flag before the subcommand keeps the expansion note of the field. Each check moves the flag with
-# move_gh_repository_flags in helpers.bash, so one check stands for all.
+# move_flags_after_gh_subcommand in helpers.bash, so one check stands for all.
 for repository in '-R other/project' '--repo other/project' '--repo=other/project'; do
   expect_note posted-text "gh issue $repository comment 7 -b ${active_words[0]}" yes
   expect_note posted-text "gh issue $repository comment 7 -b ${literal_words[0]}" no

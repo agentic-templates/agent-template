@@ -834,7 +834,7 @@ check_gh() {
       gh_repo=${word#GH_REPO=}
     fi
   done
-  move_gh_repository_flags
+  move_flags_after_gh_subcommand
   case "${command_words[1]:-} ${command_words[2]:-}" in
     "pr merge")
       read_arguments 3 "$merge_flags_with_value"
