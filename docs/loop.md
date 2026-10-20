@@ -36,6 +36,10 @@ The steps:
 
 Work through these steps each time you wake, for a message or because an agent or a background task ended.
 
+Make a change of text yourself, such as a fix to a guide, when you can write it in full, because a builder would only
+write it again. Run `scripts/check` for it as a background task, and go on with the cycle while it runs. Give each
+change of code to a builder, even a change of one line, because a failing check in code can take many runs to fix.
+
 To give a builder something, such as a correction or a reviewer's errors, send it a message. A builder that
 `scripts/loop/run-builder` started can't take messages. Wait until its run ends, and then start a new builder with
 the message, of the type `builder` unless a step below names another type. Choose its account as "Read the meter"
@@ -111,8 +115,8 @@ Start an agent for each ready issue, as far as "Read the meter" allows:
 
 1. Run `scripts/take-next-issue`. It assigns you the next ready issue that can start, and prints its number and its
    kind, such as `12 other` or `13 research`. If it prints `none`, go on with "Land".
-2. If you know that the issue's change is one line, make it yourself, in a worktree of your own, as "Make a change"
-   in AGENTS.md describes.
+2. If the start of "Work through the cycle" says to make the issue's change yourself, make it in a worktree of your
+   own, as "Make a change" in AGENTS.md describes.
 3. Otherwise, choose the agent's type: `researcher` for a `research` issue, and otherwise the builder type whose
    description fits the change. If it's a builder type and the meter's `machine` line says
    `start no builder or test build`, start none on any account, and skip the issue as "Read the meter" describes for
