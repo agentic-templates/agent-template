@@ -35,7 +35,7 @@ class AgentsLineTest(MeterTest):
         if event == "start":
             line |= {"type": agent_type, "issue": issue, "test": False, "pid": pid}
         else:
-            line |= {"minutes": 1.0}
+            line |= {"minutes": 1.0, "output_tokens": 1}
         with (self.loop / "agents.jsonl").open("a") as handle:
             handle.write(json.dumps(line) + "\n")
 
@@ -130,6 +130,13 @@ class AgentsLineTest(MeterTest):
 
     def test_says_when_no_agent_runs_without_a_log(self) -> None:
         self.assertEqual(self.agents(), "agents | none running")
+
+    def test_gives_the_context_of_an_agent_whose_transcript_is_in_the_folder_of_another_claude_account(self) -> None:
+        self.subagents = self.orchestrator_on_another_account() / "abc123" / "subagents"
+        self.subagents.mkdir(parents=True)
+        self.log("start", "toolu_01", issue=64)
+        self.subagent("a1", "toolu_01", [call(300_000)])
+        self.assertEqual(self.agents(), "agents | builder #64 300k")
 
     def test_leaves_out_an_agent_whose_process_ended_and_lists_one_whose_process_runs_or_is_unknown(self) -> None:
         self.log("start", "toolu_01", issue=64, pid=101)

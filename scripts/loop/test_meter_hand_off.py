@@ -3,7 +3,7 @@ import json
 import os
 from typing import Any
 
-from test_meter import NOW, MeterTest, meters
+from test_meter import INTERRUPTION, NOW, MeterTest, meters
 
 
 class HandOffTest(MeterTest):
@@ -89,6 +89,19 @@ class HandOffTest(MeterTest):
         self.log_agent("c", NOW + dt.timedelta(minutes=2))
         self.reading(83.0)
         self.assertEqual([*self.notes(), self.hand_off("c")], ["none", "none", "soon"])
+
+    def test_leaves_out_an_agent_that_the_user_interrupted_whose_transcript_is_in_the_folder_of_another_account(
+        self,
+    ) -> None:
+        # Counted as running, the builder c would get the note soon, as a does.
+        subagents = self.orchestrator_on_another_account() / "abc123" / "subagents"
+        subagents.mkdir(parents=True)
+        transcript = subagents / "agent-c1.jsonl"
+        transcript.write_text('{"type": "user", "message": {"content": "12 other"}}\n' + INTERRUPTION + "\n")
+        transcript.with_suffix(".meta.json").write_text(json.dumps({"agentType": "builder", "toolUseId": "c"}))
+        self.log_agent("c", NOW - dt.timedelta(minutes=1))
+        self.reading(90.5)
+        self.assertEqual([*self.notes(), self.hand_off("c")], ["soon", "none", "none"])
 
     def test_counts_an_agent_with_a_note_at_the_time_of_a_hand_off(self) -> None:
         self.note("agent-a.400000", "a", NOW)

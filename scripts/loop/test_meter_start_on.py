@@ -1,7 +1,8 @@
 import datetime as dt
 import json
+import os
 
-from test_meter import NOW, MeterTest, meters
+from test_meter import INTERRUPTION, NOW, MeterTest, meters, project_folder
 
 
 class StartOnTest(MeterTest):
@@ -87,6 +88,37 @@ class StartOnTest(MeterTest):
             self.started("codex", NOW - dt.timedelta(minutes=minutes))
         named = [self.start_on(agent_type) for agent_type in ("builder", "builder-small", "builder-deep")]
         self.assertEqual(named, ["a", "a", "b"])
+
+    def test_leaves_out_an_agent_that_the_user_interrupted_whose_transcript_is_in_the_folder_of_another_account(
+        self,
+    ) -> None:
+        # Counted as running, the builder would still need 29 minutes, which leaves room for one more run.
+        subagents = self.orchestrator_on_another_account() / "abc123" / "subagents"
+        subagents.mkdir(parents=True)
+        transcript = subagents / "agent-c1.jsonl"
+        transcript.write_text(INTERRUPTION + "\n")
+        start = NOW - dt.timedelta(minutes=1)
+        meta = {"agentType": "builder", "toolUseId": f"run-{start:%H%M%S}"}
+        transcript.with_suffix(".meta.json").write_text(json.dumps(meta))
+        self.started("claude", start)
+        self.reading("claude", 20.0, 1.0)
+        self.assertEqual([self.start_on(), self.start_on()], ["claude", "claude"])
+
+    def test_takes_the_orchestrators_account_from_the_folder_that_holds_its_transcript(self) -> None:
+        # The meter runs on account a, and the orchestrator on account b, whose transcript has no work to count. Between
+        # accounts with the same meters, the meter names the one other than the orchestrator's.
+        self.accounts(
+            {"name": "a", "tool": "claude", "env": {"CLAUDE_CONFIG_DIR": os.environ["CLAUDE_CONFIG_DIR"]}},
+            {"name": "b", "tool": "claude"},
+        )
+        transcript = project_folder(self.root / "person" / ".claude") / "orchestrator.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(json.dumps({"type": "user", "timestamp": NOW.isoformat()}) + "\n")
+        (self.loop / "state.md").write_text("session: orchestrator\n")
+        (self.loop / "meter.jsonl").unlink()
+        self.reading("a", 20.0, 1.0)
+        self.reading("b", 20.0, 1.0)
+        self.assertEqual(self.start_on(), "a")
 
     def test_leaves_out_an_account_whose_newest_reading_is_older_than_30_minutes(self) -> None:
         self.clock.time = NOW + dt.timedelta(minutes=30)

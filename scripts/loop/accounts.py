@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TypedDict
 
+import paths
+
 TOOLS = ("claude", "codex")
 CLAUDE_VARIABLE_PREFIXES = ("ANTHROPIC_", "CLAUDE")
 
@@ -75,3 +77,30 @@ def own_account(accounts: list[Account], environment: Mapping[str, str]) -> Acco
         if session_values == {name: account["env"].get(name) for name in names}:
             return account
     return None
+
+
+def claude_project_folders(checkout: Path, accounts: list[Account]) -> list[Path]:
+    """The folders where Claude Code keeps the transcripts of the sessions in a checkout, each once: the folder of this
+    process's environment, and the folder of each Claude account. The loop's sessions can run on different accounts,
+    such as the orchestrator on one and an auditor on another, and each of them reads the transcripts of all."""
+    folders = [paths.claude_project_folder(checkout)]
+    folders += [
+        paths.claude_project_folder(checkout, account["env"]) for account in accounts if account["tool"] == "claude"
+    ]
+    return list(dict.fromkeys(folders))
+
+
+def transcript_account(checkout: Path, accounts: list[Account], transcript: Path) -> Account | None:
+    """The Claude account of the session whose transcript of the checkout it is, or None: the account that this process
+    runs on, if the transcript is in this process's folder, or else the first Claude account whose folder holds it."""
+    if transcript.parent == paths.claude_project_folder(checkout) and (own := own_account(accounts, os.environ)):
+        return own
+    return next(
+        (
+            account
+            for account in accounts
+            if account["tool"] == "claude"
+            and paths.claude_project_folder(checkout, account["env"]) == transcript.parent
+        ),
+        None,
+    )

@@ -87,9 +87,9 @@ request, its number alone.
   message, as the start of "Work through the cycle" describes:
   - For a builder, the auditor or a researcher, give the new agent the link to the hand-off comment. For a builder or
     the auditor, first run `scripts/clear-worktrees <issue>`, so that the new agent can check out the issue's branch.
-    The auditor's issue is the one that it opened for the retrospective. If the script fails, start no new agent. Plan
-    a builder's issue again instead, and for the auditor's issue, open an issue with `needs-decision` that asks the
-    maintainer about the worktree that the script left.
+    The auditor's issue is the issue of its retrospective, whether the auditor opened it or you did. If the script
+    fails, start no new agent. Plan a builder's issue again instead, and for the auditor's issue, open an issue with
+    `needs-decision` that asks the maintainer about the worktree that the script left.
   - For a reviewer, give the new reviewer the old reviewer's report.
 - **Builders that stopped.** A builder that ends without a pull request, and without a report that says why, stopped
   before it finished, such as at a usage limit. If its issue is still open and assigned to you, run
@@ -132,15 +132,16 @@ when "Start a focused audit" says so.
 
 - **Drafts.** For each draft pull request that the loop opened, and that no reviewer has read yet, start a `reviewer`
   agent with the pull request's number. Give each error that the reviewer reports to the builder that opened the draft,
-  and ask it to fix each one, with a test when the error is in code. Open an issue for each problem that the reviewer
-  lists apart from the errors, unless one is open already. If you opened the draft, fix the errors yourself. If the
-  draft changes code that the loop's safety depends on, which is the first kind in the description of `builder-deep`,
-  start a new reviewer on it after each round of fixes, until a reviewer reports no error. Give that reviewer a message
-  that names the round of fixes by its range of commits, `<old>..<new>`, and holds the errors that the last reviewer
-  reported. `<old>` is the head commit that the state file gives for the draft, and `<new>` is the draft's head. When no
-  error remains, run `gh pr ready <number>` and `gh pr merge <number>`.
-  If it's the auditor's pull request, first add the label `retrospective` to it if it's missing, because the meter
-  counts toward the next retrospective from the newest merged pull request with that label.
+  and ask it to fix the cause that the reviewer's case shows, because a fix of that case alone leaves the next reviewer
+  another case of the same error. When the error is in code, ask for a test of each case that has that cause. Open an
+  issue for each problem that the reviewer lists apart from the errors, unless one is open already. If you opened the
+  draft, fix the errors yourself. If the draft changes code that the loop's safety depends on, which is the first kind
+  in the description of `builder-deep`, start a new reviewer on it after each round of fixes, until a reviewer reports
+  no error. Give that reviewer a message that names the round of fixes by its range of commits, `<old>..<new>`, and
+  holds the errors that the last reviewer reported. `<old>` is the head commit that the state file gives for the draft,
+  and `<new>` is the draft's head. When no error remains, run `gh pr ready <number>` and `gh pr merge <number>`. If
+  it's the auditor's pull request and it lacks the label `retrospective`, add the label before you run those commands,
+  because the meter counts the agents' output tokens since the newest merged pull request with that label.
 - **Stuck pull requests.** Run `scripts/merge-dependabot-pull-requests`, which turns on auto-merge for Dependabot's
   pull requests. Then run `scripts/stuck-pull-requests`. For each pull request that it prints:
   - If it's Dependabot's, look for an issue about it with `gh issue list --state all --search "#<number>"`. If there's
@@ -223,8 +224,8 @@ Choose the account of each builder and researcher, and of each reviewer of a pul
 2. Otherwise, run `scripts/loop/meter --start-on <type>`, and start the agent on the account that it prints.
 3. If it prints `no account`, start the agent on a Codex account if one can take it, and otherwise start none.
 
-Start the auditor, and each reviewer that reviews no pull request, such as the reviewer of a release, on your own
-account, as an agent of your session.
+Start each reviewer that reviews no pull request, such as the reviewer of a release, on your own account, as an agent
+of your session. Start the auditor as "Start a retrospective" describes.
 
 To start an agent on another account, run one of these commands as a background task.
 
@@ -253,15 +254,27 @@ Ask the maintainer each question that only they can answer, in an issue with `ne
 When a hook or the permission classifier blocks something that the loop needs, don't work around it. Ask in the
 same way for the permission that lets the loop do it itself.
 
+Before you recommend an option to the maintainer or pass one on, check it against each objection that you raised
+earlier in the same thread, and against each rule that it would change.
+
 Each time you write a question for the maintainer in an issue with `needs-decision`, or an agent's report names an
 issue where it wrote one, send the maintainer a push notification with the issue's title and link, using the
 `PushNotification` tool.
 
 ## Start a retrospective
 
-When the meter's `machine` line says `retrospective due`, start an `auditor` agent, unless one runs or its pull
-request is still open. When it names a new model behind an alias, such as `retrospective due: fable names
-claude-fable-5-2, which no retrospective tested`, give the auditor the model's full ID in its prompt.
+When the meter's `machine` line says `retrospective due`, start an `auditor` agent, unless one runs or its pull request
+is still open. Start it on the account that `scripts/loop/meter --start-on auditor` prints, and start none while it
+prints `no account`. On your own account, start it in your session. On another account, open an issue for the
+retrospective. Then write a message to a file in a folder of your own in `.loop/`. Say in it that the auditor runs the
+retrospective of that issue as its agent file describes, rather than building the issue, and that it opens no other
+issue for the retrospective. Then run
+`scripts/loop/run-builder <issue> other --tool claude --type auditor --account <name> --message <file>` as a background
+task.
+
+When the `retrospective due` part names a new model behind an alias, such as `retrospective due: fable names
+claude-fable-5-2, which no retrospective tested`, give the auditor the model's full ID in its prompt, or in its message
+on another account.
 
 ## Start a focused audit
 

@@ -24,9 +24,11 @@ that run on the account still need:
 
 The usage per agent-minute is the rise of a meter since the newest reading of the account that is {period} to {gap}
 minutes old, over the minutes that the account's agents worked since that reading. On its own account, the
-orchestrator counts as an agent for the minutes that its transcript shows it working. When the agents didn't work or
-the meter didn't rise, the meter takes the last usage per agent-minute that it measured, and before it measured one,
-the usage that scripts/loop/account_room.py starts with.
+orchestrator counts as an agent for the minutes that its transcript shows it working. Its own account is the one that
+the meter runs on, if the meter's folder of transcripts holds the transcript of the session that .loop/state.md names,
+or else the first Claude account whose folder holds it. When the agents didn't work or the meter didn't rise, the meter
+takes the last usage per agent-minute that it measured, and before it measured one, the usage that
+scripts/loop/account_room.py starts with.
 
 The line after the accounts names the Claude account to start each agent type on, other than the auditor: the account
 with the lowest 5-hour meter among those where the type fits. Between accounts with the same 5-hour meter, it names the
@@ -70,10 +72,7 @@ retrospective is the newest merged pull request with the label retrospective, or
 before there is one. The meter counts the output tokens as scripts/loop/report counts them, and an agent of a session
 without an end line until the last line of its transcript. A request with no event in
 .loop/requests.jsonl counts the output tokens that the transcript gives, which leave out most of them, so the line
-says how many requests have none. Until a retrospective sets OUTPUT_TOKENS_PER_RETROSPECTIVE, one is due once the
-agents have worked {hours} hours since the last retrospective instead. The hours come from the periods on each agent's
-last end line in .loop/agents.jsonl, which scripts/loop/agent_log.py describes. An agent without an end line counts
-until the last line of its transcript. The test builds and the auditors don't count.
+says how many requests have none. The test builds and the auditors don't count.
 
 A retrospective is due too when one of Claude Code's aliases opus, sonnet, haiku and fable names a model ID that
 .claude/tested-models.json doesn't list. At most once a day, the meter sends one short request for each alias, on the
@@ -104,7 +103,9 @@ of its time that the orchestrator worked so far under "orchestrator_share", whic
 orchestrator's own. Each time it reads the accounts, it first adds a line with no account and the machine's numbers
 under "machine", as scripts/loop/machine.py describes them. A number that the machine doesn't give is null. The meter
 exits with code 1 when an account gives no reading. It reads the orchestrator's context size and the times when it
-worked from the transcript of the session that the session: line of .loop/state.md names.
+worked from the transcript of the session that the session: line of .loop/state.md names. It reads the transcripts
+that Claude Code keeps for the main checkout, for the account that the meter runs on and for each Claude account in
+the file.
 """
 
 import argparse
@@ -128,7 +129,15 @@ import models
 import paths
 import request_events
 import waste
-from accounts import SIGNED_IN, Account, AccountsError, claude_environment, load_accounts, own_account
+from accounts import (
+    SIGNED_IN,
+    Account,
+    AccountsError,
+    claude_environment,
+    claude_project_folders,
+    load_accounts,
+    transcript_account,
+)
 from github import GitHubError, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, note_files, note_times, told_for_room
 from machine import CpuReading, CpuTicksError, Machine, busy_cores_besides, read_cpu, read_machine
@@ -157,8 +166,7 @@ HAND_OFF_CHECK_SECONDS = 60
 # reading come back
 NO_READING_WAIT_SECONDS = 10 * 60
 # .claude/agents/auditor.md says when a retrospective sets this.
-OUTPUT_TOKENS_PER_RETROSPECTIVE: int | None = None
-HOURS_PER_RETROSPECTIVE = 30.0
+OUTPUT_TOKENS_PER_RETROSPECTIVE = 4_543_090
 # A retrospective doesn't look back on the work of an earlier one.
 AUDITOR = "auditor"
 # The subjects of the findings of scripts/loop/waste.py that the meter printed last, so that meter --wake wakes only
@@ -219,27 +227,29 @@ def main(argv: list[str] | None = None) -> int:
     options = parser.parse_args(argv)
     loop_folder = paths.loop_dir()
     loop_folder.mkdir(parents=True, exist_ok=True)
-    if options.hand_off:
-        runs = agent_log.read_runs(loop_folder / "agents.jsonl")
-        note = hand_off_note(options.hand_off, runs, loop_folder / "meter.jsonl", loop_folder / FOLDER_NAME)
-        print(note or "none")
-        return 0
     try:
         accounts = load_accounts(loop_folder / "accounts.json")
     except AccountsError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     log = loop_folder / "meter.jsonl"
+    if options.hand_off:
+        runs = agent_log.read_runs(loop_folder / "agents.jsonl")
+        print(hand_off_note(options.hand_off, accounts, runs, log, loop_folder / FOLDER_NAME) or "none")
+        return 0
     if options.start_on:
         return start_on(options.start_on, accounts, log)
     hand_offs = loop_folder / FOLDER_NAME
     checkout = paths.main_checkout()
+    project_folders = claude_project_folders(checkout, accounts)
     printed = loop_folder / PRINTED_FINDINGS
     if options.wake:
-        readings = wait_for_wake(accounts, log, hand_offs, lambda: has_new_finding(loop_folder, checkout, printed))
+        readings = wait_for_wake(
+            accounts, log, hand_offs, lambda: has_new_finding(loop_folder, checkout, project_folders, printed)
+        )
     else:
         readings = read_accounts(accounts, log)
-    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
+    transcripts = agent_log.agent_transcripts(project_folders)
     notes = note_files(hand_offs)
     agents = agents_line(running_agents(loop_folder, transcripts), hand_off_thresholds(notes), told_for_room(notes))
     runs = agent_log.read_runs(loop_folder / "agents.jsonl")
@@ -256,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     machine = machine_line(
         readings.machine,
         readings.busy_cores,
-        context=orchestrator_context(loop_folder / "state.md", checkout),
+        context=orchestrator_context(loop_folder / "state.md", project_folders),
         retrospective=" | ".join([retrospective, *model_notes]),
         findings=[finding.text for finding in findings],
     )
@@ -266,11 +276,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def help_text() -> str:
-    """The docstring, with the numbers that the code keeps in place of {hours}, {period}, {gap}, {start}, {retry} and
+    """The docstring, with the numbers that the code keeps in place of {period}, {gap}, {start}, {retry} and
     {hand_off}, so that changing a number takes one edit. The docstring's JSON example has braces of its own, so
     str.format can't fill it in."""
     numbers = {
-        "{hours}": f"{HOURS_PER_RETROSPECTIVE:g}",
         "{period}": f"{USAGE_PERIOD.total_seconds() / 60:g}",
         "{gap}": f"{LONGEST_READING_GAP.total_seconds() / 60:g}",
         "{start}": f"{OLDEST_START_READING.total_seconds() / 60:g}",
@@ -341,10 +350,9 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
     cpu_before = cpu_reading()
     runs = agent_log.read_runs(log.parent / "agents.jsonl")
     earlier_runs = run_minutes_by_type(runs)
-    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(paths.main_checkout()))
-    orchestrators = own_account(accounts, os.environ)
-    transcript = orchestrator_transcript(log.parent / "state.md", paths.main_checkout())
-    orchestrator_periods = agent_log.session_periods(transcript) if transcript else []
+    project_folders = claude_project_folders(paths.main_checkout(), accounts)
+    transcripts = agent_log.agent_transcripts(project_folders)
+    orchestrators, orchestrator_periods = orchestrator_work(accounts, log)
     candidates: list[account_room.Candidate] = []
     for account in accounts:
         reading_time = now()
@@ -359,7 +367,7 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
             "account": account["name"],
             "meters": meters,
         }
-        is_orchestrators = orchestrators is not None and orchestrators["name"] == account["name"]
+        is_orchestrators = orchestrators == account["name"]
         orchestrator = orchestrator_periods if is_orchestrators else []
         room, measured = read_room(account["name"], meters, reading_time, log, runs, transcripts, orchestrator)
         result = advise(room, agent_types(account["tool"]), earlier_runs, reading_time)
@@ -396,7 +404,7 @@ def start_on(agent_type: str, accounts: list[Account], log: Path) -> int:
     """Prints the Claude account to start an agent of the type on, as at each account's newest reading, and logs the
     account that it names, so that the next call counts the agent."""
     runs = agent_log.read_runs(log.parent / "agents.jsonl")
-    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(paths.main_checkout()))
+    transcripts = agent_log.agent_transcripts(claude_project_folders(paths.main_checkout(), accounts))
     candidates = start_candidates(accounts, runs, transcripts, log)
     if not candidates:
         minutes = OLDEST_START_READING.total_seconds() / 60
@@ -420,9 +428,7 @@ def start_candidates(
 ) -> list[account_room.Candidate]:
     """The Claude accounts with a reading from the last OLDEST_START_READING, each with the types that fit its room."""
     earlier_runs = run_minutes_by_type(runs)
-    orchestrators = own_account(accounts, os.environ)
-    transcript = orchestrator_transcript(log.parent / "state.md", paths.main_checkout())
-    orchestrator_periods = agent_log.session_periods(transcript) if transcript else []
+    orchestrators, orchestrator_periods = orchestrator_work(accounts, log)
     candidates: list[account_room.Candidate] = []
     for account in accounts:
         readings = account_readings(log, account["name"]) if log.exists() else []
@@ -431,7 +437,7 @@ def start_candidates(
         reading_time = dt.datetime.fromisoformat(readings[-1]["at"])
         if now() - reading_time > OLDEST_START_READING:
             continue
-        is_orchestrators = orchestrators is not None and orchestrators["name"] == account["name"]
+        is_orchestrators = orchestrators == account["name"]
         orchestrator = orchestrator_periods if is_orchestrators else []
         share = account_room.working_share(orchestrator, reading_time)
         room = room_at_reading(account["name"], readings, runs, transcripts, log, share)
@@ -475,7 +481,9 @@ def room_at_reading(
     return account_room.Room(meters, per_agent_minute, running, orchestrator_share)
 
 
-def hand_off_note(agent_id: str, runs: list[agent_log.AgentRun], log: Path, hand_offs: Path) -> str | None:
+def hand_off_note(
+    agent_id: str, accounts: list[Account], runs: list[agent_log.AgentRun], log: Path, hand_offs: Path
+) -> str | None:
     """The note that scripts/hooks/hand-off gives the agent whose start line has the id, for its account's room, from
     the newest reading of the account, if any. The hook writes the id in the file of each note that it gives."""
     run = next((run for run in runs if run.start["id"] == agent_id), None)
@@ -490,7 +498,7 @@ def hand_off_note(agent_id: str, runs: list[agent_log.AgentRun], log: Path, hand
     # An older reading is from before a time when the loop stopped.
     if now() - reading_time > LONGEST_READING_GAP:
         return None
-    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(paths.main_checkout()))
+    transcripts = agent_log.agent_transcripts(claude_project_folders(paths.main_checkout(), accounts))
     room = room_at_reading(account, readings, runs, transcripts, log, newest.get("orchestrator_share", 0.0))
     noted = note_times(hand_offs)
     ends = {run.start["id"]: dt.datetime.fromisoformat(run.end["at"]) for run in runs if run.end is not None}
@@ -713,8 +721,8 @@ def account_line(
 
 
 def start_line(candidates: list[account_room.Candidate]) -> str:
-    """The line that names the account to start each type on, other than the auditor, which starts on the
-    orchestrator's own account."""
+    """The line that names the account to start each type on, other than the auditor, which starts only when a
+    retrospective is due."""
     types = [agent_type for agent_type in agent_types("claude") if agent_type != AUDITOR]
     parts = ["start on"]
     for agent_type in types:
@@ -837,16 +845,30 @@ def agents_line(agents: list[Agent], thresholds: dict[str, int], told_for_room: 
     return " | ".join(parts)
 
 
-def orchestrator_context(state_file: Path, checkout: Path) -> int | None:
-    transcript = orchestrator_transcript(state_file, checkout)
+def orchestrator_context(state_file: Path, project_folders: list[Path]) -> int | None:
+    transcript = orchestrator_transcript(state_file, project_folders)
     return None if transcript is None else context_tokens(transcript)
 
 
-def orchestrator_transcript(state_file: Path, checkout: Path) -> Path | None:
+def orchestrator_work(accounts: list[Account], log: Path) -> tuple[str | None, list[agent_log.Period]]:
+    """The name of the Claude account that the orchestrator runs on, which is the one whose folder holds its
+    transcript, and the periods when the orchestrator worked. The meter can run on another account, as an auditor's
+    does."""
+    checkout = paths.main_checkout()
+    transcript = orchestrator_transcript(log.parent / "state.md", claude_project_folders(checkout, accounts))
+    if transcript is None:
+        return None, []
+    account = transcript_account(checkout, accounts, transcript)
+    return (account["name"] if account else None), agent_log.session_periods(transcript)
+
+
+def orchestrator_transcript(state_file: Path, project_folders: list[Path]) -> Path | None:
+    """The transcript of the session that the state file names, in the first of the Claude Code project folders that
+    holds it, or None."""
     session = session_in_state_file(state_file)
     if session is None:
         return None
-    return paths.claude_project_folder(checkout) / f"{session}.jsonl"
+    return next((file for folder in project_folders if (file := folder / f"{session}.jsonl").exists()), None)
 
 
 def session_in_state_file(state_file: Path) -> str | None:
@@ -886,20 +908,14 @@ def retrospective_note(
     last: dt.datetime | None, runs: list[agent_log.AgentRun], transcripts: dict[str, Path], loop_folder: Path
 ) -> str:
     counted = [run for run in runs if not run.start["test"] and run.start["type"] != AUDITOR]
-    if OUTPUT_TOKENS_PER_RETROSPECTIVE is not None:
-        requests = loop_folder / request_events.REQUESTS_FILE
-        event_tokens = request_events.output_tokens(requests.read_text() if requests.exists() else "")
-        recent = [run for run in counted if last is None or agent_log.started(run) >= last]
-        ends = [end for run in recent if (end := counted_end(run, transcripts))]
-        return tokens_note(last, ends, event_tokens, OUTPUT_TOKENS_PER_RETROSPECTIVE)
-    minutes = sum(
-        agent_log.minutes_after(agent_log.working_periods(run, transcripts, loop_folder / "runs"), last)
-        for run in counted
-    )
-    return hours_note(last, minutes / 60)
+    recent = [run for run in counted if last is None or agent_log.started(run) >= last]
+    ends = [end for run in recent if (end := counted_end(run, transcripts))]
+    requests = loop_folder / request_events.REQUESTS_FILE
+    event_tokens = request_events.output_tokens(requests.read_text() if requests.exists() else "")
+    return tokens_note(last, ends, event_tokens, OUTPUT_TOKENS_PER_RETROSPECTIVE)
 
 
-def has_new_finding(loop_folder: Path, checkout: Path, printed: Path) -> bool:
+def has_new_finding(loop_folder: Path, checkout: Path, project_folders: list[Path], printed: Path) -> bool:
     """Whether the logs give a finding of waste whose subject isn't in the file printed. When GitHub doesn't say when
     the last retrospective merged, the time of scripts/check has nothing to compare with."""
     try:
@@ -907,7 +923,7 @@ def has_new_finding(loop_folder: Path, checkout: Path, printed: Path) -> bool:
     except GitHubError:
         last = None
     runs = agent_log.read_runs(loop_folder / "agents.jsonl")
-    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
+    transcripts = agent_log.agent_transcripts(project_folders)
     subjects = {finding.subject for finding in waste_findings(runs, transcripts, loop_folder, last)}
     return bool(subjects - set(json.loads(printed.read_text()) if printed.exists() else []))
 
@@ -932,10 +948,6 @@ def waste_findings(
     return findings
 
 
-def since_words(last: dt.datetime | None) -> str:
-    return "since the last one" if last else "with no retrospective yet"
-
-
 def counted_end(run: agent_log.AgentRun, transcripts: dict[str, Path]) -> dict[str, Any] | None:
     """The agent's last end line. An agent of a session without one, such as one whose session ended first, gets the
     requests until the last line of its transcript instead."""
@@ -950,7 +962,7 @@ def counted_end(run: agent_log.AgentRun, transcripts: dict[str, Path]) -> dict[s
 def tokens_note(
     last: dt.datetime | None, ends: list[dict[str, Any]], event_tokens: dict[str, int], tokens_per_retrospective: int
 ) -> str:
-    since = since_words(last)
+    since = "since the last one" if last else "with no retrospective yet"
     counts = [agent_log.agent_output_tokens(end, event_tokens) for end in ends]
     tokens = sum(tokens for tokens, _ in counts)
     without_event = sum(without_event for _, without_event in counts)
@@ -962,15 +974,6 @@ def tokens_note(
         return note
     requests = sum(len(end.get("requests") or {}) for end in ends)
     return f"{note}, {without_event} of {requests} requests with no event"
-
-
-def hours_note(last: dt.datetime | None, hours: float) -> str:
-    since = since_words(last)
-    if hours >= HOURS_PER_RETROSPECTIVE:
-        return f"retrospective due: {hours:.1f} hours of agents' work {since}"
-    # Rounded down, so that 29.98 hours don't show as 30.0 of 30
-    shown = math.floor(hours * 10) / 10
-    return f"retrospective not due: {shown:.1f} of {HOURS_PER_RETROSPECTIVE:g} hours of agents' work {since}"
 
 
 if __name__ == "__main__":
