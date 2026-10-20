@@ -1,7 +1,8 @@
 import datetime as dt
 import json
+from unittest import mock
 
-from test_meter import NOW, MeterTest, meters
+from test_meter import NOW, MeterTest, meter, meters
 
 
 class StartOnTest(MeterTest):
@@ -47,7 +48,7 @@ class StartOnTest(MeterTest):
         return " ".join(lines)
 
     def test_starts_only_as_many_agents_on_each_account_as_fit_from_one_reading(self) -> None:
-        named = [self.start_on() for _ in range(7)]
+        named = [self.start_on("reviewer") for _ in range(7)]
         self.assertEqual(named, ["a", "a", "b", "b", "b", "b", "no account"])
         self.assertFalse((self.standins / "calls.jsonl").exists())
 
@@ -81,6 +82,15 @@ class StartOnTest(MeterTest):
         self.clock.time = NOW + dt.timedelta(minutes=5)
         self.reading("a", 20.0, 1.0, at=self.clock.time)
         self.assertEqual(self.start_on(), "a")
+
+    def test_names_no_account_for_a_builder_once_the_agents_that_build_and_those_it_named_reach_the_limit(self) -> None:
+        for minutes in (1, 2, 3):
+            self.started("codex", NOW - dt.timedelta(minutes=minutes))
+        with mock.patch.object(meter, "MOST_BUILDING_AGENTS", 4):
+            self.assertEqual(self.start_on(), "a")
+            limit = "4 agents build, and the limit is 4: start no builder or test build\n"
+            self.assertEqual(self.run_meter("--start-on", "builder-small"), (0, ["no account"], limit))
+            self.assertEqual(self.start_on("reviewer"), "a")
 
     def test_leaves_out_an_account_whose_newest_reading_is_older_than_30_minutes(self) -> None:
         self.clock.time = NOW + dt.timedelta(minutes=30)

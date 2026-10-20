@@ -37,7 +37,9 @@ that line names it, or "no account". It takes each account's newest reading in .
 account whose newest reading is more than {start} minutes old. As the agents that run on the account, it counts those
 that ran at the reading, at their minutes then, each agent that started on the account since then, and each agent that
 --start-on named the account for since then. So one pass of the loop starts only as many agents on each account as fit.
-It adds a line with the type and the account that it named to .loop/meter.jsonl.
+It adds a line with the type and the account that it named to .loop/meter.jsonl. For a builder type, it prints "no
+account" once the agents that build at the newest reading, with each that started and each builder that it named an
+account for since then, reach the limit that the last line names, and says why on standard error.
 
 The line before the last lists the agents that run: those with a start line and no end line in .loop/agents.jsonl,
 each with its type and the number of its issue or pull request. It leaves out an agent whose Claude Code process or
@@ -131,6 +133,7 @@ SHORTEST_WAIT_SECONDS = 60
 AFTER_RESET_SECONDS = 60
 UNKNOWN_RESET_WAIT_SECONDS = 10 * 60
 LATEST_TIME = dt.datetime.max.replace(tzinfo=dt.UTC)
+EARLIEST_TIME = dt.datetime.min.replace(tzinfo=dt.UTC)
 CLAUDE_TIMEOUT_SECONDS = 120
 # A Codex snapshot from before this is from an earlier weekly window, so the meter doesn't read older session files.
 CODEX_SNAPSHOT_AGE = dt.timedelta(days=8)
@@ -355,6 +358,33 @@ def start_on(agent_type: str, accounts: list[Account], log: Path) -> int:
     """Prints the Claude account to start an agent of the type on, as at each account's newest reading, and logs the
     account that it names, so that the next call counts the agent."""
     runs = agent_log.read_runs(log.parent / "agents.jsonl")
+    candidates = start_candidates(accounts, runs, log)
+    if not candidates:
+        minutes = OLDEST_START_READING.total_seconds() / 60
+        print(
+            f"error: no Claude account has a reading from the last {minutes:g} minutes. Run scripts/loop/meter, and "
+            "then scripts/loop/meter --start-on again.",
+            file=sys.stderr,
+        )
+        return 1
+    building = building_since_reading(runs, log)
+    if is_building({"type": agent_type}) and building >= MOST_BUILDING_AGENTS:
+        print("no account")
+        print(building_part(building)[0], file=sys.stderr)
+        return 0
+    named = account_room.account_for(agent_type, candidates)
+    if named is not None:
+        entry = {"at": now().isoformat(timespec="seconds"), "start_on": named, "type": agent_type}
+        with log.open("a") as handle:
+            handle.write(json.dumps(entry) + "\n")
+    print(named or "no account")
+    return 0
+
+
+def start_candidates(
+    accounts: list[Account], runs: list[agent_log.AgentRun], log: Path
+) -> list[account_room.Candidate]:
+    """The Claude accounts with a reading from the last OLDEST_START_READING, each with the types that fit its room."""
     earlier_runs = run_minutes_by_type(runs)
     orchestrators = own_account(accounts, os.environ)
     transcript = orchestrator_transcript(log.parent / "state.md", paths.main_checkout())
@@ -372,21 +402,31 @@ def start_on(agent_type: str, accounts: list[Account], log: Path) -> int:
         room = room_at_reading(account["name"], readings, runs, log, orchestrator)
         fitting = advise(room, agent_types("claude"), earlier_runs, reading_time).fitting
         candidates.append(account_room.Candidate(account["name"], fitting, room.meters, is_orchestrators))
-    if not candidates:
-        minutes = OLDEST_START_READING.total_seconds() / 60
-        print(
-            f"error: no Claude account has a reading from the last {minutes:g} minutes. Run scripts/loop/meter, and "
-            "then scripts/loop/meter --start-on again.",
-            file=sys.stderr,
-        )
-        return 1
-    named = account_room.account_for(agent_type, candidates)
-    if named is not None:
-        entry = {"at": now().isoformat(timespec="seconds"), "start_on": named, "type": agent_type}
-        with log.open("a") as handle:
-            handle.write(json.dumps(entry) + "\n")
-    print(named or "no account")
-    return 0
+    return candidates
+
+
+def building_since_reading(runs: list[agent_log.AgentRun], log: Path) -> int:
+    """The agents that build as at the newest reading: those that started before it and still run, each that started
+    since then, and each builder that --start-on named an account for since then and that hasn't started yet."""
+    entries = [json.loads(line) for line in log.read_text().splitlines()]
+    reading_times = [dt.datetime.fromisoformat(entry["at"]) for entry in entries if "start_on" not in entry]
+    reading_time = max(reading_times, default=EARLIEST_TIME)
+    building = [run for run in runs if is_building(run.start)]
+    running = sum(is_running(run) for run in building if agent_log.started(run) <= reading_time)
+    # Only an agent on a Claude account can be one that --start-on named, because it names only Claude accounts.
+    started = [
+        (agent_log.started(run), "codex" if run.start["type"] == "codex" else "claude")
+        for run in building
+        if agent_log.started(run) > reading_time
+    ]
+    named = [
+        (dt.datetime.fromisoformat(entry["at"]), "claude")
+        for entry in entries
+        if "start_on" in entry
+        and is_building({"type": entry["type"]})
+        and dt.datetime.fromisoformat(entry["at"]) >= reading_time
+    ]
+    return running + len(account_room.agents_since_reading(started, named))
 
 
 def room_at_reading(
