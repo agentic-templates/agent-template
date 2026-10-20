@@ -16,9 +16,11 @@ in the log ran, starts once the readings show some free cores and memory, and no
 that it measures what the command uses.
 
 A command starts ahead of the first in line only if the first still gets its room once the commands that run now end.
-When no heavy command runs, the first in line starts even if the machine has no room for it. A heavy command that
-another one starts runs at once, and so does every command in CI and in Codex's sandbox. In the sandbox, the script
-reads and writes nothing in the loop folder, which the sandbox can't write.
+When no heavy command runs, the first in line starts even if the machine has no room for it. The commands of a
+retrospective, from a worktree that paths.retrospective_mark marks, start only when no other agent's command waits,
+and keep the line's order among themselves. A heavy command that another one starts runs at once, and so does every
+command in CI and in Codex's sandbox. In the sandbox, the script reads and writes nothing in the loop folder, which the
+sandbox can't write.
 
 The script adds a line to .loop/heavy.jsonl in the main checkout when a command starts to wait, when it starts, when
 a signal, such as Ctrl-C, stops it while it waits, and when it ends. Each line gives the machine's readings, as
@@ -183,14 +185,23 @@ def holding_turn(turn: Turn) -> Iterator[None]:
         fcntl.flock(lock, fcntl.LOCK_EX)
         need = reservation(turn.command, measured_runs(turn.log))
         entry = {"id": turn.id, "command": turn.command, "arrived": turn.arrived, "need": need, "started": None}
+        entry["is_retrospective"] = is_retrospective()
         with locked_state(turn.folder) as state:
-            state["commands"].append({**entry, "using": None})
+            state["commands"].append({**entry, "using": room.NOTHING._asdict()})
         try:
             yield
         finally:
             with locked_state(turn.folder) as state:
                 state["commands"] = [other for other in state["commands"] if other["id"] != turn.id]
             lock_file.unlink()
+
+
+def is_retrospective() -> bool:
+    """Whether the current folder is in a retrospective's worktree. A folder outside any git checkout isn't."""
+    try:
+        return paths.retrospective_mark(Path.cwd()).exists()
+    except subprocess.CalledProcessError:
+        return False
 
 
 def wait_for_room(turn: Turn) -> Reading:
@@ -353,7 +364,7 @@ def wait_measuring(
         using = sampler.sample(time.monotonic())
         with locked_state(turn.folder) as state:
             machine = reading(state, turn.folder, time.time()).machine
-            own_entry(state, turn)["using"] = using._asdict()
+            own_entry(state, turn).update(using=using._asdict(), sampled=True)
         swap = highest(swap, machine["swap_used_gb"])
     _, status, usage = ended[0]
     return status, usage, swap
@@ -404,12 +415,22 @@ def command_of(entry: dict[str, Any]) -> room.Command:
         arrived=entry["arrived"],
         need=need_in(entry),
         started=entry["started"],
-        using=None if entry["using"] is None else use_of(entry["using"]),
+        using=using_in(entry),
+        # The copies of this script in the worktrees of older branches write their samples without this field.
+        sampled=entry.get("sampled", False),
+        # The copy of this script in a worktree of an older branch puts its commands in line without this field.
+        is_retrospective=entry.get("is_retrospective", False),
     )
 
 
 def need_in(entry: dict[str, Any]) -> room.Use | None:
     return None if entry["need"] is None else use_of(entry["need"])
+
+
+def using_in(entry: dict[str, Any]) -> room.Use:
+    """What a command in line uses. Another version of this script, such as on another branch, can leave it empty for
+    a command that waits, which uses nothing."""
+    return room.NOTHING if entry["using"] is None else use_of(entry["using"])
 
 
 def use_of(numbers: dict[str, Any]) -> room.Use:

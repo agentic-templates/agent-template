@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 import account_room
 import paths
-from machine import Machine
+from machine import CpuTicks, CpuTicksError, CpuTime, Machine
 from test_transcripts import write_transcript
 
 METER = Path(__file__).with_name("meter")
@@ -772,32 +772,63 @@ MAC: Machine = {
 
 
 class MachineLineTest(MeterTest):
-    def test_gives_the_disk_the_memory_the_swap_the_gpu_the_load_the_context_and_the_retrospective(self) -> None:
+    def test_gives_the_disk_the_memory_the_swap_the_gpu_the_busy_cores_the_context_and_the_retrospective(self) -> None:
+        retrospective = "retrospective due: 31.5 hours of agents' work since the last one"
         self.assertEqual(
-            meter.machine_line(MAC, 0, 210_500, "retrospective due: 31.5 hours of agents' work since the last one", []),
+            meter.machine_line(MAC, 4.2, 210_500, retrospective, []),
             "machine | disk 94 GB free | memory 30 GB free | swap 1.9 GB used | GPU 23% busy, 6.6 GB of the main memory"
-            " | load 3.2 on 10 cores | orchestrator context 210k | "
+            " | 4.2 of 10 cores busy | orchestrator context 210k | "
             "retrospective due: 31.5 hours of agents' work since the last one",
         )
 
     def test_gives_the_memory_of_a_gpu_with_its_own_memory(self) -> None:
-        line = meter.machine_line({**MAC, "gpu_shares_memory": False}, 0, None, "", [])
+        line = meter.machine_line({**MAC, "gpu_shares_memory": False}, 4.2, None, "", [])
         self.assertIn(" | GPU 23% busy, 6.6 GB of its own memory | ", line)
 
     def test_says_which_numbers_the_machine_does_not_give(self) -> None:
         missing = {**MAC, "memory_free_gb": None, "swap_used_gb": None, "gpu_percent": None, "gpu_memory_used_gb": None}
-        self.assertIn(" | memory unknown | swap unknown | GPU unknown | ", meter.machine_line(missing, 0, None, "", []))
-        line = meter.machine_line({**MAC, "gpu_percent": None}, 0, None, "", [])
+        line = meter.machine_line(missing, None, None, "", [])
+        self.assertIn(" | memory unknown | swap unknown | GPU unknown | busy cores of 10 unknown | ", line)
+        line = meter.machine_line({**MAC, "gpu_percent": None}, 4.2, None, "", [])
         self.assertIn(" | GPU use unknown, 6.6 GB of the main memory | ", line)
-        line = meter.machine_line({**MAC, "gpu_memory_used_gb": None}, 0, None, "", [])
+        line = meter.machine_line({**MAC, "gpu_memory_used_gb": None}, 4.2, None, "", [])
         self.assertIn(" | GPU 23% busy, memory unknown | ", line)
+
+    def test_gives_the_cores_that_were_busy_while_it_read_the_accounts(self) -> None:
+        self.assertIn(" | 4.2 of 10 cores busy | ", self.last_line_with_cpu(CpuTime(2.0, 100.0), CpuTime(2.0, 103.0)))
+
+    def test_leaves_the_meters_own_work_out_of_the_busy_cores(self) -> None:
+        # The meter and the claude -p that it waited for used 1.5 s of CPU time over 3 s.
+        self.assertIn(" | 3.7 of 10 cores busy | ", self.last_line_with_cpu(CpuTime(2.0, 100.0), CpuTime(3.5, 103.0)))
+
+    def last_line_with_cpu(self, *meters_times: CpuTime) -> str:
+        """The meter's last line on 10 cores that were 4.2 busy, while the meter's own CPU time was each of the times
+        in turn."""
+        ticks = iter([CpuTicks(1000, 5000), CpuTicks(1420, 6000)])
+        times = iter(meters_times)
+        with (
+            mock.patch("machine.read_cpu_ticks", lambda: next(ticks)),
+            mock.patch("machine.read_cpu_time", lambda: next(times)),
+            mock.patch("os.cpu_count", lambda: 10),
+        ):
+            return self.run_meter()[1][-1]
+
+    def test_gives_no_busy_cores_when_the_cpu_ticks_cannot_be_read(self) -> None:
+        def unreadable() -> CpuTicks:
+            raise CpuTicksError("can't read the machine's CPU ticks from /proc/stat")
+
+        with mock.patch("machine.read_cpu_ticks", unreadable), mock.patch("os.cpu_count", lambda: 10):
+            _, lines, errors = self.run_meter()
+        self.assertIn(" | busy cores of 10 unknown | ", lines[-1])
+        warning = "warning: can't read the machine's CPU ticks from /proc/stat, so the busy cores are unknown.\n"
+        self.assertEqual(errors, warning)
 
     def test_is_the_last_line(self) -> None:
         with mock.patch.object(meter, "OUTPUT_TOKENS_PER_RETROSPECTIVE", None):
             last_line = self.run_meter()[1][-1]
         self.assertRegex(
             last_line,
-            r"^machine \| disk \d+ GB free \| memory .* \| load \d+\.\d on \d+ cores \| "
+            r"^machine \| disk \d+ GB free \| memory .* \| (\d+\.\d of \d+ cores busy|busy cores of \d+ unknown) \| "
             r"orchestrator context unknown \| "
             r"retrospective not due: 0\.0 of 30 hours of agents' work since the last one$",
         )

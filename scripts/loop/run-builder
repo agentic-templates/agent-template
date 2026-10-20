@@ -11,7 +11,9 @@ called NAME in .loop/accounts.json, which scripts/loop/meter --help describes, o
 A Claude builder runs with the model, effort, instructions, tools, disallowed tools and limit on turns in the agent
 file of its type, .claude/agents/TYPE.md in the checkout that holds this script. A Codex builder runs with Codex's own
 model and effort, because the agent files name Claude's models.
-It works in .claude/worktrees/run-<issue> in the main checkout, on the issue's branch. When the run ends,
+It works in .claude/worktrees/run-<issue> in the main checkout, on the issue's branch. The script locks each worktree
+that it makes with a reason that names its process, so that scripts/remove-ended-worktrees leaves the worktree while
+the run lasts. When the run ends,
 scripts/clear-worktrees <issue> commits the changes that the builder left on the branch and removes the worktree, and
 the script pushes the branch. If the branch has a pull request, the script turns off its auto-merge and makes it a
 draft before the push. If scripts/clear-worktrees or a check refuses the changes, the script keeps them in the
@@ -47,7 +49,8 @@ With --test, the run is a test build of a retrospective, which a Claude builder 
 again from the commit that the pull request PULL_REQUEST started from, in .claude/worktrees/test-<issue>-<type>, on no
 branch, and changes nothing on GitHub. When it ends, the script writes the diff of its changes, committed or not, to
 changes.diff in the run folder, .loop/runs/test-<issue>-<type>-<time>, and removes the worktree. The lines in
-.loop/agents.jsonl say that the run is a test.
+.loop/agents.jsonl say that the run is a test. scripts/loop/run-heavy starts the heavy commands of the worktree only
+when no other agent's command waits, as it does for the auditor's.
 
 With --review, the script starts a Claude agent of the type reviewer for the pull request PULL_REQUEST, instead of a
 builder for an issue. The reviewer works in .claude/worktrees/review-<pull request>, detached at the pull request's
@@ -382,7 +385,8 @@ def test_build(
     changes to the run folder, and removes the worktree. Returns how the run ended, with the worktree's size before its
     removal."""
     base = pull_request_base(pull_request, folders)
-    git(["worktree", "add", "--quiet", "--detach", str(folders.worktree), base], folders.checkout, folders.hooks)
+    add_locked_worktree(base, folders, detach=True)
+    paths.retrospective_mark(folders.worktree).touch()
     try:
         # A hand-off posts a comment on the issue, and a test build changes nothing on GitHub.
         brief = write_brief(issue, kind, message, TEST_BRIEF, folders)
@@ -395,7 +399,7 @@ def test_build(
         git(["add", "--all"], folders.worktree, folders.hooks)
         changes = git(["diff", "--cached", "--binary", base], folders.worktree, folders.hooks)
         (folders.run / CHANGES_FILE).write_text(changes)
-        git(["worktree", "remove", "--force", str(folders.worktree)], folders.checkout, folders.hooks)
+        remove_worktree(folders)
     return outcome._replace(worktree_mb=worktree_mb)
 
 
@@ -411,7 +415,7 @@ def review(
     number = pull_request["number"]
     git(["fetch", "--quiet", "origin", f"refs/pull/{number}/head"], folders.checkout, folders.hooks)
     head = pull_request["headRefOid"]
-    git(["worktree", "add", "--quiet", "--detach", str(folders.worktree), head], folders.checkout, folders.hooks)
+    add_locked_worktree(head, folders, detach=True)
     try:
         message_text = MESSAGE_BRIEF.format(message=message) if message else ""
         brief = REVIEW_NUMBER.format(number=number) + message_text + REVIEW_BRIEF.format(number=number)
@@ -422,7 +426,7 @@ def review(
         outcome = Outcome(f"failed: {stop}", is_ok=False)
     finally:
         worktree_mb = agent_log.folder_megabytes(folders.worktree)
-        git(["worktree", "remove", "--force", str(folders.worktree)], folders.checkout, folders.hooks)
+        remove_worktree(folders)
     return outcome._replace(worktree_mb=worktree_mb)
 
 
@@ -466,7 +470,7 @@ def clear_worktree(issue: int, branch: str, folders: Folders) -> str:
     if folders.worktree.exists():
         if has_unpushed_changes(folders):
             return f"the changes stay in {folders.worktree}, off the issue's branch"
-        git(["worktree", "remove", "--force", str(folders.worktree)], folders.checkout, folders.hooks)
+        remove_worktree(folders)
     try:
         push_saved_changes(branch, folders)
     except Stop as stop:
@@ -576,8 +580,21 @@ def issue_branch(issue: int, folders: Folders) -> str:
 
 
 def add_worktree(branch: str, folders: Folders) -> None:
-    git(["worktree", "add", "--quiet", str(folders.worktree), branch], folders.checkout, folders.hooks)
+    add_locked_worktree(branch, folders)
     git(["merge", "--ff-only", "--quiet", f"refs/remotes/origin/{branch}"], folders.worktree, folders.hooks)
+
+
+def add_locked_worktree(target: str, folders: Folders, detach: bool = False) -> None:
+    """Adds the run's worktree on a branch, or detached at a commit, with a lock whose reason names this process, as
+    Claude Code locks the worktree of a subagent, so that scripts/remove-ended-worktrees leaves the worktree while the
+    run lasts."""
+    options = ["--lock", "--reason", f"scripts/loop/run-builder (pid {os.getpid()})", *(["--detach"] if detach else [])]
+    git(["worktree", "add", "--quiet", *options, str(folders.worktree), target], folders.checkout, folders.hooks)
+
+
+def remove_worktree(folders: Folders) -> None:
+    """Removes the run's worktree, with its changes. Twice --force removes it although it's locked."""
+    git(["worktree", "remove", "--force", "--force", str(folders.worktree)], folders.checkout, folders.hooks)
 
 
 def newest_issue_branch(issue: int, checkout: Path) -> str | None:
