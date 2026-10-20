@@ -29,6 +29,11 @@ importlib.machinery.SourceFileLoader("meter", str(METER)).exec_module(meter)
 NEW_YORK = ZoneInfo("America/New_York")
 NOW = dt.datetime(2026, 10, 18, 3, 8, tzinfo=NEW_YORK)
 
+# The line that Claude Code writes in an agent's transcript when the user interrupts the agent
+INTERRUPTION = json.dumps(
+    {"type": "user", "message": {"content": [{"type": "text", "text": "[Request interrupted by user for tool use]"}]}}
+)
+
 # A stand-in for claude and gh. It writes each call to calls.jsonl in STANDIN_DIR, with the folder it runs in, the files
 # there and some variables. claude gives the next answer in claude.json there, and the last one again when they run out.
 # gh gives the answer in gh.json. An answer can sleep, print to stdout and stderr, and exit with a status. -S keeps
@@ -386,6 +391,25 @@ class AccountLineTest(MeterTest):
         (self.loop / "agents.jsonl").write_text("".join(json.dumps(start) + "\n" for start in starts))
         self.clock.time = NOW + dt.timedelta(minutes=30)
         self.answer("claude", [usage_output(14)])
+        self.assertIn(" | per agent-minute session 0.2%, week 0.02% | ", self.run_meter()[1][0])
+
+    def test_counts_the_minutes_that_an_agent_worked_before_the_user_interrupted_it(self) -> None:
+        self.run_meter()
+        start = {"at": NOW.isoformat(), "event": "start", "id": "toolu_01", "type": "builder", "test": False}
+        (self.loop / "agents.jsonl").write_text(json.dumps(start | {"account": "claude", "pid": os.getpid()}) + "\n")
+        subagents = paths.claude_project_folder(paths.main_checkout()) / "abc123" / "subagents"
+        call = {"type": "assistant", "message": {"id": "m1", "usage": {"input_tokens": 1000}}}
+        lines = [
+            {"type": "user", "timestamp": NOW.isoformat(), "message": {"content": "go"}},
+            call | {"timestamp": (NOW + dt.timedelta(minutes=1)).isoformat()},
+            call | {"timestamp": (NOW + dt.timedelta(minutes=25)).isoformat()},
+            INTERRUPTION,
+        ]
+        transcript = write_transcript(subagents / "agent-a1.jsonl", lines)
+        transcript.with_suffix(".meta.json").write_text(json.dumps({"agentType": "builder", "toolUseId": "toolu_01"}))
+        self.clock.time = NOW + dt.timedelta(minutes=30)
+        # The 5-hour meter rose 5 points in the 25 minutes that the agent worked.
+        self.answer("claude", [usage_output(13)])
         self.assertIn(" | per agent-minute session 0.2%, week 0.02% | ", self.run_meter()[1][0])
 
     def test_measures_nothing_from_a_reading_more_than_60_minutes_old(self) -> None:
