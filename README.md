@@ -41,7 +41,13 @@ You need:
    [The template's README](https://github.com/agentic-templates/agent-template#set-up-a-project) stays online after the setup replaces this one.
 
 4. To get the orchestrator's questions as push notifications on your phone, install the Claude app on the phone and sign in with your Claude Code account. After you start the orchestrator, as the next section describes, type `/remote-control` in its session, and turn on "Push when Claude decides" in `/config`. [Remote Control](https://code.claude.com/docs/en/remote-control) describes both.
-5. To let the orchestrator clear its context when it grows long, write a `/clear` sender in your own Claude Code settings, such as `~/.claude/settings.json`. The sender is a hook that runs on both `Stop` and `StopFailure`. When the clone's folder has `.loop/compact-request.txt`, and the file's first line is the `session_id` of the hook's input, the hook types two messages into that session: `/clear`, and then the file's second line. It types them with a tool that types into a terminal, such as `tmux send-keys` when you run the orchestrator in tmux. Without a sender, the orchestrator asks you to type both yourself.
+5. To let the orchestrator clear its context when it grows long, write a `/clear` sender, a hook that the template doesn't ship, and add it to your own Claude Code settings, such as `~/.claude/settings.json`, for the hook events `Stop` and `StopFailure`. When the orchestrator wants a `/clear`, it writes `.loop/compact-request.txt` in the clone's folder, with its session id on the first line and the message that resumes the loop on the second. The hook:
+
+   - reads the `session_id` from the JSON that Claude Code gives it.
+   - if the file's first line is that id, types two messages into the session: `/clear`, and then the file's second line. It types them with a tool that types into a terminal, such as `tmux send-keys` when you run the orchestrator in tmux.
+   - leaves the file in place, because the template's own hooks delete it after the `/clear`.
+
+   Without a sender, the orchestrator asks you to type both messages yourself.
 6. If you want the agents to build on more Claude or Codex accounts than the one that Claude Code is signed in to, list every account in `.loop/accounts.json`, including that one, as `scripts/loop/meter --help` describes.
 
 ## From a goal to a release
