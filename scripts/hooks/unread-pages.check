@@ -108,7 +108,7 @@ check_gh_pr_create() {
 
 check_simple_command() {
   drop_command_prefixes "$@"
-  move_gh_repository_flags
+  move_flags_after_gh_subcommand
   if ((${#command_words[@]} == 0)); then
     return 0
   fi

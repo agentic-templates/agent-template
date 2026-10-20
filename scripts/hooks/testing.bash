@@ -147,12 +147,22 @@ expect_from() {
 
 # Checks each form of the repository flag before a subcommand against a fixed result:
 # expect_repository_flags <exit code> <message> <group> <subcommand> <remaining command words>
-# Each check moves the flag to just after the subcommand before it reads the command, with move_gh_repository_flags in
-# helpers.bash, so these cases also cover the flag in that place.
+# Each check moves the flag to just after the subcommand before it reads the command, with
+# move_flags_after_gh_subcommand in helpers.bash, so these cases also cover the flag in that place.
 expect_repository_flags() {
   local status=$1 message=$2 group=$3 subcommand=$4 rest=$5 repository command
   for repository in '-R jtmpl/other' -Rjtmpl/other -R=jtmpl/other '--repo jtmpl/other' --repo=jtmpl/other; do
     command="gh $group $repository $subcommand $rest"
+    run_hook "$(sample_input claude-code Bash "$command")"
+    expect_result "The hook for $command" "$status" "$message"
+  done
+}
+
+# Checks a gh command with words of its subcommand before the subcommand, and with the same words just after it, against
+# a fixed result: expect_before_and_after_subcommand <exit code> <message> <group> <words> <subcommand> <remaining words>
+expect_before_and_after_subcommand() {
+  local status=$1 message=$2 group=$3 words=$4 subcommand=$5 rest=$6 command
+  for command in "gh $group $words $subcommand $rest" "gh $group $subcommand $words $rest"; do
     run_hook "$(sample_input claude-code Bash "$command")"
     expect_result "The hook for $command" "$status" "$message"
   done
