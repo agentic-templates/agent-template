@@ -57,6 +57,8 @@ When a maintainer asks you to check the security advisories, check them against 
 
 ## Record a vulnerability privately
 
+A vulnerability is a way for text or code from outside the project, such as an issue or a pull request by someone who isn't a maintainer, to read a secret, change main or a release, or get past the sandbox. Some ways around a hook work only for a command that someone wrote on purpose to get past the hook. Such a way around a hook isn't a vulnerability, because the hooks guard against agents' mistakes, not against an agent that sets out to get past them. Open a public issue for it, as for any other problem you find.
+
 As soon as you find a vulnerability that isn't public yet, write its summary and its description to two files outside the repository with your tool for writing files, not with a shell command. Then run `scripts/record-vulnerability <summary file> <description file>`. It records the vulnerability in a security advisory, and prints the advisory's GHSA ID and URL.
 
 ## Fix a security vulnerability
