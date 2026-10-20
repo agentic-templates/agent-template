@@ -58,6 +58,21 @@ class Candidate(NamedTuple):
     is_orchestrators: bool
 
 
+def agents_since_reading(started: list[tuple[dt.datetime, str]], named: list[tuple[dt.datetime, str]]) -> list[Running]:
+    """The agents that started on an account since its reading, at 0 minutes, from the time and type of each start line
+    since then and of each time that the meter named the account since then. A start line takes the oldest earlier
+    naming of its type, because that agent started after the meter named its account, so it counts once."""
+    unmatched = sorted(named)
+    agents = []
+    for at, agent_type in sorted(started):
+        naming = next((entry for entry in unmatched if entry[1] == agent_type and entry[0] <= at), None)
+        if naming is not None:
+            unmatched.remove(naming)
+        agents.append(Running(agent_type, 0.0))
+    agents += [Running(agent_type, 0.0) for _, agent_type in unmatched]
+    return agents
+
+
 def first_per_agent_minute(meter_name: str) -> float:
     return FIRST_SESSION_PER_AGENT_MINUTE if meter_name == SESSION else FIRST_WEEK_PER_AGENT_MINUTE
 

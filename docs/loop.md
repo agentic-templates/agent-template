@@ -200,14 +200,18 @@ usage that you still need until the weekly reset.
   fix needs them.
 
 The line after the accounts starts with `start on`, and names the Claude account for each type, or `no account`.
-Start each builder and researcher, and each reviewer of a pull request, on the account that the `start on` line names
-for the agent's type. Start the auditor, and each reviewer that reviews no pull request, such as the reviewer of a
+Choose the account of each builder and researcher, and of each reviewer of a pull request, with
+`scripts/loop/meter --start-on <type>`, and start the agent on the account that it prints. It names the account as
+the `start on` line does, from the same reading, but it counts each agent that it named an account for since then.
+So one pass starts only as many agents on each account as fit. If it prints `no account`, start no agent of that type
+on a Claude account. Start the auditor, and each reviewer that reviews no pull request, such as the reviewer of a
 release, on your own account, as an agent of your session.
 
 A Codex account builds only the kinds `research` and `other`, and only while its advice is `go`. Start a builder or
-researcher on a Codex account instead of on the account that `start on` names, when the Codex account's `week`
-percentage of use is lower than the named account's, or when the `start on` line names `no account`. Each builder of
-the type `builder-deep`, and each builder or researcher that takes over a hand-off, can run only on a Claude account.
+researcher on such a Codex account without running `--start-on`, when the Codex account's `week` percentage of use is
+lower than that of the account that the `start on` line names for the agent's type. Also start it on such a Codex
+account when `--start-on` prints `no account`. Each builder of the type `builder-deep`, and each builder or researcher
+that takes over a hand-off, can run only on a Claude account.
 
 To start an agent on another account, run one of these commands as a background task. For an issue, give the line
 that `scripts/take-next-issue` printed in place of `<issue> <kind>`. The command's last line says how the run ended,

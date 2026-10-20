@@ -32,6 +32,13 @@ The line after the accounts names the Claude account to start each agent type on
 with the lowest 5-hour meter among those where the type fits. Between accounts with the same 5-hour meter, it names the
 one whose week resets first, and then one other than the orchestrator's own account.
 
+With --start-on TYPE, the meter reads no account, and prints the Claude account to start an agent of the type on, as
+that line names it, or "no account". It takes each account's newest reading in .loop/meter.jsonl, and leaves out an
+account whose newest reading is more than {start} minutes old. As the agents that run on the account, it counts those
+that ran at the reading, at their minutes then, each agent that started on the account since then, and each agent that
+--start-on named the account for since then. So one pass of the loop starts only as many agents on each account as fit.
+It adds a line with the type and the account that it named to .loop/meter.jsonl.
+
 The line before the last lists the agents that run: those with a start line and no end line in .loop/agents.jsonl,
 each with its type and the number of its issue or pull request. It leaves out an agent whose Claude Code process or
 run of scripts/loop/run-builder has ended, such as a builder of an orchestrator that was restarted. It gives each
@@ -109,6 +116,9 @@ from usage import Meter, parse_usage
 # The period over which the meter measures the usage per agent-minute. It measures from the newest reading at least
 # this old. A reading older than LONGEST_READING_GAP is from before a time when the loop stopped, and measures nothing.
 USAGE_PERIOD = dt.timedelta(minutes=30)
+# A pass of the loop starts its agents from the reading that it starts with, so --start-on names an account only from a
+# reading this recent.
+OLDEST_START_READING = dt.timedelta(minutes=30)
 # Waiting at a stop wakes the orchestrator every 50 minutes, and each wake spends some of the week. So a weekly meter
 # that reaches its limit further than this from its reset parks the account instead.
 LONGEST_STOP = dt.timedelta(hours=10)
@@ -169,7 +179,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="scripts/loop/meter", description=help_text(), formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--wake", action="store_true", help="keep reading until the orchestrator needs to wake")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--wake", action="store_true", help="keep reading until the orchestrator needs to wake")
+    modes.add_argument(
+        "--start-on",
+        metavar="TYPE",
+        choices=agent_types("claude"),
+        help="print the Claude account to start an agent of the type on, without reading the accounts",
+    )
     options = parser.parse_args(argv)
     loop_folder = paths.loop_dir()
     loop_folder.mkdir(parents=True, exist_ok=True)
@@ -179,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 1
     log = loop_folder / "meter.jsonl"
+    if options.start_on:
+        return start_on(options.start_on, accounts, log)
     hand_offs = loop_folder / FOLDER_NAME
     checkout = paths.main_checkout()
     printed = loop_folder / PRINTED_FINDINGS
@@ -211,12 +230,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def help_text() -> str:
-    """The docstring, with the numbers that the code keeps in place of {hours}, {period} and {gap}, so that changing a
-    number takes one edit. The docstring's JSON example has braces of its own, so str.format can't fill it in."""
+    """The docstring, with the numbers that the code keeps in place of {hours}, {period}, {gap} and {start}, so that
+    changing a number takes one edit. The docstring's JSON example has braces of its own, so str.format can't fill it
+    in."""
     numbers = {
         "{hours}": f"{HOURS_PER_RETROSPECTIVE:g}",
         "{period}": f"{USAGE_PERIOD.total_seconds() / 60:g}",
         "{gap}": f"{LONGEST_READING_GAP.total_seconds() / 60:g}",
+        "{start}": f"{OLDEST_START_READING.total_seconds() / 60:g}",
     }
     text = str(__doc__)
     for placeholder, number in numbers.items():
@@ -314,6 +335,77 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
         has_every_account,
         machine,
     )
+
+
+def start_on(agent_type: str, accounts: list[Account], log: Path) -> int:
+    """Prints the Claude account to start an agent of the type on, as at each account's newest reading, and logs the
+    account that it names, so that the next call counts the agent."""
+    runs = agent_log.read_runs(log.parent / "agents.jsonl")
+    earlier_runs = run_minutes_by_type(runs)
+    orchestrators = own_account(accounts, os.environ)
+    transcript = orchestrator_transcript(log.parent / "state.md", paths.main_checkout())
+    orchestrator_periods = agent_log.session_periods(transcript) if transcript else []
+    candidates: list[account_room.Candidate] = []
+    for account in accounts:
+        readings = account_readings(log, account["name"]) if log.exists() else []
+        if account["tool"] != "claude" or not readings:
+            continue
+        reading_time = dt.datetime.fromisoformat(readings[-1]["at"])
+        if now() - reading_time > OLDEST_START_READING:
+            continue
+        is_orchestrators = orchestrators is not None and orchestrators["name"] == account["name"]
+        orchestrator = orchestrator_periods if is_orchestrators else []
+        room = room_at_reading(account["name"], readings, runs, log, orchestrator)
+        fitting = advise(room, agent_types("claude"), earlier_runs, reading_time).fitting
+        candidates.append(account_room.Candidate(account["name"], fitting, room.meters, is_orchestrators))
+    if not candidates:
+        minutes = OLDEST_START_READING.total_seconds() / 60
+        print(
+            f"error: no Claude account has a reading from the last {minutes:g} minutes. Run scripts/loop/meter, and "
+            "then scripts/loop/meter --start-on again.",
+            file=sys.stderr,
+        )
+        return 1
+    named = account_room.account_for(agent_type, candidates)
+    if named is not None:
+        entry = {"at": now().isoformat(timespec="seconds"), "start_on": named, "type": agent_type}
+        with log.open("a") as handle:
+            handle.write(json.dumps(entry) + "\n")
+    print(named or "no account")
+    return 0
+
+
+def room_at_reading(
+    account: str,
+    readings: list[dict[str, Any]],
+    runs: list[agent_log.AgentRun],
+    log: Path,
+    orchestrator: list[agent_log.Period],
+) -> account_room.Room:
+    """The account's room at its newest reading, with the agents that ran then, and each agent that started on it since
+    then or that --start-on named it for since then."""
+    newest = readings[-1]
+    reading_time = dt.datetime.fromisoformat(newest["at"])
+    meters = newest["meters"]
+    per_agent_minute = {name: last_measured(readings, name) for name in meters}
+    running: list[account_room.Running] = []
+    started: list[tuple[dt.datetime, str]] = []
+    for run in runs:
+        if run.start.get("account") != account:
+            continue
+        if agent_log.started(run) > reading_time:
+            started.append((agent_log.started(run), run.start["type"]))
+        elif is_running(run) or (run.end is not None and dt.datetime.fromisoformat(run.end["at"]) > reading_time):
+            minutes = (reading_time - agent_log.started(run)).total_seconds() / 60
+            running.append(account_room.Running(run.start["type"], minutes))
+    entries = (json.loads(line) for line in log.read_text().splitlines())
+    namings = [
+        (dt.datetime.fromisoformat(entry["at"]), entry["type"]) for entry in entries if entry.get("start_on") == account
+    ]
+    named = [(at, agent_type) for at, agent_type in namings if at >= reading_time]
+    running += account_room.agents_since_reading(started, named)
+    share = account_room.working_share(orchestrator, reading_time)
+    return account_room.Room(meters, per_agent_minute, running, share)
 
 
 def read_meters(account: Account, reading_time: dt.datetime) -> tuple[dict[str, Meter], list[str]]:
