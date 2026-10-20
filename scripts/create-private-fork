@@ -9,9 +9,11 @@
 # main, and then deletes every other branch from it. It prints a line for each branch it deleted.
 # When the advisory has a private fork already, the script prints the fork's name, adds its remote, and changes
 # nothing in the fork, because the fork's branches can hold a fix in progress.
+# When git can't add the remote to a new fork, the script still deletes the copied branches, so that running it again
+# finishes the fork by adding the remote.
 # It stops with an error, and exits with code 1, without admin access, when git can't add the remote, when main
-# doesn't appear in the fork in time, when it can't delete a branch, and when gh fails. It asks gh about the repository of this checkout, or the one in
-# GH_REPO.
+# doesn't appear in the fork in time, when it can't delete a branch, and when gh fails. It asks gh about the repository
+# of this checkout, or the one in GH_REPO.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=scripts/admin-access
@@ -31,14 +33,16 @@ stop() {
   exit 1
 }
 
-# Adds the fork as the remote fork_remote, unless a remote of that name exists: add_fork_remote
+# Adds the fork as the remote fork_remote, unless a remote of that name exists, and fails with an error when git
+# can't add it: add_fork_remote
 add_fork_remote() {
   local answer
   if git remote get-url "$fork_remote" >/dev/null 2>&1; then
     return 0
   fi
   if ! answer=$(git remote add "$fork_remote" "https://github.com/$fork.git" 2>&1); then
-    stop "can't add the private fork $fork as the git remote $fork_remote, because git failed: $answer"
+    echo "error: can't add the private fork $fork as the git remote $fork_remote, because git failed: $answer" >&2
+    return 1
   fi
 }
 
@@ -84,7 +88,7 @@ if ! fork=$(gh api "repos/$repo/security-advisories/$ghsa_id" --jq '.private_for
 fi
 if [[ -n $fork ]]; then
   printf '%s\n' "$fork"
-  add_fork_remote
+  add_fork_remote || exit 1
   exit 0
 fi
 
@@ -92,7 +96,8 @@ if ! fork=$(gh api --method POST "repos/$repo/security-advisories/$ghsa_id/forks
   stop "can't create a private fork for the security advisory $ghsa_id, because gh failed: $fork"
 fi
 printf '%s\n' "$fork"
-add_fork_remote
+is_remote_added=true
+add_fork_remote || is_remote_added=false
 
 branches_page=https://github.com/$fork/branches
 copies="because they're copies of the branches of $repo, not fixes"
@@ -121,4 +126,7 @@ while IFS=$'\t' read -r name path; do
 done <<<"$branches"
 if [[ -n $failed_deletes ]]; then
   stop "can't delete these branches from the private fork $fork, because gh failed:"$'\n'"$failed_deletes""Delete them at $branches_page, $copies."
+fi
+if [[ $is_remote_added == false ]]; then
+  exit 1
 fi

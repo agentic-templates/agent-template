@@ -204,15 +204,26 @@ $fork_remote${tab}git@github.com:octo-org/other.git (push)"
 new_case
 : >"$checkout/.git/config.lock"
 run_create_private_fork "$ghsa_id"
-# git's own error differs from one version of git to the next, so the case checks the output up to it.
+# git's own error differs from one version of git to the next, so the case checks the output around it.
 expected_start="$fork
 error: can't add the private fork $fork as the git remote $fork_remote, because git failed: "
+expected_end="
+Deleted 441-fix-import
+Deleted dependabot/github_actions/actions/checkout-5"
 case_count=$((case_count + 1))
-if [[ $status != 1 || $output != "$expected_start"* ]]; then
-  echo "error: When git can't add the remote, scripts/create-private-fork must exit with code 1 and print \"$expected_start\" and git's error, but it exited with code $status and printed \"$output\"." >&2
+if [[ $status != 1 || $output != "$expected_start"*"$expected_end" ]]; then
+  echo "error: When git can't add the remote, scripts/create-private-fork must exit with code 1 and print \"$expected_start\", git's error and \"$expected_end\", but it exited with code $status and printed \"$output\"." >&2
   failed_cases=$((failed_cases + 1))
 fi
-expect_waiting "When git can't add the remote" 0 0 ""
+expect_waiting "When git can't add the remote" 1 2 ""
+expect_remotes "When git can't add the remote" ""
+rm "$checkout/.git/config.lock"
+echo "$fork" >"$state/existing-fork"
+: >"$state/calls"
+run_create_private_fork "$ghsa_id"
+expect_result "When the script runs again after git couldn't add the remote" 0 "$fork"
+expect_waiting "When the script runs again after git couldn't add the remote" 0 0 ""
+expect_remotes "When the script runs again after git couldn't add the remote" "$fork_remotes"
 
 new_case
 listings_without_main=3
