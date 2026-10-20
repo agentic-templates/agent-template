@@ -2,7 +2,8 @@
 # Tests that .claude/settings.json and .codex/hooks.json run the hooks. Each file must be one JSON object, and one of
 # its PreToolUse commands, run as written, must block a command that reads .env. The hooks let an action through
 # when they fail on their own, so a broken file or command turns them off in every agent without an error.
-# Also tests that the commands in .claude/settings.json run the hooks of the git worktree that the agent works in,
+# Also tests that .claude/settings.json allows the commands of the loop that auto mode's classifier can block.
+# And it tests that the commands in .claude/settings.json run the hooks of the git worktree that the agent works in,
 # and that the PreToolUse commands in both files run the main checkout's before-tool when the worktree's can't run.
 # The SubagentStop command and the PostToolUse command for TaskStop run scripts/loop/agent-log, which the tests of
 # scripts/loop test.
@@ -84,16 +85,30 @@ expect_problem "$copies/two.json" claude-code "$copies/two.json isn't one JSON o
 echo '[]' >"$copies/array.json"
 expect_problem "$copies/array.json" codex "$copies/array.json isn't one JSON object, so the agents that read it run no hooks. Fix its JSON."
 
-# Auto mode's classifier blocks closing an issue or a pull request that the session didn't open, and the loop closes
-# them by design, such as when a builder gives an issue back. An allow rule skips the classifier, but not the hooks,
-# which block both commands for another repository, as maintainer-only.test shows.
-for rule in 'Bash(gh issue close:*)' 'Bash(gh pr close:*)'; do
+# Checks that permissions.allow in .claude/settings.json has a rule, which skips auto mode's classifier but not the
+# hooks: expect_allowed <rule> <what the classifier can block without it>
+expect_allowed() {
   case_count=$((case_count + 1))
-  if ! jq -e --arg rule "$rule" 'any(.permissions.allow[]?; . == $rule)' .claude/settings.json >/dev/null; then
-    echo "error: .claude/settings.json doesn't allow $rule, so auto mode's classifier can block the loop from closing an issue or a pull request that another session opened. Add it to permissions.allow." >&2
+  if ! jq -e --arg rule "$1" 'any(.permissions.allow[]?; . == $rule)' .claude/settings.json >/dev/null; then
+    echo "error: .claude/settings.json doesn't allow $1, so auto mode's classifier can block $2. Add it to permissions.allow." >&2
     failed_cases=$((failed_cases + 1))
   fi
+}
+
+# Auto mode's classifier blocks closing an issue or a pull request that the session didn't open, and the loop closes
+# them by design, such as when a builder gives an issue back. The hooks block both commands for another repository,
+# as maintainer-only.test shows.
+for rule in 'Bash(gh issue close:*)' 'Bash(gh pr close:*)'; do
+  expect_allowed "$rule" "the loop from closing an issue or a pull request that another session opened"
 done
+
+# Auto mode's classifier blocks a run of scripts/configure-github as a weakening of security, and the orchestrator runs
+# it after each change to it merges. Once a repository's settings were applied, the hooks allow the run only from the
+# orchestrator, as a command of its own in the main checkout, while the checkout's scripts folder and .gitignore are
+# the same as on main on GitHub. The rule also matches the command behind a wrapper, such as timeout, or after a
+# variable that Claude Code takes as safe, and the hooks block the run there, as maintainer-commands.test shows.
+expect_allowed 'Bash(scripts/configure-github)' \
+  "the orchestrator from running scripts/configure-github after a change to it merges"
 
 # The commands in a git worktree. Claude Code can run the commands in the main checkout while the agent works in a
 # worktree, and the main checkout can be older than the worktree. The cases run in a repository whose hooks print

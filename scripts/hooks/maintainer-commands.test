@@ -352,6 +352,11 @@ for command in "${runs_of_the_script[@]}" "cd '$main_checkout' && scripts/config
   test_cwd=$worktree expect_from builder-1 "" "$command" 2 "$second_run"
   expect_from abc123 "" "$command" 2 "$second_run"
 done
+# Behind a wrapper, which Claude Code drops before it matches the command with the allow rule in .claude/settings.json
+for wrapper in "${wrappers[@]}"; do
+  test_cwd=$worktree expect_from "$orchestrator" agent-7 "$wrapper scripts/configure-github" 2 "$second_run"
+  test_cwd=$worktree expect_from builder-1 "" "$wrapper scripts/configure-github" 2 "$second_run"
+done
 
 # The orchestrator's run in another folder, also on another repository, and a run that the hook blocks from any
 # session, as runs_not_alone lists them
@@ -362,6 +367,10 @@ for command in "cd '$worktree' && scripts/configure-github" "env -C '$worktree' 
 done
 for command in "${runs_not_alone[@]}"; do
   expect_from "$orchestrator" "" "$command" 2 "$not_alone"
+done
+for wrapper in "${wrappers[@]}"; do
+  expect_from "$orchestrator" "" "$wrapper scripts/configure-github" 2 "$not_alone"
+  test_cwd=$worktree expect_from "$orchestrator" "" "$wrapper scripts/configure-github" 2 "$outside_main_checkout"
 done
 
 # The orchestrator's run while the main checkout's scripts folder differs from the one on main on GitHub: a file
@@ -459,6 +468,9 @@ git -C "$worktree" commit --quiet -am "feat: turn on the merge queue"
 git -C "$worktree" update-ref refs/remotes/origin/main HEAD
 git -C "$main_checkout" checkout --quiet origin/main -- scripts/configure-github
 expect_from "$orchestrator" "" scripts/configure-github 2 "$unlike_main"
+for wrapper in "${wrappers[@]}"; do
+  expect_from "$orchestrator" "" "$wrapper scripts/configure-github" 2 "$not_alone"
+done
 # Once GitHub's main has the change, as after its pull request merged, the orchestrator runs the script.
 TEST_SCRIPTS_TREE=$(git -C "$worktree" rev-parse HEAD:scripts)
 expect_from "$orchestrator" "" scripts/configure-github 0 ""

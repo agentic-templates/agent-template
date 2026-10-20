@@ -10,7 +10,8 @@
       "Bash(chmod +x scripts/*)",
       "Bash(chmod +x */scripts/*)",
       "Bash(gh issue close:*)",
-      "Bash(gh pr close:*)"
+      "Bash(gh pr close:*)",
+      "Bash(scripts/configure-github)"
     ],
     "deny": [
       "Read(.env)",
