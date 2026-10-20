@@ -526,12 +526,22 @@ expect_block Bash 'gh repo edit someone/else --description --help' "$(other_repo
 expect_block Bash 'gh release upload v1 -R someone/else -- --help' "$(other_repository someone/else)"
 expect_block Bash 'gh repo edit someone/else -h https://example.com' "$(other_repository someone/else)"
 expect_allow Bash "gh issue comment 5 -R someone/else --body '' --help"
-# A word with an expansion can become nothing, so that --help is the value of the flag before it, or it can become --.
+# gh keeps the last value that the command gives --help, and reads it as is_true_flag_value in helpers.bash does. The
+# hook doesn't know that --enable-issues takes no value, so it reads the --help=false after it as a flag. -- can be the
+# value of the flag before it, so that gh reads the words after it as flags.
+expect_block Bash 'gh repo edit -R someone/else --help --help=false' "$(other_repository someone/else)"
+expect_allow Bash 'gh repo edit -R someone/else --help=false --help'
+expect_allow Bash 'gh repo edit -R someone/else --help=0 --help=true'
+expect_block Bash 'gh repo edit -R someone/else --help --enable-issues --help=false' "$(other_repository someone/else)"
+expect_block Bash 'gh repo edit someone/else --help --description -- --help=false' "$(other_repository someone/else)"
+# A word with an expansion can become nothing, so that --help is the value of the flag before it, or it can become --
+# or --help=false.
 # shellcheck disable=SC2016 # The commands are the text that the agent sends, so the expansions stay as written.
 for command in 'gh issue comment 5 -R someone/else --body $EMPTY --help' \
   'gh issue comment 5 -R someone/else --body ${EMPTY} --help' \
   'gh issue comment 5 -R someone/else --body $(true) --help' \
-  'gh release upload v1 -R someone/else $separator notes.md --help'; do
+  'gh release upload v1 -R someone/else $separator notes.md --help' \
+  'gh issue comment 5 -R someone/else --body Hello --help $flag'; do
   expect_block Bash "$command" "$(other_repository someone/else)"
 done
 # shellcheck disable=SC2016 # The command is the text that the agent sends, so $repo stays as written.

@@ -289,6 +289,8 @@ releases=(
   'gh api -i -f tag_name=v1.0.0 repos/{owner}/{repo}/releases'
   'gh api -if tag_name=v1.0.0 repos/{owner}/{repo}/releases'
   'gh api -iftag_name=v1.0.0 repos/{owner}/{repo}/releases'
+  # gh keeps the last value that the command gives --help.
+  'gh release create v1.0.0 --help --help=false'
 )
 for command in "${releases[@]}"; do
   expect_from abc123 "" "$command" 2 "$publishes_release"
@@ -311,6 +313,7 @@ not_releases=(
   'gh release list'
   'gh release view v1.0.0'
   'gh release create --help'
+  'gh release create v1.0.0 --help=false --help'
   'gh release edit v1.0.0 --notes "Fixed the date"'
   'gh release edit v1.0.0 --draft'
   'gh release edit v1.0.0 --draft=true'
