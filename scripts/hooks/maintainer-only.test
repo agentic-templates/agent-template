@@ -326,10 +326,14 @@ expect_allow Bash 'git --version push --no-verify'
 expect_block Bash 'git push https://github.com/someone/else.git main' "$push_to_url"
 expect_block Bash 'git push git@github.com:someone/else.git HEAD' "$push_to_url"
 expect_block Bash 'git push -o ci.skip ssh://git@github.com/jtmpl/project.git HEAD' "$push_to_url"
-# The hook can't tell whether a remote that the shell expands is a URL.
-expect_block Bash 'git push "$remote" HEAD' "$(expanded_push_word '$remote')"
-expect_block Bash 'git push origin "HEAD:$(git branch --show-current)"' \
-  "$(expanded_push_word 'HEAD:$(git branch --show-current)')"
+# A push whose remote or refspec has a variable or a $( ) is blocked, because the hook can't tell before the command
+# runs whether its remote is a URL.
+# shellcheck disable=SC2016 # The $ in these words is for the hook to read, not for the test to expand.
+{
+  expect_block Bash 'git push "$remote" HEAD' "$(expanded_push_word '$remote')"
+  expect_block Bash 'git push origin "HEAD:$(git branch --show-current)"' \
+    "$(expanded_push_word 'HEAD:$(git branch --show-current)')"
+}
 expect_allow Bash 'git push -u origin HEAD'
 expect_allow Bash 'git push'
 expect_allow Bash 'git push --force-with-lease origin HEAD:main'
