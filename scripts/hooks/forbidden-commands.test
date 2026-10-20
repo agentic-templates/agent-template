@@ -209,6 +209,8 @@ pushes_to_dependabot=(
   "git push origin $dependabot_branch"
   "git push origin HEAD:$dependabot_branch"
   "git push --force origin +HEAD:refs/heads/$dependabot_branch"
+  "git push origin HEAD:heads/$dependabot_branch"
+  "git push origin heads/$dependabot_branch"
   "git push origin --delete $dependabot_branch"
   "git push origin :$dependabot_branch"
   "git push origin main $dependabot_branch"
@@ -219,7 +221,7 @@ for command in "${pushes_to_dependabot[@]}"; do
   expect_block Bash "$command" "$to_dependabot"
 done
 for command in 'git push' 'git push origin' 'git push -u origin HEAD' 'git push origin 383-block-commands' \
-  'git push origin dependabot-notes' 'git -C ../other push'; do
+  'git push origin dependabot-notes' 'git -C ../other push' "git push origin HEAD:refs/heads/heads/$dependabot_branch"; do
   expect_allow Bash "$command"
 done
 # Without a refspec, or with HEAD, git pushes the current branch, and git reads @ as HEAD.
@@ -232,6 +234,9 @@ expect_allow Bash 'git push origin main'
 expect_allow Bash 'git -C ../other push'
 expect_allow Bash 'git --git-dir=../other/.git push'
 expect_allow Bash 'git status'
+# The current branch heads/<branch> is not <branch>, though git reads heads/<branch> as <branch> in a refspec.
+git -C "$test_cwd" symbolic-ref HEAD "refs/heads/heads/$dependabot_branch"
+expect_allow Bash 'git push'
 git -C "$test_cwd" symbolic-ref HEAD refs/heads/383-block-commands
 git -C "$other" symbolic-ref HEAD "refs/heads/$dependabot_branch"
 expect_block Bash 'git -C ../other push' "$to_dependabot"

@@ -308,7 +308,10 @@ read_push_arguments() {
 # a push without a refspec pushes HEAD, as git's default push.default, simple, does. git reads @ as HEAD in the source,
 # though not after the colon. For HEAD, the branch is HEAD's, which git gives with these options, such as -C <folder>,
 # and a refspec is left out when HEAD has no branch. A refspec with nothing before its colon, as in :feature, deletes
-# the branch, and its source is empty: read_push_branches [<git option>...]
+# the branch, and its source is empty. Both refs/heads/<branch> and heads/<branch> name <branch>, because git looks up a
+# name that doesn't start with refs/ among the remote's refs as git rev-parse does, and updates <branch> when the remote
+# has it. The hook can't ask the remote, so heads/<branch> names <branch> even when git creates a branch heads/<branch>
+# instead: read_push_branches [<git option>...]
 read_push_branches() {
   local refspec source branch
   local -a refspecs=(HEAD)
@@ -326,11 +329,17 @@ read_push_branches() {
     if [[ $refspec == *:* ]]; then
       branch=${refspec#*:}
     fi
+    # The full name keeps a branch named heads/<branch> apart from <branch>, which --short prints as heads/<branch> when
+    # a tag has its name.
     if [[ $branch == HEAD ]]; then
-      branch=$(git "$@" symbolic-ref --quiet --short HEAD 2>/dev/null) || continue
+      branch=$(git "$@" symbolic-ref --quiet HEAD 2>/dev/null) || continue
     fi
+    case $branch in
+      refs/heads/*) branch=${branch#refs/heads/} ;;
+      heads/*) branch=${branch#heads/} ;;
+    esac
     push_sources+=("$source")
-    push_branches+=("${branch#refs/heads/}")
+    push_branches+=("$branch")
   done
 }
 
