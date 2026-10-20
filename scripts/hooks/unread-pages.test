@@ -285,7 +285,7 @@ for push in "git push" "git push -u origin HEAD" "git push --force-with-lease or
   "git push origin 'refs/heads/*:refs/heads/*' HEAD" "cd docs && git push" "git -C docs push"; do
   expect_check "$push" 2 "$(unread_push 5 docs/loop.md)"
 done
-# A push whose remote or refspec the shell expands is blocked, because the check can't tell which branch on which
+# A push whose remote or refspec has a variable or a $( ) is blocked, because the check can't tell which branch on which
 # remote it updates.
 # shellcheck disable=SC2016 # The $ in these words is for the check to read, not for the test to expand.
 {

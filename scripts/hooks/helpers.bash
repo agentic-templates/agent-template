@@ -330,9 +330,10 @@ push_flags_with_value=" --repo --recurse-submodules --receive-pack --exec -o --p
 # - flags: the flags, without their values
 # - push_remote: the first word that isn't a flag or a flag's value, which names a remote or a URL, or empty
 # - push_refspecs: the other words that aren't flags or flags' values
-# Blocks the push when one of these other words may expand, as in git push origin "$branch", because the hook can't
-# tell which remote or branch the word names before the command runs, and both checks of git push need them. Run
-# read_git_options first.
+# Blocks the push when the remote or a refspec has a variable, a $( ) or backticks, as starts_expansion finds them, as
+# in git push origin "$branch", because the hook can't tell before the command runs which remote or branch the word
+# names. forbidden-commands.check and unread-pages.check need the branches, and maintainer-only.check needs the remote.
+# A flag and its value go ahead, because no check needs them. Run read_git_options first.
 read_push_arguments() {
   local i word
   local -a words=()
