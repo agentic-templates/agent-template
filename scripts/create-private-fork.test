@@ -86,7 +86,7 @@ new_case() {
   mkdir "$state"
   git init --quiet "$checkout"
   mkdir "$checkout/scripts"
-  cp scripts/create-private-fork scripts/admin-access "$checkout/scripts/"
+  cp scripts/create-private-fork scripts/admin-access scripts/ghsa-id "$checkout/scripts/"
   : >"$state/calls"
   : >"$state/sleeps"
   : >"$state/existing-fork"

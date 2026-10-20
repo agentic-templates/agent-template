@@ -771,14 +771,15 @@ expect_allow Bash 'gh repo create jtmpl/listed --public'
 expect_block Bash 'gh pr comment 5 -R someone/else --body Hello' "$(other_repository someone/else)"
 hooks_folder=$project/scripts/hooks test_cwd=$project
 
-# Writing the file of reviewed fixes in the main checkout's loop folder. Only the orchestrator's session, the one that
-# the state file names, may write it. A builder runs as a subagent of that session, with an agent id of its own, or in
-# a session of its own.
+# Writing the files in the main checkout's loop folder that a release reads. Only the orchestrator's session, the one
+# that the state file names, may write them. A builder runs as a subagent of that session, with an agent id of its own,
+# or in a session of its own.
 orchestrator=11111111-aaaa-4bbb-8ccc-000000000001
 printf '%s\n' "session: $orchestrator" "goal: the release" >"$project/.loop/state.md"
-reviewed_fixes=$project/.loop/reviewed-fixes
+# Prints the message that blocks a write to the file whose reason is in reason:
+# only_orchestrator <the file's path as the message names it>
 only_orchestrator() {
-  echo "Blocked: only the orchestrator writes $1, because a release includes each fix that it marks as reviewed without asking the maintainer. Go on with the other work, and list the change in your report."
+  echo "Blocked: only the orchestrator writes $1, because $reason. Go on with the other work, and list the change in your report."
 }
 # Checks that the hook blocks an action that writes the file, unless the orchestrator's session takes it:
 # expect_only_orchestrator <tool name> <command, patch or path> <the file's path as the message names it>
@@ -787,30 +788,44 @@ expect_only_orchestrator() {
   expect_action_from "$orchestrator" agent-7 "$1" "$2" 2 "$(only_orchestrator "$3")"
   expect_action_from "$orchestrator" "" "$1" "$2" 0 ""
 }
-mark='refs/private-fork/GHSA-1234-5678-9abc/fix 0123456789abcdef0123456789abcdef01234567'
-expect_only_orchestrator Bash "echo '$mark' >> .loop/reviewed-fixes" .loop/reviewed-fixes
-expect_only_orchestrator Bash "echo '$mark' >'$reviewed_fixes'" "$reviewed_fixes"
-expect_only_orchestrator Bash "printf '%s\n' '$mark' | tee -a .loop/reviewed-fixes" .loop/reviewed-fixes
-expect_only_orchestrator Bash "cd .loop && echo '$mark' >> reviewed-fixes" reviewed-fixes
-expect_only_orchestrator Bash 'cp /tmp/reviewed-fixes .loop/' .loop/reviewed-fixes
-expect_only_orchestrator Bash 'mv marks.txt .loop/reviewed-fixes' .loop/reviewed-fixes
-expect_only_orchestrator Bash "sed -i '' 's/0123/4567/' .loop/reviewed-fixes" .loop/reviewed-fixes
-expect_only_orchestrator Bash "perl -pi -e 's/0123/4567/' .loop/reviewed-fixes" .loop/reviewed-fixes
-# macOS finds a file by its name in any case.
-expect_only_orchestrator Bash "echo '$mark' >> .loop/Reviewed-Fixes" .loop/Reviewed-Fixes
-expect_only_orchestrator Write "$reviewed_fixes" "$reviewed_fixes"
-expect_only_orchestrator Edit "$reviewed_fixes" "$reviewed_fixes"
-expect_only_orchestrator apply_patch $'*** Begin Patch\n*** Add File: .loop/reviewed-fixes\n+'"$mark"$'\n*** End Patch\n' \
-  .loop/reviewed-fixes
-expect_allow Bash 'cat .loop/reviewed-fixes'
-expect_allow Bash "grep -c GHSA .loop/reviewed-fixes > counts.txt"
-expect_allow Bash "echo '$mark' >> notes/reviewed-fixes"
+for name in reviewed-fixes advisory-marks; do
+  case $name in
+    reviewed-fixes)
+      reason="a release includes each fix that it marks as reviewed without asking the maintainer"
+      mark='refs/private-fork/GHSA-1234-5678-9abc/fix 0123456789abcdef0123456789abcdef01234567'
+      other_case=Reviewed-Fixes
+      ;;
+    advisory-marks)
+      reason="a release waits for the fix of each advisory that it marks as holding the release"
+      mark='GHSA-1234-5678-9abc fix-merged 0123456789abcdef0123456789abcdef01234567'
+      other_case=Advisory-Marks
+      ;;
+  esac
+  file=$project/.loop/$name
+  expect_only_orchestrator Bash "echo '$mark' >> .loop/$name" ".loop/$name"
+  expect_only_orchestrator Bash "echo '$mark' >'$file'" "$file"
+  expect_only_orchestrator Bash "printf '%s\n' '$mark' | tee -a .loop/$name" ".loop/$name"
+  expect_only_orchestrator Bash "cd .loop && echo '$mark' >> $name" "$name"
+  expect_only_orchestrator Bash "cp /tmp/$name .loop/" ".loop/$name"
+  expect_only_orchestrator Bash "mv marks.txt .loop/$name" ".loop/$name"
+  expect_only_orchestrator Bash "sed -i '' 's/0123/4567/' .loop/$name" ".loop/$name"
+  expect_only_orchestrator Bash "perl -pi -e 's/0123/4567/' .loop/$name" ".loop/$name"
+  # macOS finds a file by its name in any case.
+  expect_only_orchestrator Bash "echo '$mark' >> .loop/$other_case" ".loop/$other_case"
+  expect_only_orchestrator Write "$file" "$file"
+  expect_only_orchestrator Edit "$file" "$file"
+  expect_only_orchestrator apply_patch $'*** Begin Patch\n*** Add File: .loop/'"$name"$'\n+'"$mark"$'\n*** End Patch\n' \
+    ".loop/$name"
+  expect_allow Bash "cat .loop/$name"
+  expect_allow Bash "grep -c GHSA .loop/$name > counts.txt"
+  expect_allow Bash "echo '$mark' >> notes/$name"
+  # A worktree's own loop folder holds no file that a release reads.
+  test_cwd=$worktree
+  expect_block Bash "echo '$mark' >> '$file'" "$(only_orchestrator "$file")"
+  expect_allow Bash "echo '$mark' >> .loop/$name"
+  test_cwd=$project
+done
 expect_allow Write "$project/.loop/allowed-repositories"
-# A worktree's own loop folder holds no file that a release reads.
-test_cwd=$worktree
-expect_block Bash "echo '$mark' >> '$reviewed_fixes'" "$(only_orchestrator "$reviewed_fixes")"
-expect_allow Bash "echo '$mark' >> .loop/reviewed-fixes"
-test_cwd=$project
 
 # Without an origin, the hook can't tell which repository is this one.
 git -C "$project" remote remove origin

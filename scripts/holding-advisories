@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Lists the security advisories that hold the release until their fixes merge: scripts/holding-advisories
+# Step 3 of "Publish a release" in docs/releasing.md runs it. It reads .loop/advisory-marks in the main checkout, which
+# only the orchestrator's session writes. Each line of the file marks an advisory by its GHSA ID:
+# - <GHSA ID> holds-release: the advisory holds the release until its fix merges.
+# - <GHSA ID> fix-merged <SHA>: the advisory's fix merged, and <SHA> is the full SHA of its commit on main.
+# The script prints the GHSA ID of each advisory that the file marks as holding the release, and not as fixed, unless
+# GitHub says that the advisory is published, closed or withdrawn. It prints them one to a line, in the order of their
+# first holds-release lines. Without the file, it prints nothing.
+# It stops with an error, and exits with code 1, when it can't read the file, when a line of the file is neither mark,
+# and when gh can't read the state of an advisory that holds the release. It asks gh about the repository of this
+# checkout, or the one in GH_REPO.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=scripts/loop-folder
+source scripts/loop-folder
+# shellcheck source=scripts/ghsa-id
+source scripts/ghsa-id
+
+# Prints an error and stops: stop <message>
+stop() {
+  echo "error: $1" >&2
+  exit 1
+}
+
+# Succeeds if the words of a line make a mark: is_mark <GHSA ID> <mark> <SHA> <the rest of the line>
+is_mark() {
+  if ! is_ghsa_id "$1" || [[ -n $4 ]]; then
+    return 1
+  fi
+  case $2 in
+    holds-release) [[ -z $3 ]] ;;
+    fix-merged) [[ $3 =~ ^[0-9a-f]{40}$ ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+# Succeeds if a list of lines, each with a newline at its end, has a line: has_line <lines> <line>
+has_line() {
+  [[ $'\n'$1 == *$'\n'"$2"$'\n'* ]]
+}
+
+if (($# > 0)); then
+  stop "scripts/holding-advisories takes no arguments, and it got $#."
+fi
+
+if ! git_folders=$(git rev-parse --path-format=absolute --git-common-dir --show-toplevel 2>&1); then
+  stop "can't find the main checkout, because git failed: $git_folders"
+fi
+marks_file=$(loop_folder "${git_folders%%$'\n'*}" "${git_folders#*$'\n'}")/advisory-marks
+if [[ ! -e $marks_file ]]; then
+  exit 0
+fi
+if ! marks=$(cat "$marks_file" 2>&1); then
+  stop "can't read $marks_file, because cat failed: $marks"
+fi
+
+# The GHSA IDs that the file marks as holding the release, and the ones whose fixes it marks as merged, each with a
+# newline at its end
+held_ids=""
+merged_ids=""
+line_number=0
+while IFS= read -r line; do
+  line_number=$((line_number + 1))
+  read -r ghsa_id mark sha rest <<<"$line"
+  if [[ -z $ghsa_id ]]; then
+    continue
+  fi
+  if ! is_mark "$ghsa_id" "$mark" "$sha" "$rest"; then
+    stop "line $line_number of $marks_file is \"$line\", which is neither \"<GHSA ID> holds-release\" nor \"<GHSA ID> fix-merged <SHA>\". Write the GHSA ID as the advisory writes it, such as GHSA-2c5x-3m4v-7q8r, and the full SHA of the fix's commit on main. Correct the line, and run scripts/holding-advisories again."
+  fi
+  if [[ $mark == fix-merged ]]; then
+    merged_ids+=$ghsa_id$'\n'
+  elif ! has_line "$held_ids" "$ghsa_id"; then
+    held_ids+=$ghsa_id$'\n'
+  fi
+done <<<"$marks"
+
+while IFS= read -r ghsa_id; do
+  if [[ -z $ghsa_id ]] || has_line "$merged_ids" "$ghsa_id"; then
+    continue
+  fi
+  if ! state=$(gh api "repos/{owner}/{repo}/security-advisories/$ghsa_id" --jq .state 2>&1); then
+    stop "can't read the state of the security advisory $ghsa_id, which $marks_file marks as holding the release, because gh failed: $state. Check the GHSA ID in that file, and run scripts/holding-advisories again once gh can read the advisory."
+  fi
+  case $state in
+    published | closed | withdrawn) ;;
+    *) printf '%s\n' "$ghsa_id" ;;
+  esac
+done <<<"$held_ids"

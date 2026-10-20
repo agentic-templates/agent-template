@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+# Tests scripts/holding-advisories on a copy of it in a repository and a worktree of it in a temporary folder, with a
+# stand-in for gh.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+case_count=0
+failed_cases=0
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+checkout=$base/checkout
+worktree=$base/worktree
+marks_file=$checkout/.loop/advisory-marks
+# The script finds the loop's folder in the main checkout, as the orchestrator's session does, not in LOOP_DIR. git
+# looks for no repository above the temporary folder, reads none of the person's settings, and commits as a stand-in
+# person.
+unset LOOP_DIR
+export GIT_CEILING_DIRECTORIES=$base
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com
+export GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
+mkdir -p "$base/bin" "$base/advisories" "$checkout/scripts" "$checkout/.loop"
+cp -p scripts/holding-advisories scripts/loop-folder scripts/ghsa-id "$checkout/scripts/"
+git init --quiet "$checkout"
+git -C "$checkout" add scripts
+git -C "$checkout" commit --quiet -m "chore: start the project"
+git -C "$checkout" worktree add --quiet --detach "$worktree"
+
+# A stand-in for gh, first on the PATH. It writes each command to the file calls in TEST_STATE, one to a line. It
+# answers a request for a security advisory of this repository with the file in TEST_ADVISORIES named for the
+# advisory's GHSA ID, as GitHub would send it, through the request's --jq filter. For an advisory without a file, it
+# answers as GitHub does for an advisory that the repository doesn't have. It fails with the error in TEST_GH_ERROR,
+# when the case sets it, as gh does without the network, and on every command it doesn't know.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+echo "$*" >>"$TEST_STATE/calls"
+if [[ -n $TEST_GH_ERROR ]]; then
+  echo "$TEST_GH_ERROR" >&2
+  exit 1
+fi
+if (($# != 4)) || [[ $1 != api || $2 != "repos/{owner}/{repo}/security-advisories/"* || $3 != --jq ]]; then
+  echo "The stand-in for gh doesn't answer: gh $*" >&2
+  exit 1
+fi
+advisory=$TEST_ADVISORIES/${2##*/}.json
+if [[ ! -f $advisory ]]; then
+  printf '%s' '{"message":"Not Found","documentation_url":"https://docs.github.com/rest/security-advisories/repository-advisories#get-a-repository-security-advisory","status":"404"}'
+  echo "gh: Not Found (HTTP 404)" >&2
+  exit 1
+fi
+jq -r "$4" "$advisory"
+STAND_IN
+chmod +x "$base/bin/gh"
+
+# Writes an advisory of the repository octo-org/expenses, as GitHub sends it, with the fields that the script could
+# read: add_advisory <GHSA ID> <state>
+add_advisory() {
+  cat >"$base/advisories/$1.json" <<EOF
+{
+  "ghsa_id": "$1",
+  "cve_id": null,
+  "url": "https://api.github.com/repos/octo-org/expenses/security-advisories/$1",
+  "html_url": "https://github.com/octo-org/expenses/security/advisories/$1",
+  "summary": "The import reads files outside the project.",
+  "description": "Importing a file with ../ in its name reads a file outside the project.",
+  "state": "$2",
+  "private_fork": null
+}
+EOF
+}
+
+draft=GHSA-2c5x-3m4v-7q8r
+triage=GHSA-6666-6666-6666
+published=GHSA-3333-3333-3333
+closed=GHSA-4444-4444-4444
+withdrawn=GHSA-5555-5555-5555
+fixed=GHSA-7777-7777-7777
+# GitHub has no advisory of this ID in the repository.
+unknown=GHSA-9999-9999-9999
+add_advisory "$draft" draft
+add_advisory "$triage" triage
+add_advisory "$published" published
+add_advisory "$closed" closed
+add_advisory "$withdrawn" withdrawn
+add_advisory "$fixed" draft
+sha=0123456789abcdef0123456789abcdef01234567
+
+# Starts a case with no gh commands run, gh working, and the file of marks holding the lines, or without the file when
+# the case gives no lines: new_case [<line>...]
+new_case() {
+  rm -rf "$base/state" "$marks_file"
+  mkdir "$base/state"
+  : >"$base/state/calls"
+  gh_error=""
+  if (($# > 0)); then
+    printf '%s\n' "$@" >"$marks_file"
+  fi
+}
+
+# Runs the copy of the script in a checkout, with the arguments, and sets status and output, which holds what it
+# printed and its errors: run_in <checkout> [<argument>...]
+run_in() {
+  local folder=$1
+  shift
+  status=0
+  output=$(TEST_STATE=$base/state TEST_ADVISORIES=$base/advisories TEST_GH_ERROR=$gh_error PATH=$base/bin:$PATH \
+    "$folder/scripts/holding-advisories" "$@" 2>&1) || status=$?
+}
+
+# Runs the copy of the script in the main checkout: run_holding_advisories [<argument>...]
+run_holding_advisories() {
+  run_in "$checkout" "$@"
+}
+
+# Checks the script's exit code and output: expect_result <description> <exit code> <output>
+expect_result() {
+  local description=$1 expected_status=$2 expected_output=$3
+  case_count=$((case_count + 1))
+  if [[ $status != "$expected_status" || $output != "$expected_output" ]]; then
+    echo "error: $description, scripts/holding-advisories must exit with code $expected_status and print \"$expected_output\", but it exited with code $status and printed \"$output\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks the gh commands that the script ran, in order, one to a line: expect_calls <description> <commands>
+expect_calls() {
+  local description=$1 expected_calls=$2 calls
+  calls=$(<"$base/state/calls")
+  case_count=$((case_count + 1))
+  if [[ $calls != "$expected_calls" ]]; then
+    echo "error: $description, scripts/holding-advisories must run \"$expected_calls\", but it ran \"$calls\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# The gh command that reads an advisory's state: read_state <GHSA ID>
+read_state() {
+  echo "api repos/{owner}/{repo}/security-advisories/$1 --jq .state"
+}
+
+# The error for a line that holds no mark: not_a_mark <line number> <line>
+not_a_mark() {
+  echo "error: line $1 of $marks_file is \"$2\", which is neither \"<GHSA ID> holds-release\" nor \"<GHSA ID> fix-merged <SHA>\". Write the GHSA ID as the advisory writes it, such as GHSA-2c5x-3m4v-7q8r, and the full SHA of the fix's commit on main. Correct the line, and run scripts/holding-advisories again."
+}
+
+new_case
+run_holding_advisories
+expect_result "Without the file of marks" 0 ""
+expect_calls "Without the file of marks" ""
+
+new_case "$draft holds-release"
+run_holding_advisories
+expect_result "When a draft advisory holds the release" 0 "$draft"
+expect_calls "When a draft advisory holds the release" "$(read_state "$draft")"
+
+new_case "$triage holds-release"
+run_holding_advisories
+expect_result "When an advisory in triage holds the release" 0 "$triage"
+
+for advisory in "$published" "$closed" "$withdrawn"; do
+  new_case "$advisory holds-release"
+  run_holding_advisories
+  expect_result "When the $(jq -r .state "$base/advisories/$advisory.json") advisory $advisory holds the release" 0 ""
+done
+
+new_case "$fixed holds-release" "$fixed fix-merged $sha"
+run_holding_advisories
+expect_result "When an advisory's fix merged" 0 ""
+expect_calls "When an advisory's fix merged" ""
+
+# The fix's mark comes before the hold's, as when a later review for a release names an advisory whose fix merged.
+new_case "$fixed fix-merged $sha" "$fixed holds-release"
+run_holding_advisories
+expect_result "When an advisory's fix merged before the mark that it holds the release" 0 ""
+
+new_case "$draft fix-merged $sha"
+run_holding_advisories
+expect_result "When a fix merged for an advisory that doesn't hold the release" 0 ""
+expect_calls "When a fix merged for an advisory that doesn't hold the release" ""
+
+# Each advisory once, in the order of the marks that hold the release. The blank lines and the spaces around the words
+# change nothing.
+new_case "$published holds-release" "" "$triage holds-release" "$fixed holds-release" "  $draft   holds-release  " \
+  "$fixed fix-merged $sha" "$triage holds-release" "$closed holds-release"
+run_holding_advisories
+expect_result "When the file marks several advisories" 0 "$triage"$'\n'"$draft"
+expect_calls "When the file marks several advisories" \
+  "$(read_state "$published")"$'\n'"$(read_state "$triage")"$'\n'"$(read_state "$draft")"$'\n'"$(read_state "$closed")"
+
+# A worktree reads the file in the main checkout.
+cp -p "$checkout/scripts/"* "$worktree/scripts/"
+new_case "$draft holds-release"
+run_in "$worktree"
+expect_result "In a worktree" 0 "$draft"
+
+new_case "$draft holds-release" "$unknown holds-release"
+run_holding_advisories
+expect_result "When GitHub has no advisory that the file marks" 1 \
+  "$draft"$'\n'"error: can't read the state of the security advisory $unknown, which $marks_file marks as holding the release, because gh failed: {\"message\":\"Not Found\",\"documentation_url\":\"https://docs.github.com/rest/security-advisories/repository-advisories#get-a-repository-security-advisory\",\"status\":\"404\"}gh: Not Found (HTTP 404). Check the GHSA ID in that file, and run scripts/holding-advisories again once gh can read the advisory."
+
+new_case "$draft holds-release"
+gh_error="error connecting to api.github.com"
+run_holding_advisories
+expect_result "When gh fails" 1 \
+  "error: can't read the state of the security advisory $draft, which $marks_file marks as holding the release, because gh failed: error connecting to api.github.com. Check the GHSA ID in that file, and run scripts/holding-advisories again once gh can read the advisory."
+
+for line in \
+  "$draft holds-the-release" \
+  "$draft" \
+  "$draft holds-release now" \
+  "$draft fix-merged" \
+  "$draft fix-merged ${sha:0:7}" \
+  "$draft fix-merged ${sha}0" \
+  "$draft fix-merged $(tr '[:lower:]' '[:upper:]' <<<"$sha")" \
+  "$draft fix-merged $sha now" \
+  "GHSA-2C5X-3M4V-7Q8R holds-release" \
+  "$draft/forks holds-release" \
+  "Holds the release until its fix merges."; do
+  new_case "$fixed holds-release" "$line"
+  run_holding_advisories
+  expect_result "When a line of the file reads \"$line\"" 1 "$(not_a_mark 2 "$line")"
+  expect_calls "When a line of the file reads \"$line\"" ""
+done
+
+new_case "$draft holds-release"
+chmod 000 "$marks_file"
+run_holding_advisories
+chmod 600 "$marks_file"
+expect_result "When the file can't be read" 1 \
+  "error: can't read $marks_file, because cat failed: cat: $marks_file: Permission denied"
+
+new_case "$draft holds-release"
+run_holding_advisories "$draft"
+expect_result "With an argument" 1 "error: scripts/holding-advisories takes no arguments, and it got 1."
+expect_calls "With an argument" ""
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/holding-advisories.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/holding-advisories.test passed. Cases: $case_count."
