@@ -430,11 +430,12 @@ pr_close_flags_with_value=" -c --comment -R --repo "
 # - flags: the words that start with a dash, as the command writes them, such as -cn or --title=Title
 # - last_flags: for each word in flags, its last flag, such as -n of -cn or --title of --title=Title
 # - flag_values: for each word in flags, the value of its last flag, from the same word or the next, or empty
-# read_arguments <index> <flags that take a value>
+# Given an index to stop at, it reads the word there only as the value of the flag before it:
+# read_arguments <index> <flags that take a value> [<index to stop at>]
 read_arguments() {
-  local i word flag value value_is_next_word flags_before
+  local i word flag value value_is_next_word flags_before end=${3:-${#command_words[@]}}
   argument="" repository=() target=() flags=() last_flags=() flag_values=()
-  for ((i = $1; i < ${#command_words[@]}; i++)); do
+  for ((i = $1; i < end; i++)); do
     word=${command_words[i]}
     if [[ $word != -* ]]; then
       if [[ -z $argument ]]; then

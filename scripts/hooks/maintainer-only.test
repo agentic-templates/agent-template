@@ -601,6 +601,21 @@ for command in "gh pr comment 5 \$'-b' -b -Rsomeone/else" 'gh pr comment 5 $"-b"
   'gh pr comment 5 {-b,} -b -Rsomeone/else' 'gh pr comment 5 -[b] -b -Rsomeone/else'; do
   expect_block Bash "$command" "$(other_repository someone/else)"
 done
+# Then every -R after that word can be the value of a flag before it, and gh posts to the repository that it finds
+# without -R, unless a -R comes before that word.
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so the expansions stay as written.
+for command in 'GH_REPO=someone/else gh pr comment 5 -b $EMPTY -Rjtmpl/project' \
+  'GH_REPO=someone/else gh issue close 5 -c ${EMPTY} --repo=jtmpl/project' \
+  'GH_REPO=someone/else gh pr comment 5 $X -Rjtmpl/project' \
+  'GH_REPO=someone/else gh pr comment 5 -b $EMPTY -Rjtmpl/project -b $EMPTY -Rjtmpl/listed'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so the expansions stay as written.
+for command in 'GH_REPO=jtmpl/listed gh pr comment 5 -b $EMPTY -Rjtmpl/project' \
+  'GH_REPO=jtmpl/project gh issue close 5 -c ${EMPTY} --repo=jtmpl/listed' \
+  'GH_REPO=someone/else gh pr comment 5 -R jtmpl/project -b $EMPTY -Rjtmpl/listed'; do
+  expect_allow Bash "$command"
+done
 expect_allow Bash 'gh run rerun 12 -dRjtmpl/listed'
 # gh repo edit, delete, archive and unarchive take no -R, so a -R there is part of the value of a flag before it, such
 # as the -d of gh repo edit, which takes a description.
@@ -698,6 +713,7 @@ other_clone=$base/other
 git init --quiet "$other_clone"
 git -C "$other_clone" remote add origin https://github.com/someone/else.git
 expect_block Bash "cd '$other_clone' && gh issue comment 5 --body Hello" "$(other_repository someone/else)"
+expect_block Bash "cd '$other_clone' && gh issue comment 5 -b \$EMPTY -Rjtmpl/project" "$(other_repository someone/else)"
 expect_block Bash "cd '$other_clone' && gh api -X POST 'repos/{owner}/{repo}/issues' -f title=Bug" \
   "$(other_repository someone/else)"
 test_cwd=$other_clone
