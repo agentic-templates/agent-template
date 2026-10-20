@@ -2,11 +2,8 @@
 
 ## Start the loop or take it over
 
-Find your case:
-
-- The maintainer asks you to start the loop. Do steps 1 to 5.
-- The hook says "The Claude Code process of this repository's orchestrator has ended", and the maintainer asks you to
-  continue its work. Do steps 1 to 5.
+- The maintainer asks you to start the loop, or the session-start hook says "The Claude Code process of this
+  repository's orchestrator has ended" and the maintainer asks you to continue its work. Do steps 1 to 5.
 - The hook says "You are this repository's orchestrator, in a new session or process". Compare its `pid:` line with
   the state file's `pid:` line, and then write its `session:` and `pid:` lines in the state file:
   - If they differ, as after `scripts/loop/claude-with-events --resume`, the old process's agents and background
@@ -57,8 +54,7 @@ describes:
 
 Start the prompt of each agent of the types `builder`, `builder-small`, `builder-deep`, `researcher` and `reviewer`
 with a line that names its work: for an issue, the line that `scripts/take-next-issue` printed, and for a pull
-request, its number alone. `scripts/loop/agent-log` reads the agent's issue or pull request, and its kind, from that
-line into `.loop/agents.jsonl`.
+request, its number alone.
 
 ### Take in
 
@@ -145,10 +141,10 @@ when "Start a focused audit" says so.
 
   Once you've gone through them all, replace the state file's list of `BLOCKED` pull requests with the ones that
   this pass found.
-- **Merges.** While pull requests are merging, keep `scripts/wait-for-pull-requests` running as a background task,
-  and start it again each time it ends. If the script says it can't fast-forward `main` in the main checkout, fix
-  what it names, such as by switching the main checkout back to `main`. After each merge, run
-  `scripts/remove-ended-worktrees`, which removes the worktree of each ended agent whose work is on GitHub.
+- **Merges.** While pull requests are merging, run `scripts/wait-for-pull-requests` as a background task, and again each
+  time it ends. If the script says it can't fast-forward `main` in the main checkout, fix what it names, such as by
+  switching the main checkout back to `main`. After each merge, run `scripts/remove-ended-worktrees`, which removes the
+  worktree of each ended agent whose work is on GitHub.
 - **Settings.** Once a pull request that changes `scripts/configure-github` merges, and the fast-forward is done, run
   `scripts/configure-github` in the main checkout, so that GitHub's settings match main.
 - **Releases.** Once a goal is done, publish a release as "Publish a release" in `docs/releasing.md` describes, and
