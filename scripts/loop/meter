@@ -123,6 +123,7 @@ from typing import Any, NamedTuple
 
 import account_room
 import agent_log
+import codex_usage
 import heavy_log
 import models
 import paths
@@ -151,8 +152,6 @@ UNKNOWN_RESET_WAIT_SECONDS = 10 * 60
 LATEST_TIME = dt.datetime.max.replace(tzinfo=dt.UTC)
 EARLIEST_TIME = dt.datetime.min.replace(tzinfo=dt.UTC)
 CLAUDE_TIMEOUT_SECONDS = 120
-# A Codex snapshot from before this is from an earlier weekly window, so the meter doesn't read older session files.
-CODEX_SNAPSHOT_AGE = dt.timedelta(days=8)
 # The meter reads only the end of a transcript, where the last call is. An orchestrator's transcript of 218 MB took
 # 0.25 seconds and about 0.5 GB of memory to read whole.
 TRANSCRIPT_TAIL_BYTES = 400_000
@@ -559,53 +558,15 @@ def read_claude(account: Account) -> str:
 
 
 def read_codex(account: Account, reading_time: dt.datetime) -> tuple[dict[str, Meter], dt.datetime]:
-    """The meters in the newest rate-limit snapshot that Codex wrote in its session files, because Codex has no command
-    that prints its usage, and the snapshot's time."""
+    """The meters of a Codex account, and the time of the snapshot that gives them, as codex_usage.py reads them."""
     sessions = Path(account["env"].get("CODEX_HOME", os.path.expanduser("~/.codex"))) / "sessions"
-    snapshot = newest_codex_snapshot(sessions, reading_time - CODEX_SNAPSHOT_AGE)
-    if snapshot is None:
+    found = codex_usage.read_meters(sessions, reading_time)
+    if found is None:
+        days = codex_usage.SNAPSHOT_AGE.days
         raise NoReading(
-            f"Codex wrote no usage snapshot in {sessions} in the last {CODEX_SNAPSHOT_AGE.days} days. Run codex once, "
-            "and read again."
+            f"Codex wrote no usage snapshot in {sessions} in the last {days} days. Run codex once, and read again."
         )
-    snapshot_time, limits = snapshot
-    meters: dict[str, Meter] = {}
-    for window in (limits.get("primary"), limits.get("secondary")):
-        if isinstance(window, dict):
-            name = "session" if window.get("window_minutes", 0) <= 5 * 60 else "week"
-            meters[name] = codex_meter(window, reading_time)
-    return meters, snapshot_time
-
-
-def newest_codex_snapshot(sessions: Path, oldest: dt.datetime) -> tuple[dt.datetime, dict[str, Any]] | None:
-    rollouts = [
-        rollout for rollout in sessions.glob("*/*/*/rollout-*.jsonl") if rollout.stat().st_mtime >= oldest.timestamp()
-    ]
-    snapshots = [snapshot for snapshot in map(last_codex_snapshot, rollouts) if snapshot]
-    return max(snapshots, key=lambda snapshot: snapshot[0], default=None)
-
-
-def last_codex_snapshot(rollout: Path) -> tuple[dt.datetime, dict[str, Any]] | None:
-    for line in reversed(rollout.read_text(errors="replace").splitlines()):
-        if '"used_percent"' not in line:
-            continue
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        limits = entry.get("payload", {}).get("rate_limits")
-        if isinstance(limits, dict):
-            return dt.datetime.fromisoformat(entry["timestamp"]), limits
-    return None
-
-
-def codex_meter(window: dict[str, Any], reading_time: dt.datetime) -> Meter:
-    used = float(window.get("used_percent", 0))
-    reset = dt.datetime.fromtimestamp(window["resets_at"], dt.UTC) if window.get("resets_at") else None
-    # Codex writes a snapshot only while it runs, so a snapshot from before its window's reset is out of date.
-    if reset and reset < reading_time:
-        return {"used": 0.0, "resets": None}
-    return {"used": used, "resets": reset.isoformat() if reset else None}
+    return found
 
 
 def run_minutes_by_type(runs: list[agent_log.AgentRun]) -> dict[str, list[float]]:
