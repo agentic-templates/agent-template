@@ -233,10 +233,9 @@ request is still open.
 For each finding after `audit due:` on the meter's `machine` line, start a focused audit, without waiting for the next
 retrospective:
 
-1. A finding about a build names the builder's type and issue, such as `builder #208`. Skip it if the state file
-   lists an audit of the same build. Skip a finding about the builders' waits for room on the machine, or about
-   the time of `scripts/check`, if the state file lists an audit of the same measure, and that audit's issue is still
-   open.
+1. Skip a finding if the state file lists an audit of the same subject whose issue is still open. A finding's subject
+   is a build, which it names by the builder's type and issue, such as `builder #208`, or else the builders' waits for
+   room on the machine, or the time of `scripts/check`.
 2. Open an issue with the label `research` that quotes the finding, and asks the researcher to find its cause and to
    open an issue for each fix. Say in it that the logs are in the `.loop` folder of the main checkout. Add `ready` to
    it, because agents take instructions only from issues with that label. Assign it to yourself, so that
