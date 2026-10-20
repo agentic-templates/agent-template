@@ -8,11 +8,14 @@
 # - a CLAUDE.md, .claude/CLAUDE.md or CLAUDE.local.md that makes Claude Code skip AGENTS.md
 # - a gh older than the rules need
 # - a missing jq, which the hooks need
-# - the orchestrator's state file, which it prints for the orchestrator, and for a new session that can take over the
-#   loop once the orchestrator's process has ended. Any other session gets a line that names the orchestrator. After a
+# - the orchestrator's state file, which it shows the orchestrator, and a new session that can take over the loop once
+#   the orchestrator's process has ended. Any other session gets a line that names the orchestrator. After a
 #   compaction that Claude Code started on its own, the orchestrator also gets a line that says the file may be behind.
 #   The hook reads what started the compaction from the record that scripts/hooks/before-compact wrote, and deletes it.
 #   After a compaction of the orchestrator, it also deletes the orchestrator's request for one, .loop/compact-request.txt.
+# .claude/settings.json also runs the hook with each number from 1 to part_hooks, and then it prints only that part of
+# the files that it shows: the state file, and after a compaction of the orchestrator, docs/loop.md and docs/writing.md,
+# because the orchestrator follows them in every step, and the compaction kept only a summary of them.
 # In a Claude Code on the web session, it also installs the tools that scripts/check runs, as CI does.
 # Copilot CLI and Cursor also run the hooks in .claude/settings.json, so the hook does nothing outside Claude Code.
 # When it fails on its own error, it exits with code 0, so that a broken hook never stops work.
@@ -29,18 +32,17 @@ source "${BASH_SOURCE[0]%/*}/../minimum-gh-version"
 source "${BASH_SOURCE[0]%/*}/../loop-folder"
 home=${HOME%/}
 
-# Claude Code replaces a hook's output of more than 10,000 characters with its start, and doesn't ask Claude to read
-# the rest. So the hook counts the bytes it prints, which are never fewer than its characters, and cuts the state file
-# to fit.
+# Claude Code saves a hook's output of more than 10,000 characters to a file, and shows Claude only the file's path and
+# its first 2,000 characters, without asking Claude to read the file. So each part of the files has at most 10,000
+# bytes, which are never fewer than its characters.
 output_limit=10000
-printed_bytes=0
+# The number of commands in .claude/settings.json that run the hook with a part's number
+part_hooks=6
+part=${1:-}
 
-# Prints a line, and adds its bytes to printed_bytes: note <line>
+# Prints a line: note <line>
 note() {
-  # In the C locale, ${#1} counts bytes.
-  local LC_ALL=C
   printf '%s\n' "$1"
-  printed_bytes=$((printed_bytes + ${#1} + 1))
 }
 
 # Prints a path with the symlinks in its folder resolved, or nothing if its folder doesn't exist.
@@ -102,14 +104,135 @@ reads_both_files() {
   [[ $setting == claude-md-and-agents-md ]]
 }
 
-# 1. A compaction. Claude Code sends the event as JSON on standard input, with the session's id, a subagent's
-# agent_id, and a source field that is compact after a compaction. Without jq, or with input that isn't JSON, the
-# fields are empty. The subshells drop the trap, which would otherwise take a field from input that is only partly JSON.
+# Claude Code sends the event as JSON on standard input, with the session's id, a subagent's agent_id, and a source
+# field that is compact after a compaction. Without jq, or with input that isn't JSON, the fields are empty. The
+# subshells drop the trap, which would otherwise take a field from input that is only partly JSON.
 IFS= read -r -d '' input || true
 event_source=$(trap - ERR && jq -r '.source // empty' 2>/dev/null <<<"$input") || event_source=""
 session_id=$(trap - ERR && jq -r '.session_id // empty' 2>/dev/null <<<"$input") || session_id=""
 agent_id=$(trap - ERR && jq -r '.agent_id // empty' 2>/dev/null <<<"$input") || agent_id=""
-if [[ $event_source == compact ]]; then
+
+# The orchestrator's state file, .loop/state.md in the main checkout. Its session line holds the orchestrator's
+# session id, and its pid line the id of its Claude Code process, which Claude Code gives its hooks in CLAUDE_PID.
+# The hook reads both lines, because /clear gives the session a new id in the same process, and claude --resume gives
+# the same session a new process.
+
+# Succeeds if a process with the id runs: is_running <process id>
+# The id must be a positive number, because kill -0 also succeeds for 0 and -1, which name groups of processes.
+is_running() {
+  [[ $1 =~ ^[1-9][0-9]*$ ]] && kill -0 "$1" 2>/dev/null
+}
+
+state_file=""
+checkout=""
+in_main_checkout=""
+if [[ -n $repository && -n $session_id && -n ${CLAUDE_PID:-} ]] &&
+  git_folder=$(git -C "$repository" rev-parse --absolute-git-dir 2>/dev/null) &&
+  shared_git_folder=$(git -C "$repository" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+  # The main checkout's path as git gives it, which can differ from the repository's, such as by a symlink
+  checkout=$(main_checkout "$shared_git_folder" "$repository")
+  loop=$(loop_folder "$shared_git_folder" "$repository")
+  state_file=$loop/state.md
+  if [[ $git_folder == "$shared_git_folder" ]]; then
+    in_main_checkout=yes
+  fi
+fi
+# Whom the state file is for: the orchestrator, the orchestrator in a new session or process, a new session that can
+# take over the loop, another session, or nobody when there's no state file.
+state_reader=""
+can_run_loop=""
+if [[ -n $state_file && -f $state_file ]]; then
+  owner=$(state_field "$state_file" session)
+  owner_process=$(state_field "$state_file" pid)
+  # A builder runs as a subagent in the orchestrator's process, so it has the orchestrator's pid, and its input can
+  # hold the orchestrator's session id. A subagent's input can have an agent_id, and a builder works in a worktree.
+  if [[ -z $agent_id && -n $in_main_checkout ]]; then
+    can_run_loop=yes
+  fi
+  if [[ -n $can_run_loop && $owner == "$session_id" && $owner_process == "$CLAUDE_PID" ]]; then
+    state_reader=orchestrator
+  elif [[ -n $can_run_loop && ($owner == "$session_id" || $owner_process == "$CLAUDE_PID") ]]; then
+    state_reader=new-orchestrator
+  # A session that started earlier has work of its own, so only a new session can take over the loop.
+  elif [[ -n $can_run_loop && $event_source == startup ]] && ! is_running "$owner_process"; then
+    state_reader=take-over
+  elif [[ -n $owner ]]; then
+    state_reader=other
+  fi
+fi
+
+# The files that the hook shows in parts
+shown_files=()
+if [[ $state_reader == orchestrator || $state_reader == new-orchestrator || $state_reader == take-over ]]; then
+  shown_files=("$state_file")
+fi
+shows_guides=""
+if [[ $event_source == compact && ($state_reader == orchestrator || $state_reader == new-orchestrator) &&
+  -f $checkout/docs/loop.md && -f $checkout/docs/writing.md ]]; then
+  shown_files+=("$checkout/docs/loop.md" "$checkout/docs/writing.md")
+  shows_guides=yes
+fi
+
+# Prints the parts in which the hook shows files, as a JSON array with an object for each part: its text, and the
+# place in the files where it starts. Each part starts with a line that numbers it. Each file in a part starts with a
+# heading, a line that names the file by its path in the repository and says which line the part starts from. A line
+# too long for one part goes on in the next: split_into_parts <file>...
+split_into_parts() {
+  local file index=0 contents=()
+  for file in "$@"; do
+    contents+=(--rawfile "file$index" "$file")
+    index=$((index + 1))
+  done
+  # Each part, with the line break at its end, has at most limit bytes, of which its first line takes at most 100, so
+  # that the rest has room. A heading takes at most 50 bytes more than its file's name.
+  # shellcheck disable=SC2016 # The $ in the jq program names jq's variables.
+  jq -n "${contents[@]}" --argjson limit "$output_limit" --arg folder "$checkout/" '
+    def name: ltrimstr($folder);
+    def bytes: map(utf8bytelength + 1) | add;
+    # Cuts a text into pieces of at most $bytes bytes, without splitting a character. The first piece starts at as
+    # many characters as it may have bytes, and shrinks by the share of its bytes that are too many.
+    def pieces($bytes):
+      if utf8bytelength <= $bytes then [.]
+      else . as $text
+        | ([length, $bytes] | min
+          | until(($text[:.] | utf8bytelength) <= $bytes; . * $bytes / ($text[:.] | utf8bytelength) | floor))
+        | [$text[:.]] + ($text[.:] | pieces($bytes))
+      end;
+    def line_place: if .is_continued then "the middle of line \(.line)" else "line \(.line)" end;
+    def heading: (.file | name) + (if .is_continued or .line > 1 then ", from \(line_place)" else "" end) + ":";
+    # The lines that a part adds for a line of a file: a heading, if the line starts the part or a file, and the line
+    def lines_for($line): (if .file == $line.file then [] else [$line | heading] end) + [$line.text];
+    ($limit - 100) as $room
+    | ($room - 50 - ([$ARGS.positional[] | name | utf8bytelength] | max)) as $piece_bytes
+    | [$ARGS.positional | to_entries[] | .value as $file
+        | $ARGS.named["file\(.key)"] | rtrimstr("\n") | split("\n") | to_entries[]
+        | {file: $file, line: (.key + 1)} as $line
+        | .value | pieces($piece_bytes) | to_entries[]
+        | $line + {text: .value, is_continued: (.key > 0)}]
+    # The rest of a cut line starts a part, so that its heading says that it goes on from the line before.
+    | reduce .[] as $line ({parts: [], part: null};
+        if .part == null or $line.is_continued or .part.bytes + (.part | lines_for($line) | bytes) > $room then
+          .parts += [.part // empty] | .part = {lines: [], bytes: 0, file: null, start: "\($line | line_place) of \($line.file | name)"}
+        else . end
+        | .part |= (lines_for($line) as $new | .lines += $new | .bytes += ($new | bytes) | .file = $line.file))
+    | .parts + [.part // empty]
+    | length as $count
+    | [to_entries[] | {start: .value.start,
+        text: (["Part \(.key + 1) of \($count) of the files that scripts/hooks/session-start shows you."] + .value.lines | join("\n"))}]
+  ' --args "$@"
+}
+
+if [[ -n $part ]]; then
+  if ((${#shown_files[@]} > 0)) && [[ $part =~ ^[1-9][0-9]*$ ]]; then
+    split_into_parts "${shown_files[@]}" | jq -r --argjson part "$part" '.[$part - 1].text // empty'
+  fi
+  exit 0
+fi
+
+# 1. A compaction
+if [[ $event_source == compact && -n $shows_guides ]]; then
+  note "This conversation was just compacted, so the guides that this session read from docs/ survive only in the summary. Read again each guide that \"Read the guides\" in AGENTS.md names for the work you're doing, other than docs/loop.md and docs/writing.md, which this hook shows you, and AGENTS.md itself if its text isn't in your context."
+elif [[ $event_source == compact ]]; then
   note "This conversation was just compacted, so the guides that this session read from docs/ survive only in the summary. Read again each guide that \"Read the guides\" in AGENTS.md names for the work you're doing, and AGENTS.md itself if its text isn't in your context."
 fi
 
@@ -175,99 +298,66 @@ if [[ ${CLAUDE_CODE_REMOTE:-} == true ]]; then
   fi
 fi
 
-# 6. The orchestrator's state file, .loop/state.md in the main checkout. Its session line holds the orchestrator's
-# session id, and its pid line the id of its Claude Code process, which Claude Code gives its hooks in CLAUDE_PID.
-# The hook reads both lines, because /clear gives the session a new id in the same process, and claude --resume gives
-# the same session a new process.
-# This step comes last, so that no note after the file reads as part of it.
-
-# Succeeds if a process with the id runs: is_running <process id>
-# The id must be a positive number, because kill -0 also succeeds for 0 and -1, which name groups of processes.
-is_running() {
-  [[ $1 =~ ^[1-9][0-9]*$ ]] && kill -0 "$1" 2>/dev/null
-}
-
-# Prints notes, and then as many whole lines of the state file as fit in output_limit, so that the hook splits no
-# character of more than one byte: print_state_file <note>...
-print_state_file() {
-  # In the C locale, ${#line} counts bytes.
-  local LC_ALL=C line file_bytes=0
-  for line in "$@"; do
-    note "$line"
-  done
-  while IFS= read -r line || [[ -n $line ]]; do
-    file_bytes=$((file_bytes + ${#line} + 1))
-  done <"$state_file"
-  # The blank line before the file takes one byte.
-  if ((printed_bytes + 1 + file_bytes > output_limit)); then
-    note "The file is too long to show here in full. Read the rest of it from $state_file."
+# 6. The state file. A compaction that Claude Code starts on its own can come in the middle of a step, such as after
+# the orchestrator started a builder and before it wrote the builder in its state file. A compaction that the
+# orchestrator asks for, or that the maintainer types, comes between turns. Only a session that can run the loop reads
+# and deletes its record and its compaction request, because a subagent's input can hold the orchestrator's session id.
+# This step comes last, so that no note after it reads as part of the notes on the state file.
+behind_note=""
+if [[ -n $can_run_loop && $event_source == compact ]]; then
+  # The maintainer's compaction sender types /compact when it finds the orchestrator's request. A compaction that
+  # came another way leaves the request in place, and the sender would then compact the context a second time.
+  request=$loop/compact-request.txt
+  requester=""
+  if [[ -f $request ]]; then
+    IFS= read -r requester 2>/dev/null <"$request" || true
   fi
-  note ""
-  while IFS= read -r line || [[ -n $line ]]; do
-    if ((printed_bytes + ${#line} + 1 > output_limit)); then
-      return 0
+  if [[ $requester == "$session_id" ]]; then
+    rm -f "$request" || true
+  fi
+  if record=$(compaction_record "$loop" "$session_id") && [[ -f $record ]]; then
+    trigger=""
+    IFS= read -r trigger 2>/dev/null <"$record" || true
+    rm -f "$record" || true
+    if [[ $trigger == auto ]]; then
+      behind_note="Claude Code compacted this conversation when the context filled, maybe in the middle of a step. So your state file may lack the steps you took after the time on its updated: line. Before you go on, check the file against the open pull requests, the issues assigned to you and the agents that scripts/loop/meter lists, and add to it what it lacks."
     fi
-    note "$line"
-  done <"$state_file"
-}
-
-state_file=""
-in_main_checkout=""
-if [[ -n $repository && -n $session_id && -n ${CLAUDE_PID:-} ]] &&
-  git_folder=$(git -C "$repository" rev-parse --absolute-git-dir 2>/dev/null) &&
-  shared_git_folder=$(git -C "$repository" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
-  loop=$(loop_folder "$shared_git_folder" "$repository")
-  state_file=$loop/state.md
-  if [[ $git_folder == "$shared_git_folder" ]]; then
-    in_main_checkout=yes
   fi
 fi
-if [[ -n $state_file && -f $state_file ]]; then
-  owner=$(state_field "$state_file" session)
-  owner_process=$(state_field "$state_file" pid)
-  both_lines="\"session: $session_id\" and \"pid: $CLAUDE_PID\" as the session and pid lines"
-  # A builder runs as a subagent in the orchestrator's process, so it has the orchestrator's pid, and its input can
-  # hold the orchestrator's session id. A subagent's input can have an agent_id, and a builder works in a worktree.
-  can_run_loop=""
-  if [[ -z $agent_id && -n $in_main_checkout ]]; then
-    can_run_loop=yes
+shown=""
+unshown_start=""
+if ((${#shown_files[@]} > 0)); then
+  # The number of parts, and where the first part starts that no command in .claude/settings.json prints
+  parts_summary=$(split_into_parts "${shown_files[@]}" |
+    jq -r --argjson shown "$part_hooks" '"\(length) \(.[$shown].start // "")"')
+  part_count=${parts_summary%% *}
+  unshown_start=${parts_summary#* }
+  parts_word=parts
+  if [[ $part_count == 1 ]]; then
+    parts_word=part
   fi
-  # A compaction that Claude Code starts on its own can come in the middle of a step, such as after the orchestrator
-  # started a builder and before it wrote the builder in its state file. A compaction that the orchestrator asks for,
-  # or that the maintainer types, comes between turns. Only a session that can run the loop reads and deletes its
-  # record and its compaction request, because a subagent's input can hold the orchestrator's session id.
-  behind_note=""
-  if [[ -n $can_run_loop && $event_source == compact ]]; then
-    # The maintainer's compaction sender types /compact when it finds the orchestrator's request. A compaction that
-    # came another way leaves the request in place, and the sender would then compact the context a second time.
-    request=$loop/compact-request.txt
-    requester=""
-    if [[ -f $request ]]; then
-      IFS= read -r requester 2>/dev/null <"$request" || true
-    fi
-    if [[ $requester == "$session_id" ]]; then
-      rm -f "$request" || true
-    fi
-    if record=$(compaction_record "$loop" "$session_id") && [[ -f $record ]]; then
-      trigger=""
-      IFS= read -r trigger 2>/dev/null <"$record" || true
-      rm -f "$record" || true
-      if [[ $trigger == auto ]]; then
-        behind_note="Claude Code compacted this conversation when the context filled, maybe in the middle of a step. So your state file may lack the steps you took after the time on its updated: line. Before you go on, check the file against the open pull requests, the issues assigned to you and the agents that scripts/loop/meter lists, and add to it what it lacks."
-      fi
-    fi
-  fi
-  if [[ -n $can_run_loop && $owner == "$session_id" && $owner_process == "$CLAUDE_PID" ]]; then
-    print_state_file "You are this repository's orchestrator. Continue the loop from your state file, $state_file, which follows." \
-      ${behind_note:+"$behind_note"}
-  elif [[ -n $can_run_loop && ($owner == "$session_id" || $owner_process == "$CLAUDE_PID") ]]; then
-    print_state_file "You are this repository's orchestrator, in a new session or process. Write $both_lines of your state file, $state_file. Then continue the loop from the file, which follows." \
-      ${behind_note:+"$behind_note"}
-  # A session that started earlier has work of its own, so only a new session can take over the loop.
-  elif [[ -n $can_run_loop && $event_source == startup ]] && ! is_running "$owner_process"; then
-    print_state_file "The Claude Code process of this repository's orchestrator has ended. If the maintainer asks you to continue its work, take over the loop: write $both_lines of its state file, $state_file, and continue the loop from the file, which follows."
-  elif [[ -n $owner ]]; then
+  shown="which this hook shows you${shows_guides:+, with docs/loop.md and docs/writing.md,} in $part_count $parts_word"
+fi
+both_lines="\"session: $session_id\" and \"pid: ${CLAUDE_PID:-}\" as the session and pid lines"
+case $state_reader in
+  orchestrator)
+    note "You are this repository's orchestrator. Continue the loop from your state file, $state_file, $shown."
+    ;;
+  new-orchestrator)
+    note "You are this repository's orchestrator, in a new session or process. Write $both_lines of your state file, $state_file. Then continue the loop from the file, $shown."
+    ;;
+  take-over)
+    note "The Claude Code process of this repository's orchestrator has ended. If the maintainer asks you to continue its work, take over the loop: write $both_lines of its state file, $state_file, and continue the loop from the file, $shown."
+    ;;
+  other)
     note "Session $owner is this repository's orchestrator, and keeps the loop's state in $state_file."
-  fi
+    ;;
+esac
+if [[ -n $behind_note && ($state_reader == orchestrator || $state_reader == new-orchestrator) ]]; then
+  note "$behind_note"
+fi
+if [[ -n $unshown_start ]]; then
+  last_file=${shown_files[${#shown_files[@]} - 1]}
+  note "This hook shows only the first $part_hooks of the $part_count parts. Read the rest from the files themselves, from $unshown_start to the end of ${last_file#"$checkout/"}."
 fi
 exit 0

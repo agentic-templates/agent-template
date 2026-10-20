@@ -34,6 +34,10 @@ background: true
      folder of the main checkout, the first folder that `git worktree list` prints. Judge whether each block was real
      or a false alarm. Narrow each hook check that blocked an action by mistake, and add a test that the action now
      goes ahead.
+   - the corrections in `corrections.md` in that `.loop` folder, each a mistake that the loop could make again, with
+     the issue that fixes its cause. For each correction whose issue is closed, judge whether the mistake happened
+     again after the fix, and fix the cause yourself if it did. Then delete from the file each correction that you
+     judged, so that the next retrospective judges only the rest.
    - the pull requests that needed a fix after their builder first pushed them, such as for a failed check, an error
      that a reviewer found, or a conflict with main
    - the issues that the orchestrator planned again after a builder took them, which lost `ready` then

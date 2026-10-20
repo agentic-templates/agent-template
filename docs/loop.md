@@ -62,9 +62,11 @@ on.
   line of your state file, write `taken in: now` in its place, and read the issues and comments that the maintainer
   wrote on GitHub since the time you noted. Open or rewrite issues for each goal and idea, and for the cause of each
   correction, without stopping the builders that run. Treat each mistake of your own or of an agent that the loop could
-  make again, such as a time that you guessed, as a correction, even when you fixed the mistake itself. Add the
-  `priority` label to each issue for the cause of a correction, and to each issue that the maintainer asks to have
-  built first. If a correction changes the issue of a running builder, give the builder the change.
+  make again, such as a time that you guessed, as a correction, even when you fixed the mistake itself. Write each
+  correction, with the issue for its cause, in `.loop/corrections.md` rather than your state file, because the
+  auditor judges the fixes there. Add the `priority` label to each issue for the cause of a correction, and to each
+  issue that the maintainer asks to have built first. If a correction changes the issue of a running builder, give the
+  builder the change.
 - **Answers.** For each issue with `needs-decision` that the maintainer answered in a comment, carry out the answer,
   as "Labels" in `docs/planning.md` describes.
 - **Other people's issues.** Triage them, as "Triage issues that others open" in `docs/planning.md` describes.
@@ -167,6 +169,13 @@ Besides the `session:` and `pid:` lines, it holds:
 - the `BLOCKED` pull requests from your last pass
 - what you do next, and the open questions
 
+It holds nothing that a query of GitHub gives, such as the ready issues, their blockers or what merged. It holds no
+lasting rule either, because each rule lives in a guide or a hook, where a new orchestrator, or one that lost the file,
+still finds it.
+
+When an entry changes, rewrite it in place rather than add a new one. Delete an entry once it no longer tells you what
+to do next, such as a pull request that merged or an agent that ended.
+
 A hook writes the clock's time into the file: on its `updated:` line each time you write the file, on its `taken in:`
 line each time you write `now` there, and on its `heartbeat:` line each time you schedule the heartbeat. Keep these
 times as the hook wrote them. Once the `updated:` time is 6 days or more after the `heartbeat:` time, delete the
@@ -229,7 +238,8 @@ the script again, followed by the number of each issue that no account can take,
 ## Compact your context
 
 Keep your shell in the main checkout, and run git in a worktree with `git -C <worktree>`. After a compaction, the
-session-start hook shows you your state file only when your shell is in the main checkout.
+session-start hook shows you your state file, this guide and `docs/writing.md` only when your shell is in the main
+checkout.
 
 When `scripts/hooks/hand-off` tells you that your context has grown long enough to compact, ask for a compaction if the
 maintainer installed a compaction sender. That's a hook in the maintainer's own Claude Code settings that runs on both
