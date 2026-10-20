@@ -10,8 +10,9 @@ trap 'exit 1' ERR
 # The file name of the check that sourced this file, which log_block writes.
 check_name=${BASH_SOURCE[1]##*/}
 
-# scripts/hooks/before-tool reads this file once, and then runs each check in a subshell, which skips the rest of the
-# file when the check sources it. Reading the file took a third of the CPU time of each check, as issue #91 measured.
+# scripts/hooks/before-tool reads this file once, and then sources the checks in a subshell that they share, which
+# skips the rest of the file each time a check sources it. Reading the file took a third of the CPU time of each check,
+# as issue #91 measured.
 if [[ -n ${helpers_read:-} ]]; then
   return 0
 fi
@@ -107,7 +108,7 @@ is_orchestrator() {
 # holds the time, the check's file name and the words, with the values that could hold a secret left out, so that its
 # reader can tell a real block from a false alarm: log_block <word>...
 log_block() {
-  local log=${HOOK_BLOCK_LOG:-} line words
+  local log=${HOOK_BLOCK_LOG:-} line safe_words
   if [[ -z ${is_run_by_hook:-} ]]; then
     return 0
   fi
@@ -115,9 +116,10 @@ log_block() {
     log=$(hook_loop_folder)/blocks.log || return 0
     mkdir -p "${log%/*}" || return 0
   fi
-  line="$(date -u +%Y-%m-%dT%H:%M:%SZ) $check_name"
-  if (($# > 0)) && words=$(words_without_secrets "$@"); then
-    line+=" $words"
+  # The subshell runs date with exec, because bash 3.2 would start date in a process of its own after the subshell's.
+  line="$(exec date -u +%Y-%m-%dT%H:%M:%SZ) $check_name"
+  if (($# > 0)) && words_without_secrets "$@"; then
+    line+=" $safe_words"
   fi
   printf '%s\n' "$line" >>"$log"
 }

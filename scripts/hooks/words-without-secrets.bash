@@ -13,7 +13,7 @@ bearer='(^|[^A-Za-z0-9_.-])bearer[[:blank:]]*'
 url_password='(://[^:/@[:space:]]*:)[^[:space:]]*@'
 left_out='[left out]'
 
-# Prints the words, joined by spaces, with each value that could hold a secret left out:
+# Sets safe_words to the words, joined by spaces, with each value that could hold a secret left out:
 # - each word that holds a token's shape from scripts/token-shapes
 # - the word after a flag whose name holds a secret's name, such as --token or --pat, or after -p, unless that word is
 #   a flag too
@@ -25,7 +25,7 @@ left_out='[left out]'
 words_without_secrets() {
   local word original follows="" token_shape
   local -a words=("$@") kept=()
-  token_shape=$(token_shapes) || return 1
+  read_token_shapes || return 1
   # bash 3.2 takes longer for each function call the more arguments the calling function has, so the loop reads the
   # words from an array, with no arguments left. With them, 3,000 words took 10 seconds instead of 1, as issue #96
   # measured.
@@ -36,8 +36,13 @@ words_without_secrets() {
     kept+=("$word")
     find_what_follows "$original"
   done
-  # tr, because bash 3.2 takes minutes to replace the characters in a text of 60 KB with line breaks.
-  printf '%s' "${kept[*]}" | tr '[:cntrl:]' ' '
+  # The quotes keep a line break at the end, which bash 3.2 drops from an unquoted ${kept[*]} in an assignment.
+  safe_words="${kept[*]}"
+  # tr, because bash 3.2 takes minutes to replace the characters in a text of 60 KB with line breaks. Words without a
+  # control character skip tr and the processes that it takes.
+  if [[ $safe_words =~ [[:cntrl:]] ]]; then
+    safe_words=$(printf '%s' "$safe_words" | tr '[:cntrl:]' ' ')
+  fi
 }
 
 # Leaves out of word each value that could hold a secret, as words_without_secrets lists them. It reads what the word
@@ -78,16 +83,16 @@ find_what_follows() {
   shopt -u nocasematch
 }
 
-# Prints one extended regular expression that matches each shape that scripts/token-shapes lists, or fails when it
-# can't read the file.
-token_shapes() {
-  local kind shape pattern=""
+# Sets token_shape to one extended regular expression that matches each shape that scripts/token-shapes lists, or fails
+# when it can't read the file.
+read_token_shapes() {
+  local kind shape
+  token_shape=""
   while IFS=$'\t' read -r kind _ shape _; do
     if [[ $kind != '#'* ]]; then
-      pattern+="${pattern:+|}($shape)"
+      token_shape+="${token_shape:+|}($shape)"
     fi
   done <"$hooks_folder/../token-shapes" || return 1
-  printf '%s\n' "$pattern"
 }
 
 # Leaves out the text in word after the first time that a part appears in it, unless nothing follows the part, because

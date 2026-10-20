@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # The agent's tool runs this hook before each action, because .claude/settings.json and .codex/hooks.json list it.
 # It reads the fields of the tool's input that the checks use, and runs each check in this folder, the files that end
-# in .check. It sources a check in bash in a subshell, and runs a check in another language as a program.
-# A check blocks the action with exit code 2 and the reason on stderr, and this script passes both on.
+# in .check. It sources the checks in bash in a subshell that they share, and runs a check in another language as a
+# program. A check blocks the action with exit code 2 and the reason on stderr, and this script passes both on.
 # The check also adds a line to .loop/blocks.log in the main checkout, as log_block in helpers.bash describes.
 # Before an Agent call, the hook adds a line to .loop/agents.jsonl there instead, and checks nothing.
 # To add a check, add its .check file and its .test file. A check for a tool that isn't in the list below also adds
 # the tool there. Neither hook file needs a change. A check must allow the command true, because the hook files run
-# this hook on it to tell whether the hook can run.
+# this hook on it to tell whether the hook can run. A check in bash that allows the action before its last line ends
+# with return rather than exit, because exit also ends the subshell, and this script then starts another for the
+# checks after it.
 #
 # In a git worktree, the commands in .claude/settings.json run the worktree's hooks. Claude Code can run the commands
 # in the main checkout, which can be older than the worktree, so they find the worktree from the folder in the input's
@@ -30,7 +32,8 @@ export LC_ALL=C
 IFS= read -r -d '' input
 # One jq call reads the fields for all the checks, because each call takes several milliseconds. read_input in
 # helpers.bash takes them from the HOOK_ variables. The call fails without jq too, and when the input isn't JSON.
-if ! fields=$(jq -r -f "${BASH_SOURCE[0]%/*}/input.jq" 2>/dev/null <<<"$input"); then
+# The subshell runs jq with exec, because bash 3.2 would start jq in a process of its own after the subshell's.
+if ! fields=$(exec jq -r -f "${BASH_SOURCE[0]%/*}/input.jq" 2>/dev/null <<<"$input"); then
   exit 0
 fi
 eval "$fields"
@@ -49,11 +52,19 @@ case $HOOK_TOOL_NAME in
   *) exit 0 ;;
 esac
 
-# Each check in bash runs in a subshell of this one, which has read helpers.bash, rather than in a bash process of its
-# own, because starting bash and reading helpers.bash took half the CPU time of a check, as issue #91 measured. A check is
-# in bash when its first line runs bash. The subshell ends with the code of the first check that blocks the action, or
-# with code 1 when helpers.bash fails.
-(
+# A subshell of this one reads helpers.bash, splits the command, and then runs the checks. It runs them in a subshell of
+# its own, which sources the checks in bash one after the other, rather than in a process or a subshell for each check,
+# because starting bash and reading helpers.bash took half the CPU time of a check, as issue #91 measured, and a
+# subshell for each check started most of the hook's processes, as issue #437 measured. So a check sets each variable
+# before it reads it, and changes no variable or function of helpers.bash. A check that ends early, such as with an
+# error or with exit, allows the action and ends the subshell that runs it, so another runs the checks after it.
+# The first subshell ends with the code of the first check that blocks the action, or with code 1 when helpers.bash
+# fails. It writes the separator \036 first and before each check, followed by what the check writes on stderr, so that
+# the agent reads only what the check that blocks writes. A check's message that holds the separator loses the text
+# before it.
+messages=$(
+  exec 2>&1
+  printf '\036'
   helpers=${BASH_SOURCE[0]%/*}/helpers.bash
   # source can't fail the subshell on a missing file, because set -e isn't on yet.
   if [[ ! -r $helpers ]]; then
@@ -73,7 +84,10 @@ esac
   # turns them on again for itself when it sources helpers.bash.
   set +eEu +o pipefail
   trap - ERR
+  # A word for each check that can run, with how it runs and its path, as in bash:scripts/hooks/secret-files.check. A
+  # check is in bash when its first line runs bash. A check in another language runs as a program.
   runs_bash='^#!(/bin/|/usr/bin/env )bash([[:space:]]|$)'
+  check_words=()
   for check in "${BASH_SOURCE[0]%/*}"/*.check; do
     if [[ ! -x $check ]]; then
       continue
@@ -81,19 +95,57 @@ esac
     first_line=""
     IFS= read -r first_line <"$check"
     if [[ $first_line =~ $runs_bash ]]; then
-      # With set -e, a check that bash can't parse ends with code 2, as it would in a process of its own.
-      # shellcheck source=/dev/null # ShellCheck checks each check as a file of its own.
-      reason=$(set -e && source "$check" 2>&1 >/dev/null </dev/null)
+      check_words+=("bash:$check")
     else
-      reason=$("$check" 2>&1 >/dev/null </dev/null)
+      check_words+=("program:$check")
     fi
+  done
+  next_check=0
+  while ((next_check < ${#check_words[@]})); do
+    # After a check, the subshell that runs the checks reads only the variables that it sets for the next one, because
+    # a check can change any other, as posted-text.check sets separator when it sources scripts/text-rules. So it keeps
+    # the hook's folder with pushd. It prints a dot before it starts each check, and nothing else, because the checks
+    # write their output to /dev/null. So the dots count the checks that it started, and nothing that a check writes
+    # changes which check runs next.
+    started=$(
+      for word in "${check_words[@]:next_check}"; do
+        printf .
+        printf '\036' >&2
+        check=${word#*:}
+        if [[ $word == program:* ]]; then
+          "$check" >/dev/null </dev/null
+          if (($? == 2)); then
+            exit 2
+          fi
+          continue
+        fi
+        pushd . >/dev/null 2>&1
+        # With set -e, bash 3.2 ends the subshell with code 2 for a check that it can't parse, as it would in a process
+        # of its own. Bash 5 skips such a check instead, as issue #529 describes.
+        set -e
+        # shellcheck source=/dev/null # ShellCheck checks each check as a file of its own.
+        source "$check" >/dev/null </dev/null
+        set +eEu +o pipefail
+        trap - ERR
+        # The next check starts in the hook's folder, as it would in a subshell of its own.
+        popd >/dev/null || exit 1
+      done
+    )
     if (($? == 2)); then
-      printf '%s\n' "$reason" >&2
       exit 2
     fi
+    # Without a dot, the subshell failed to start, and the loop would never end.
+    if [[ -z $started ]]; then
+      exit 1
+    fi
+    next_check=$((next_check + ${#started}))
   done
 )
 if (($? == 2)); then
+  # The message is the text after the last separator. ${messages##*$'\036'} would take bash 3.2 two seconds of CPU
+  # time to find it in a message of 60 KB.
+  before_message=${messages%$'\036'*}
+  printf '%s\n' "${messages:${#before_message}+1}" >&2
   exit 2
 fi
 exit 0

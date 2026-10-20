@@ -30,4 +30,41 @@ use_copy without-helpers
 rm "$hooks_folder/helpers.bash"
 expect_allow Bash 'cat .env'
 
+# Adds a check in bash, with these lines after its first: add_check <name> <line>...
+add_check() {
+  local check=$hooks_folder/$1.check
+  shift
+  printf '%s\n' '#!/usr/bin/env bash' "$@" >"$check"
+  chmod +x "$check"
+}
+
+# shellcheck disable=SC2016 # The checks expand their variables when the hook runs them.
+helpers_line='source "${BASH_SOURCE[0]%/*}/helpers.bash"'
+env_block="Blocked: .env holds secrets, and AGENTS.md says never to read them. .env.example lists the variables."
+
+# A check that fails or ends early allows the action, and the checks after it still run, which are the real ones here.
+use_copy failing-checks
+add_check a-ends-early 'exit 0'
+add_check a-fails "$helpers_line" false
+# shellcheck disable=SC2016 # The check expands the variable when the hook runs it.
+add_check a-reads-unset-variable "$helpers_line" ': "$no_such_variable"'
+printf '%s\n' "#!$(command -v awk) -f" 'BEGIN { exit 1 }' >"$hooks_folder/a-program-fails.check"
+chmod +x "$hooks_folder/a-program-fails.check"
+expect_block Bash 'cat .env' "$env_block"
+expect_allow Bash 'ls'
+
+# A block from a check stands, even when a check after it is one that bash can't parse, such as one with a conflict
+# marker that a merge left.
+use_copy check-with-conflict
+add_check z-conflict "$helpers_line" '<<<<<<< HEAD' 'exit 0' '=======' 'exit 2' '>>>>>>> other'
+expect_block Bash 'cat .env' "$env_block"
+
+# Each check starts in the folder that the hook runs in, and the agent reads only what the check that blocks writes,
+# even when a check before it changes the folder and writes a message.
+use_copy check-that-changes-the-folder
+add_check a-changes-the-folder 'cd /' 'echo "This check allows the action." >&2'
+# shellcheck disable=SC2016 # The check expands the variables when the hook runs it.
+add_check a-names-the-folder 'if [[ $HOOK_COMMAND == pwd ]]; then echo "Blocked: the check runs in $PWD." >&2; exit 2; fi'
+expect_block Bash 'pwd' "Blocked: the check runs in $PWD."
+
 finish_tests
