@@ -370,7 +370,7 @@ for command in "${runs_not_alone[@]}"; do
 done
 for wrapper in "${wrappers[@]}"; do
   expect_from "$orchestrator" "" "$wrapper scripts/configure-github" 2 "$not_alone"
-  test_cwd=$worktree expect_from "$orchestrator" "" "$wrapper scripts/configure-github" 2 "$not_alone"
+  test_cwd=$worktree expect_from "$orchestrator" "" "$wrapper scripts/configure-github" 2 "$outside_main_checkout"
 done
 
 # The orchestrator's run while the main checkout's scripts folder differs from the one on main on GitHub: a file
