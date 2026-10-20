@@ -66,7 +66,7 @@ class ReviewTest(RunBuilderTest):
         self.assertEqual((call["cwd"], call["head"]), (str(self.worktree), self.head))
         brief = (run / "brief.md").read_text()
         settings = ["--model", "opus", "--effort", "high", "--append-system-prompt", "Review it."]
-        self.assertEqual(call["args"], [*run_builder.CLAUDE_COMMAND[1:], *settings, brief])
+        self.assertEqual(call["args"], [*run_builder.CLAUDE_COMMAND[1:], *settings, "--", brief])
         self.assertTrue(brief.startswith("7\n\nYou review pull request #7 for the orchestrator"))
         self.assertNotIn("CLAUDE_CONFIG_DIR", call["env"])
         self.assertEqual(call["env"]["LOOP_RUN"], "1")

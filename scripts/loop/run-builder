@@ -662,7 +662,8 @@ def run_claude(
         (folders.run / "events.jsonl").open("w") as events,
         (folders.run / "stderr.log").open("w") as errors,
         subprocess.Popen(
-            [*CLAUDE_COMMAND, *model_options, brief],
+            # The -- keeps claude from reading the brief as one more entry of --tools or --disallowedTools.
+            [*CLAUDE_COMMAND, *model_options, "--", brief],
             cwd=folders.worktree,
             env=environment,
             stdin=subprocess.DEVNULL,

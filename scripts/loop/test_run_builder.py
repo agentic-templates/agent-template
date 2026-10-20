@@ -463,7 +463,7 @@ class ClaudeTest(RunBuilderTest):
         [call] = self.calls("claude")
         brief = (self.run_folder() / "brief.md").read_text()
         settings = ["--model", "opus", "--effort", "high", "--append-system-prompt", "Build it."]
-        self.assertEqual(call["args"], [*run_builder.CLAUDE_COMMAND[1:], *settings, brief])
+        self.assertEqual(call["args"], [*run_builder.CLAUDE_COMMAND[1:], *settings, "--", brief])
         self.assertTrue(brief.startswith("Issue #12: Fix the importer\n\nIt drops rows.\n"))
         self.assertIn(
             'of the kind `other`, for the orchestrator of this repository\'s loop. Read only\n"Build one issue"', brief
