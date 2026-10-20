@@ -680,7 +680,7 @@ expect_allow Bash 'time -o GH_REPO=someone/else gh pr comment 5 --body Hello'
 for command in 'export GH_REPO=someone/else; gh pr comment 5 --body Hello' \
   'GH_REPO=someone/else && gh issue comment 5 --body Hello' 'declare -x GH_REPO=someone/else; gh pr close 5' \
   'export GH_REPO=someone/else; gh pr view 5; gh issue comment 5 --body Hello' \
-  'for pass in 1 2; do echo "$pass"; gh pr comment 5 --body Hello; export GH_REPO=someone/else; done' \
+  'for pass in 1 2; do date; gh pr comment 5 --body Hello; export GH_REPO=someone/else; done' \
   $'post() {\n  gh pr comment 5 --body Hello\n}\nexport GH_REPO=someone/else\npost' \
   'gh pr comment 5 --body Hello; export GH_REPO=someone/else'; do
   expect_block Bash "$command" "$(other_repository someone/else)"
