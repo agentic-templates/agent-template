@@ -18,7 +18,8 @@
 # push that sends no pages to the branches on origin: one to another remote, with --delete or --dry-run, alone or in a
 # group of short options such as -nu, or with --tags and no refspec, which sends only the tags. It also
 # allows a push whose branches or repository the command doesn't name: one with --all, --branches or --mirror, or with
-# --git-dir or --work-tree before push.
+# --git-dir or --work-tree before push. For the same reason, it skips each refspec with a *, such as
+# refs/heads/*:refs/heads/*, and checks the push's other refspecs.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 # shellcheck source=scripts/hooks/pages-read.bash
@@ -71,14 +72,38 @@ added_lines() {
 # brought in. The page counts as it is where the branch starts, not at the base branch's latest commit, because the base
 # branch can rewrite a line after a merge brought it in.
 pages_with_lines_not_at_branch_start() {
-  local path lines
+  local path lines start_path
   while IFS= read -r path; do
     lines=$(added_lines "$2" "$path")
+    if [[ -z $lines ]]; then
+      continue
+    fi
+    start_path=$(old_page_path "$1" "$path")
     # A page that the branch's start doesn't have lacks every line, and grep -v with no patterns prints every line.
-    if [[ -n $lines ]] && grep -qvxF -f <(git cat-file blob "$1:$path" 2>/dev/null || true) <<<"$lines"; then
+    if grep -qvxF -f <(git cat-file blob "$1:${start_path:-$path}" 2>/dev/null || true) <<<"$lines"; then
       printf '%s\n' "$path"
     fi
   done
+}
+
+# Prints the path that a page had at a commit, when git's rename detection finds that the page was renamed since then,
+# or prints nothing: old_page_path <commit> <path>
+old_page_path() {
+  local status old new
+  # With -z, git prints a renamed page's status, such as R100, then its old path and its new path, and another page's
+  # status and path.
+  git diff --find-renames --name-status -z --no-relative "$1" ${pages_commit:+"$pages_commit"} -- "${page_paths[@]}" |
+    while IFS= read -r -d '' status; do
+      if [[ $status != R* ]]; then
+        IFS= read -r -d '' _
+        continue
+      fi
+      IFS= read -r -d '' old
+      IFS= read -r -d '' new
+      if [[ $new == "$2" ]]; then
+        printf '%s\n' "$old"
+      fi
+    done
 }
 
 # Prints git's hash of a page as the pull request has it: page_hash <path>
@@ -237,7 +262,7 @@ is_push_let_through() {
 }
 
 # Checks each branch that a git push updates, as read_push_branches in helpers.bash finds them, and as
-# check_pushed_branch describes. A refspec that deletes its branch sends no pages.
+# check_pushed_branch describes. A refspec that deletes its branch, with nothing before its colon, sends no pages.
 check_git_push() {
   local i
   if [[ ${command_words[0]##*/} != git ]]; then
@@ -253,7 +278,8 @@ check_git_push() {
   fi
   read_push_branches -C "$PWD"
   for ((i = 0; i < ${#push_branches[@]}; i++)); do
-    if [[ -n ${push_sources[i]} ]]; then
+    # A refspec with *, as in refs/heads/*:refs/heads/*, pushes branches that it doesn't name, as --all does.
+    if [[ -n ${push_sources[i]} && ${push_sources[i]} != *\** ]]; then
       check_pushed_branch "${push_sources[i]}" "${push_branches[i]}"
     fi
   done
