@@ -131,13 +131,12 @@ when "Start a focused audit" says so.
 - **Drafts.** For each draft pull request that the loop opened, and that no reviewer has read yet, start a `reviewer`
   agent with the pull request's number. Give each error that the reviewer reports to the builder that opened the draft,
   and ask it to fix each one, with a test when the error is in code. If you opened the draft, fix the errors yourself.
-  Open an issue for each problem that the reviewer reports for an issue rather than as an error. If the draft changes
-  code that the loop's safety depends on, which is the first kind in the description of `builder-deep`, start a new
-  reviewer on it after each round of fixes, until a reviewer reports no error. After the first line of that reviewer's
-  prompt, name the round's range of commits as `<old>..<new>`, and give the errors that the last reviewer reported.
-  `<old>` is the head commit that the last reviewer read, and `<new>` is the draft's head. On another account, write the
-  range and the errors in the file that you give `scripts/loop/run-builder` with `--message <file>`. When no error
-  remains, run `gh pr ready <number>` and `gh pr merge <number>`.
+  If the draft changes code that the loop's safety depends on, which is the first kind in the description of
+  `builder-deep`, start a new reviewer on it after each round of fixes, until a reviewer reports no error. After the
+  first line of that reviewer's prompt, name the round's range of commits as `<old>..<new>`, and give the errors that
+  the last reviewer reported. `<old>` is the head commit that the last reviewer read, and `<new>` is the draft's head.
+  On another account, give the range and the errors with `--message`, as the start of "Work through the cycle"
+  describes. When no error remains, run `gh pr ready <number>` and `gh pr merge <number>`.
   If it's the auditor's pull request, first add the label `retrospective` to it if it's missing, because the meter
   counts the hours that the agents worked since the newest merged pull request with that label.
 - **Stuck pull requests.** Run `scripts/merge-dependabot-pull-requests`, which turns on auto-merge for Dependabot's
