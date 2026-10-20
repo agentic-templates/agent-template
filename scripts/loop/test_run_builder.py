@@ -163,6 +163,10 @@ def starting_repositories() -> tempfile.TemporaryDirectory[str]:
     origin, repo = root / "origin.git", root / "repo"
     git("init", "--quiet", "--bare", "--initial-branch=main", str(origin), folder=root)
     git("init", "--quiet", "--initial-branch=main", str(repo), folder=root)
+    # git commit and git push start git's maintenance in the background, which can pack the loose objects and delete
+    # them while a test copies the repositories. The copies keep the setting.
+    for repository in (origin, repo):
+        git("config", "maintenance.auto", "false", folder=repository)
     (repo / "README").write_text("start\n")
     for hook in GIT_HOOKS:
         path = repo / "git-hooks" / hook
