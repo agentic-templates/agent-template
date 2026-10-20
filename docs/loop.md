@@ -241,8 +241,8 @@ retrospective:
    open an issue for each fix. Say in it that the logs are in the `.loop` folder of the main checkout. Add `ready` to
    it, because agents take instructions only from issues with that label. Assign it to yourself, so that
    `scripts/take-next-issue` doesn't give it to anyone.
-3. Start a `researcher` agent on it, on your own account, in your session, with `<issue> research` as its prompt's
-   first line.
+3. Start a `researcher` agent on it, as step 3 of "Launch" describes, with `<issue> research` as the line that names
+   its work.
 4. Add the audit to the state file's list of focused audits.
 
 A focused audit doesn't count as a retrospective, so the meter goes on counting toward the next one.
