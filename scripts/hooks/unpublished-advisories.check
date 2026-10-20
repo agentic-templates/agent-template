@@ -12,6 +12,8 @@
 # - each message and trailer that -m, --message, -F, --file and --trailer give git commit
 # - each message that -m, --message, -F and --file give git merge, the value of its --into-name, and the names of the
 #   commits that it merges, which git can write into the merge commit's message
+# - the repository and the branches that git pull names, which git can write into the merge commit's message
+# It reads a prefix of one of these long flags that git reads as the flag, such as --mess for --message, as that flag.
 # It reads the text as read_text and read_body in helpers.bash read it, as the command writes it, without running $( )
 # or filling in variables. It blocks a relative path to a body file when it can't tell the folder that the path starts
 # from, as after cd "$folder". It finds an ID in any case, because the name of an advisory's private fork holds the ID in
@@ -22,20 +24,31 @@
 # It allows a gh command whose -R or --repo names the advisory's private fork, because the fork is private too. A commit
 # message counts in any repository, because step 3 of "Fix a security vulnerability" in docs/releasing.md pushes the
 # fork's commits to origin before the advisory is published. A command that posts to the advisory itself, such as gh api
-# with the advisory's endpoint, goes ahead, because the hook reads no gh api command. It doesn't read the names that git
-# finds in the repository and writes into the message of a merge commit: the branch that the merge goes into, the URL
-# that git fetched FETCH_HEAD from, and the branch that @{-1} or - names. Nor does it read git pull, whose merge commit
-# names the URL that it pulls from.
+# with the advisory's endpoint, goes ahead, because the hook reads no gh api command. It doesn't read the text that git
+# takes from the repository for the message of a merge commit: the branch that the merge goes into, the URL and the
+# branch of FETCH_HEAD, the branch that @{-1} or - names, the upstream branch, which git merges when the command names
+# no commit and which a name such as @{upstream} stands for, the URL of the remote that git pull pulls from when the
+# command gives no URL, the message of an annotated tag that git merges, and with --log, the subjects of the merged
+# commits and the descriptions of their branches.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 
-# The flags that take a value, as gh release create --help, gh release edit --help, git commit -h and git merge -h list
-# them. git reads the value of -S, and of the -u of git commit, only from the same word, as in -Skey, so the lists of
-# git leave them out.
+# The flags that take a value, as gh release create --help, gh release edit --help, git commit -h, git merge -h and
+# git pull -h list them. git reads the value of a short flag whose value is optional, such as -S, only from the same
+# word, as in -Skey, so these flags have lists of their own.
 release_create_flags_with_value=" --discussion-category -n --notes -F --notes-file --notes-start-tag --target -t --title -R --repo "
 release_edit_flags_with_value=" --discussion-category -n --notes -F --notes-file --tag --target -t --title -R --repo "
 git_commit_flags_with_value=" -F --file --author --date -m --message -c --reedit-message -C --reuse-message --fixup --squash --trailer -t --template --cleanup -U --unified --inter-hunk-context --pathspec-from-file "
 git_merge_flags_with_value=" --cleanup -s --strategy -X --strategy-option -m --message -F --file --into-name "
+git_pull_flags_with_value=" --cleanup -s --strategy -X --strategy-option --upload-pack --depth --shallow-since --shallow-exclude --deepen --refmap -o --server-option --negotiation-restrict --negotiation-tip --negotiation-include "
+git_commit_flags_with_optional_value=" -S -u "
+git_merge_flags_with_optional_value=" -S "
+git_pull_flags_with_optional_value=" -r -S -j "
+
+# Each flag that gives text to the message, after the shortest prefix that git 2.56 reads as the flag. git reads a long
+# flag from any prefix of it that starts no other long flag of the subcommand, as in --mess for --message.
+git_commit_message_flag_prefixes=" --m:--message --fil:--file --tr:--trailer "
+git_merge_message_flag_prefixes=" --m:--message --fi:--file --i:--into-name "
 
 # A GHSA ID in any case. GitHub writes GHSA in capitals and the rest in lower case.
 ghsa_id='[Gg][Hh][Ss][Aa]-[0-9A-Za-z]{4}-[0-9A-Za-z]{4}-[0-9A-Za-z]{4}'
@@ -109,23 +122,51 @@ read_message_file() {
   body_folder=$(git_file_folder)
 }
 
+# Sets full_word to a word of git with its long flag in full when the word gives a prefix of the flag that git reads as
+# the flag, as --message=text for --mess=text, and otherwise to the word: expand_flag_prefix <word> <prefixes>
+expand_flag_prefix() {
+  local name=${1%%=*} pair flag
+  full_word=$1
+  for pair in $2; do
+    flag=${pair#*:}
+    if [[ $name == "${pair%%:*}"* && $flag == "$name"* ]]; then
+      full_word=$flag${1#"$name"}
+      return 0
+    fi
+  done
+}
+
 # Adds each message and trailer that a git commit or git merge command in command_words gives to posted_text, and the
-# value of the --into-name of git merge. Adds the names of the commits that git merge merges to merged_names.
-read_commit_message() {
-  local subcommand flags_with_value i word has_dashes="" flag value value_is_next_word flags_before
+# value of the --into-name of git merge. Adds the names of the commits that git merge merges, and of the repository and
+# the branches that git pull pulls, to merged_names.
+read_git_command_text() {
+  local subcommand flags_with_value flags_with_optional_value message_flag_prefixes="" i word has_dashes="" full_word
+  local flag value value_is_next_word flags_before
   read_git_options
   subcommand=${command_words[git_subcommand]:-}
   case $subcommand in
-    commit) flags_with_value=$git_commit_flags_with_value ;;
-    merge) flags_with_value=$git_merge_flags_with_value ;;
+    commit)
+      flags_with_value=$git_commit_flags_with_value
+      flags_with_optional_value=$git_commit_flags_with_optional_value
+      message_flag_prefixes=$git_commit_message_flag_prefixes
+      ;;
+    merge)
+      flags_with_value=$git_merge_flags_with_value
+      flags_with_optional_value=$git_merge_flags_with_optional_value
+      message_flag_prefixes=$git_merge_message_flag_prefixes
+      ;;
+    pull)
+      flags_with_value=$git_pull_flags_with_value
+      flags_with_optional_value=$git_pull_flags_with_optional_value
+      ;;
     *) return 0 ;;
   esac
   for ((i = git_subcommand + 1; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
-    # git merge reads each word that isn't a flag or a flag's value as a commit, also after --, and git commit reads it
-    # as a path.
+    # git merge reads each word that isn't a flag or a flag's value as a commit, also after --, and git pull reads it as
+    # the repository or a branch. git commit reads it as a path.
     if [[ -n $has_dashes || $word != -* ]]; then
-      if [[ $subcommand == merge ]]; then
+      if [[ $subcommand != commit ]]; then
         merged_names+=$word$'\n'
       fi
       continue
@@ -134,7 +175,8 @@ read_commit_message() {
       has_dashes=yes
       continue
     fi
-    split_flag_word "$word" "$flags_with_value"
+    expand_flag_prefix "$word" "$message_flag_prefixes"
+    split_flag_word "$full_word" "$flags_with_value" "$flags_with_optional_value"
     if [[ -n $value_is_next_word ]]; then
       i=$((i + 1))
       value=${command_words[i]:-}
@@ -214,7 +256,7 @@ check_posted_text() {
   posted_text="" merged_names="" destination="" body_folder=$command_folder
   case ${command_words[0]##*/} in
     gh) read_gh_command_text ;;
-    git) read_commit_message ;;
+    git) read_git_command_text ;;
   esac
   if find_unpublished_id "$posted_text"; then
     block "Blocked: this command would post $unpublished_id, the ID of a security advisory of this repository that isn't published yet. Write the text without the ID, and run the command again."
@@ -222,7 +264,7 @@ check_posted_text() {
   # git writes the names into the message of a merge commit when the command gives none, and with --log, or the
   # setting merge.log, also after a message that it gives.
   if find_unpublished_id "$merged_names"; then
-    block "Blocked: this git merge names a commit by a name that holds $unpublished_id, the ID of a security advisory of this repository that isn't published yet, and git can write that name into the merge commit's message. Name the commit by its SHA, and run the command again."
+    block "Blocked: this command gives git a name or URL that holds $unpublished_id, the ID of a security advisory of this repository that isn't published yet, and git can write it into the merge commit's message. Merge the commit by its SHA, as in git merge <SHA>, and run the command again."
   fi
 }
 

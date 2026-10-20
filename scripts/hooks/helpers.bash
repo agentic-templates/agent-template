@@ -577,7 +577,7 @@ opens_pull_request() {
 }
 
 # Splits a word of a gh command that starts with a dash into the flag and the value that the word gives, as gh reads
-# them: split_flag_word <word> <flags that take a value>
+# them: split_flag_word <word> <flags that take a value> [<short flags that take an optional value>]
 # It sets flag, and sets value to the value in the same word, as in --title=Title, or to empty when the word gives
 # none. A word can hold several short flags, as in -dc, where each flag but the last takes no value. The first flag that
 # takes a value ends the flags, and the rest of the word is its value, as in -tTitle or -dt=Title, which gh reads as the
@@ -585,9 +585,11 @@ opens_pull_request() {
 # a flag that takes no value ends the flags too, and the rest of the word is that flag's value, as in -dd=false. Of such
 # a word, flag is the last flag, and flags_before holds the letters of the flags before it, such as d of -dt=Title. It
 # sets value_is_next_word to yes when the flag takes a value that the word doesn't give, because the next word is then
-# the value, even if it starts with a dash.
+# the value, even if it starts with a dash. git reads the value of a short flag whose value is optional only from the
+# rest of the word, as in -Skey of git commit, so a flag in the third list ends the flags, and the rest of the word,
+# which can be empty, is its value.
 split_flag_word() {
-  local word=$1 flags_with_value=$2 position letter
+  local word=$1 flags_with_value=$2 flags_with_optional_value=${3:-} position letter
   flag=$word value="" value_is_next_word="" flags_before=""
   case $word in
     --*=*)
@@ -612,6 +614,10 @@ split_flag_word() {
       flags_before+=${flag#-}
     fi
     flag=-$letter
+    if [[ $flags_with_optional_value == *" -$letter "* ]]; then
+      value=${word:position+1}
+      return 0
+    fi
     if [[ $flags_with_value == *" -$letter "* ]]; then
       value=${word:position+1}
       case $value in

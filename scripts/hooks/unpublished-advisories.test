@@ -134,6 +134,16 @@ other_templates=(
   "git -C . commit --amend -m TEXT"
   "git merge --no-ff -m TEXT topic"
   "git merge -s ort --message TEXT topic"
+  # git reads a prefix of a long flag that starts no other long flag of the subcommand as that flag, and the value of
+  # -S only from the same word.
+  "git commit --m TEXT"
+  "git commit --mess=TEXT"
+  "git commit -m 'feat: skip imported expenses' --tr TEXT"
+  "git commit -m 'feat: skip imported expenses' --trail=TEXT"
+  "git commit -Spat -m TEXT"
+  "git merge --no-ff --m TEXT topic"
+  "git merge --no-ff --mess=TEXT topic"
+  "git merge -Sjules -m TEXT topic"
 )
 for template in "${other_templates[@]}"; do
   expect_block Bash "$(with_text "$template" "fix: check the paths that $draft names")" "$(blocked "$draft")"
@@ -172,6 +182,8 @@ expect_block Bash "gh pr create --title 'feat: skip imported expenses' -F body.m
 expect_block Bash "git commit -F body.md" "$(blocked "$draft")"
 expect_block Bash "git commit --file=body.md" "$(blocked "$draft")"
 expect_block Bash "git merge --no-ff -F body.md topic" "$(blocked "$draft")"
+expect_block Bash "git commit --fil body.md" "$(blocked "$draft")"
+expect_block Bash "git merge --no-ff --fi=body.md topic" "$(blocked "$draft")"
 expect_block Bash "git commit -F - <<'EOF'
 $(body_with "$draft")
 EOF" "$(blocked "$draft")"
@@ -206,9 +218,9 @@ expect_allow Bash "git -C notes commit -F published.md"
 
 # git writes the names of the commits that it merges, and the value of --into-name, into the message of a merge commit
 # when the command gives no message. With --log, or the setting merge.log, it writes the names after a message that the
-# command gives, too.
+# command gives, too. The merge commit of git pull names the repository and the branches that it pulls.
 blocked_merge() {
-  echo "Blocked: this git merge names a commit by a name that holds $1, the ID of a security advisory of this repository that isn't published yet, and git can write that name into the merge commit's message. Name the commit by its SHA, and run the command again."
+  echo "Blocked: this command gives git a name or URL that holds $1, the ID of a security advisory of this repository that isn't published yet, and git can write it into the merge commit's message. Merge the commit by its SHA, as in git merge <SHA>, and run the command again."
 }
 merge_templates=(
   "git merge --no-edit refs/private-fork/ID/fix"
@@ -218,14 +230,23 @@ merge_templates=(
   "git -C notes merge -s ort refs/private-fork/ID/fix"
   "git merge -m 'Merge the fix' refs/private-fork/ID/fix"
   "git merge -F clean.md --log refs/private-fork/ID/fix"
+  "git pull --no-rebase origin fix-ID"
+  "git pull --no-rebase origin main fix-ID:fix"
+  "git pull --no-rebase -s ort -- origin fix-ID"
+  "git -C notes pull --no-rebase --depth 10 origin fix-ID"
 )
 for template in "${merge_templates[@]}"; do
   expect_block Bash "${template/ID/$draft}" "$(blocked_merge "$draft")"
   expect_allow Bash "${template/ID/$published}"
 done
 expect_block Bash "git merge --no-edit expenses-ghsa-2c5x-3m4v-7q8r/main" "$(blocked_merge ghsa-2c5x-3m4v-7q8r)"
+expect_block Bash "git pull --no-rebase https://github.com/$fork main" "$(blocked_merge ghsa-2c5x-3m4v-7q8r)"
+expect_block Bash "git pull --no-rebase -Sjules https://github.com/$fork" "$(blocked_merge ghsa-2c5x-3m4v-7q8r)"
+expect_allow Bash "git pull --no-rebase https://github.com/jtmpl/expenses-ghsa-3333-3333-3333 main"
 expect_block Bash "git merge --no-edit --into-name $draft topic" "$(blocked "$draft")"
 expect_block Bash "git merge --no-edit --into-name=fix-$draft topic" "$(blocked "$draft")"
+expect_block Bash "git merge --no-edit --into=fix-$draft topic" "$(blocked "$draft")"
+expect_block Bash "git merge --no-edit --i fix-$draft topic" "$(blocked "$draft")"
 expect_allow Bash "git merge --no-edit --into-name $published topic"
 # git commit reads the words after -- as paths, which its message doesn't hold.
 expect_allow Bash "git commit -m 'feat: skip imported expenses' -- notes/$draft.md"
