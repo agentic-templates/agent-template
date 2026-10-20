@@ -503,14 +503,7 @@ if [[ -n "${SKIP_SCRIPT_TESTS:-}" ]]; then
   skipped="${skipped:+$skipped, }the tests of the scripts and hooks"
 else
   if [[ -z "${CHECK_UNDER_TEST:-}" ]]; then
-    # scripts/script-tests-needed exits with code 1 when the branch changes no file that the tests test.
-    needed=0
-    scripts/script-tests-needed --branch || needed=$?
-    if ((needed == 1)); then
-      echo "Skipped the tests of the scripts and hooks, because this branch changes no file in scripts/, .github/, .claude/ or .codex/." >&2
-    else
-      scripts/test-scripts
-    fi
+    scripts/test-scripts --branch
   fi
   if [[ -n $is_in_codex_sandbox ]]; then
     echo "The checks ran in Codex's sandbox, so scripts/check records no pass." >&2

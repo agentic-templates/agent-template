@@ -1,0 +1,191 @@
+#!/usr/bin/env -S uv run --script --quiet
+"""Prints the test files of the scripts and hooks that this branch's changes can affect, from the test files that it
+gets, one to a line and in the order that it gets them. Run it from the repository's root:
+
+  scripts/affected-tests <test file>...
+
+scripts/test-scripts --branch runs the test files that it prints. A test file is affected when the branch changes the
+test file, a file that it tests, or a file that a tested file names, and so on. The script doesn't follow the names in
+the test file itself, because a test names many files only as sample input. A test file tests the file of its
+name without .test, or with .check or .bash in place of .test, such as scripts/start-issue for
+scripts/start-issue.test, and the files that TESTED_FILES gives it. A file names another file in scripts/, .claude/,
+.codex/ or .github/:
+
+- by the path from the repository's root, as in scripts/missing-tools, unless the path is in a home folder, as in
+  ~/.claude/settings.json,
+- by the path from its own folder, after a variable or an expansion, as in "$hooks_folder/helpers.bash" or
+  "${BASH_SOURCE[0]%/*}/../loop-folder",
+- or by importing the Python module of that name in its own folder, as in import paths.
+
+Comments, here-documents, and strings in triple quotes such as Python's docstrings, name no file.
+
+The script prints every test file when the branch changes a file in EVERY_TEST, and when it can't find the commit
+where the branch leaves origin/main. It takes the files that the branch changes since that commit, with the changes
+that aren't committed and the new files.
+
+The script misses a file that a test runs without naming it, such as a check that scripts/hooks/before-tool runs in
+the tests of the other checks. CI runs every test file, so a test that such a change fails still fails before the pull
+request merges.
+"""
+
+import argparse
+import posixpath
+import re
+import subprocess
+import sys
+from collections.abc import Iterator
+from pathlib import Path
+
+ROOT_FOLDERS = ("scripts", ".claude", ".codex", ".github")
+
+# A change to one of these files runs every test file. scripts/test-scripts runs the test files through
+# scripts/loop/run-heavy, and each test of the hooks reads testing.bash, which reads input.jq, helpers.bash and the
+# files that helpers.bash sources, and runs before-tool. The script doesn't follow the files that these name, because
+# before-tool runs scripts/loop/agent-log only for an Agent call, which no test of a check makes, and the Python tests
+# test the modules that run-heavy imports.
+EVERY_TEST = {
+    "scripts/test-scripts",
+    "scripts/missing-tools",
+    "scripts/loop/run-heavy",
+    "scripts/hooks/testing.bash",
+    "scripts/hooks/input.jq",
+    "scripts/hooks/before-tool",
+    "scripts/hooks/helpers.bash",
+    "scripts/loop-folder",
+    "scripts/hooks/words-without-secrets.bash",
+    "scripts/hooks/simple-commands.bash",
+    "scripts/hooks/command-prefixes.bash",
+}
+
+# The files that a test file tests, when its name doesn't give them.
+TESTED_FILES = {
+    "scripts/test-check": ["scripts/check"],
+    "scripts/ci.test": [".github/workflows/ci.yml"],
+    "scripts/draft-assets.test": ["scripts/fixtures/draft-assets.yml"],
+    "scripts/hooks/settings.test": [".claude/settings.json", ".codex/hooks.json"],
+}
+
+# A path from the repository's root, which no letter, digit, period or dash comes right before, so that
+# $root/scripts/check counts, and myscripts/check doesn't.
+PATH_FROM_ROOT = re.compile(rf"(?<![\w.-])(?:{'|'.join(re.escape(folder) for folder in ROOT_FOLDERS)})/[\w./-]+")
+# What comes right before a path in a home folder, such as ~/ or $HOME/.
+HOME_FOLDER = re.compile(r"(?:~|home\}?)/$", re.IGNORECASE)
+# A path from the file's own folder, after a variable, as in $hooks_folder/helpers.bash, or after an expansion, as in
+# ${BASH_SOURCE[0]%/*}/helpers.bash or $(dirname "$0")/helpers.bash.
+PATH_FROM_FOLDER = re.compile(r"(?:\$\w+|[})])/([\w./-]+)")
+# The start of a here-document, as in <<'LABELS', and the word that ends it. A here-string, as in <<<"$input", has
+# no end.
+HERE_DOCUMENT = re.compile(r"(?<!<)<<-?\s*['\"]?([A-Za-z_]\w*)")
+IMPORT = re.compile(r"^\s*(?:import|from)\s+(\w+)")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="scripts/affected-tests", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("test_files", nargs="+", metavar="test file", help="a test file of the scripts and hooks")
+    test_files = parser.parse_args().test_files
+    changed = branch_changes()
+    if changed is None:
+        selected = test_files
+    else:
+        selected = affected_tests(test_files, changed, repository_texts())
+    for test_file in selected:
+        print(test_file)
+    return 0
+
+
+def branch_changes() -> set[str] | None:
+    """The files that the branch changes since it leaves origin/main, or None when git can't find that commit."""
+    base = subprocess.run(
+        ["git", "merge-base", "HEAD", "refs/remotes/origin/main"], capture_output=True, text=True, check=False
+    )
+    if base.returncode != 0:
+        return None
+    changed = git_paths("diff", "--name-only", "--no-renames", base.stdout.strip(), "--")
+    return changed | git_paths("ls-files", "--others", "--exclude-standard")
+
+
+def repository_texts() -> dict[str, str]:
+    """The text of each file in the folders that the tests test, by its path, without the deleted files."""
+    paths = git_paths("ls-files", "--cached", "--others", "--exclude-standard", "--", *ROOT_FOLDERS)
+    return {path: Path(path).read_text(errors="replace") for path in sorted(paths) if Path(path).is_file()}
+
+
+def git_paths(*arguments: str) -> set[str]:
+    command, *options = arguments
+    listed = subprocess.run(["git", command, "-z", *options], capture_output=True, text=True, check=True).stdout
+    return {path for path in listed.split("\0") if path}
+
+
+def affected_tests(test_files: list[str], changed: set[str], texts: dict[str, str]) -> list[str]:
+    """The test files that a change to the changed files can affect, from the texts of the repository's files."""
+    if changed & EVERY_TEST:
+        return list(test_files)
+    known = set(texts) | changed
+    named: dict[str, set[str]] = {}
+
+    def names_of(path: str) -> set[str]:
+        if path not in named:
+            named[path] = files_named(path, texts.get(path, ""), known)
+        return named[path]
+
+    affected = []
+    for test_file in test_files:
+        unread = tested_files(test_file, known)
+        reached = {test_file, *unread}
+        while unread:
+            path = unread.pop()
+            if path in EVERY_TEST:
+                continue
+            for name in names_of(path) - reached:
+                reached.add(name)
+                unread.append(name)
+        if reached & changed:
+            affected.append(test_file)
+    return affected
+
+
+def tested_files(test_file: str, known: set[str]) -> list[str]:
+    stem = test_file.removesuffix(".test")
+    by_name = [path for path in (stem, f"{stem}.check", f"{stem}.bash") if path != test_file and path in known]
+    return by_name + TESTED_FILES.get(test_file, [])
+
+
+def files_named(path: str, text: str, known: set[str]) -> set[str]:
+    """The known files that a file names in its code, as the docstring of this script describes."""
+    folder = posixpath.dirname(path)
+    candidates = []
+    for line in code_lines(text):
+        for match in PATH_FROM_ROOT.finditer(line):
+            if not HOME_FOLDER.search(line, 0, match.start()):
+                candidates.append(match[0])
+        for match in PATH_FROM_FOLDER.finditer(line):
+            candidates.append(posixpath.normpath(posixpath.join(folder, match[1])))
+        if imported := IMPORT.match(line):
+            candidates.append(posixpath.join(folder, f"{imported[1]}.py"))
+    # A path at the end of a sentence, as in an error message, ends in a period.
+    return {candidate.rstrip(".") for candidate in candidates} & known
+
+
+def code_lines(text: str) -> Iterator[str]:
+    """The lines of a text that are neither comments, nor in here-documents, nor in triple quotes."""
+    is_in_triple_quotes = False
+    here_document_end = None
+    for line in text.splitlines():
+        if here_document_end is not None:
+            if line.strip() == here_document_end:
+                here_document_end = None
+            continue
+        quote_count = line.count('"""')
+        if quote_count % 2 == 1:
+            is_in_triple_quotes = not is_in_triple_quotes
+        if is_in_triple_quotes or quote_count > 0 or line.lstrip().startswith("#"):
+            continue
+        yield line
+        if match := HERE_DOCUMENT.search(line):
+            here_document_end = match[1]
+
+
+if __name__ == "__main__":
+    sys.exit(main())
