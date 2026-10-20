@@ -526,6 +526,21 @@ class ClaudeTest(RunBuilderTest):
             "of the kind `left behind 31`, for the orchestrator", (self.run_folder() / "brief.md").read_text()
         )
 
+    def test_keeps_every_reply_of_claude_in_the_report_when_it_replies_to_notifications_around_its_report(self) -> None:
+        replies = [
+            "Waiting for scripts/check.",
+            "Opened pull request #5. scripts/check passed.",
+            "That wait has ended.",
+        ]
+        results = [{**RESULT, "result": reply} for reply in replies]
+        self.answer("claude", "", {"stdout": lines(INIT, *results)})
+        status, _, _ = self.run_builder("--tool", "claude")
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            (self.run_folder() / "report.md").read_text(),
+            "Waiting for scripts/check.\n\nOpened pull request #5. scripts/check passed.\n\nThat wait has ended.",
+        )
+
     def test_fails_when_claude_starts_in_another_permission_mode(self) -> None:
         self.answer("claude", "", {"stdout": lines({**INIT, "permissionMode": "default"}, RESULT)})
         status, printed, _ = self.run_builder("--tool", "claude")
