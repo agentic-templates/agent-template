@@ -7,6 +7,7 @@ import json
 import os
 import re
 from typing import Any
+from unittest import mock
 
 from test_run_builder import (
     BRANCH,
@@ -260,7 +261,8 @@ class TestBuildTest(RunBuilderTest):
         self.worktree = self.repo / ".claude" / "worktrees" / "test-12-builder"
 
     def test_builds_the_issue_from_the_commit_that_its_pull_request_started_from_and_keeps_the_diff(self) -> None:
-        status, printed, errors = self.run_builder("--tool", "claude", "--test", "7")
+        with mock.patch.dict(os.environ, {"LOOP_HAND_OFF": "1"}):
+            status, printed, errors = self.run_builder("--tool", "claude", "--test", "7")
         self.assertEqual((status, errors), (0, ""))
         run = self.run_folder()
         self.assertTrue(run.name.startswith("test-12-builder-"))

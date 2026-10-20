@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Prints the version of the next release for a commit, and nothing else: scripts/next-version <sha>
-# Step 3 of "Publish a release" in docs/releasing.md runs it. It asks gh for the latest release, and reads the titles
+# Step 4 of "Publish a release" in docs/releasing.md runs it. It asks gh for the latest release, and reads the titles
 # and authors of the commits since that release with git. When no version fits, it prints why and exits with code 1.
 set -euo pipefail
 cd "$(dirname "$0")/.."

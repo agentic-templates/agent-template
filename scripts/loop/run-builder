@@ -568,6 +568,8 @@ def run_claude(
     if can_hand_off:
         variables[HAND_OFF_VARIABLE] = "1"
     environment = request_events.with_events(claude_environment(account) | variables, port)
+    if not can_hand_off:
+        environment.pop(HAND_OFF_VARIABLE, None)
     model_options = [
         *option("--model", settings.model),
         *option("--effort", settings.effort),
