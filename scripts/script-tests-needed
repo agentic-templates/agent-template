@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Succeeds if a change needs the tests of the scripts and hooks, and fails with code 1 if it doesn't. It reads the paths
-# of the changed files from standard input, one to a line: scripts/script-tests-needed
+# of the changed files from standard input, one to a line, and after a path, the hunks of that file's patch, if any, as
+# GitHub's API gives them: scripts/script-tests-needed
 # The tests test the files in scripts/, .github/, .claude/ and .codex/, so a change to other files, such as the docs,
-# doesn't need them. The changes job in .github/workflows/ci.yml runs it.
+# doesn't need them. Nor does a change to the text after the frontmatter of an agent file in .claude/agents/, because
+# the tests read only its frontmatter. Such a file needs its hunks, and the script reads the file from the current
+# folder to find where its frontmatter ends, so the folder must hold the files as the change leaves them. Without
+# hunks, a change to an agent file needs the tests. The changes job in .github/workflows/ci.yml runs the script.
 set -euo pipefail
 
 if (($# > 0)); then
@@ -10,10 +14,75 @@ if (($# > 0)); then
   exit 2
 fi
 
-paths=$(cat)
-while IFS= read -r path; do
-  case $path in
+# The start of a hunk, as in @@ -12,3 +12,4 @@, where a missing count means 1.
+hunk_start='^@@ -[0-9]+(,([0-9]+))? \+([0-9]+)(,([0-9]+))? @@'
+
+# The agent file that the hunks change, and the number of the line that ends its frontmatter, which is empty when the
+# file has none.
+agent_file=""
+frontmatter_end=""
+hunk_count=0
+# The old and new lines that the current hunk has left, and the number in the new file of its next line.
+old_left=0
+new_left=0
+new_line=0
+
+# Exits with code 0 when the agent file that the hunks change needs the tests: check_agent_file
+check_agent_file() {
+  if [[ -n $agent_file ]] && ((hunk_count == 0)); then
+    exit 0
+  fi
+}
+
+while IFS= read -r line || [[ -n $line ]]; do
+  if ((old_left > 0 || new_left > 0)); then
+    case $line in
+      "\\"*) continue ;;
+      -*) old_left=$((old_left - 1)) ;;
+      +*) new_left=$((new_left - 1)) ;;
+      *) old_left=$((old_left - 1)) new_left=$((new_left - 1)) ;;
+    esac
+    # A changed line of an agent file in its frontmatter, or before it, as in a new file, needs the tests.
+    if [[ -n $agent_file && $line == [-+]* ]] && ((new_line <= frontmatter_end)); then
+      exit 0
+    fi
+    if [[ $line != -* ]]; then
+      new_line=$((new_line + 1))
+    fi
+    continue
+  fi
+  if [[ $line =~ $hunk_start ]]; then
+    # The hunks of an agent file without frontmatter need the tests, and the script reads past those of other files.
+    if [[ -n $agent_file && -z $frontmatter_end ]]; then
+      exit 0
+    fi
+    old_left=${BASH_REMATCH[2]:-1}
+    new_line=${BASH_REMATCH[3]}
+    new_left=${BASH_REMATCH[5]:-1}
+    # A hunk that adds no line names the line before its place.
+    if ((new_left == 0)); then
+      new_line=$((new_line + 1))
+    fi
+    hunk_count=$((hunk_count + 1))
+    continue
+  fi
+  check_agent_file
+  agent_file=""
+  case $line in
+    .claude/agents/*.md)
+      agent_file=$line
+      hunk_count=0
+      frontmatter_end=""
+      if [[ -f $agent_file ]]; then
+        frontmatter_end=$(awk 'NR == 1 && $0 != "---" { exit } NR > 1 && $0 == "---" { print NR; exit }' "$agent_file")
+      fi
+      ;;
     scripts/* | .github/* | .claude/* | .codex/*) exit 0 ;;
   esac
-done <<<"$paths"
+done
+# A hunk that the input cuts short needs the tests.
+if ((old_left > 0 || new_left > 0)); then
+  exit 0
+fi
+check_agent_file
 exit 1

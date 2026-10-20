@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# Tests scripts/script-tests-needed, with paths on standard input.
+# Tests scripts/script-tests-needed, with paths and patches on standard input.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 script=$PWD/scripts/script-tests-needed
+
+# A folder with an agent file, whose frontmatter ends on line 4, for the cases with patches.
+folder=$(mktemp -d)
+trap 'rm -rf "$folder"' EXIT
+mkdir -p "$folder/.claude/agents"
+printf '%s\n' --- "name: sample" "model: claude-opus-5-5" --- "" "First line of text." "Second line of text." \
+  >"$folder/.claude/agents/sample.md"
 
 case_count=0
 failed_cases=0
@@ -37,6 +44,35 @@ expect_status "When the change touches the Claude Code settings" 0 with_paths .c
 expect_status "When the change touches the Codex hooks" 0 with_paths .codex/hooks.json
 expect_status "When a file's name only starts like a folder" 1 with_paths scripts.md docs/scripts/notes.md
 expect_status "When it gets an argument" 2 "$script" --all
+
+# Runs the script in the folder with the agent file, on lines given as arguments: with_lines <line>...
+with_lines() {
+  (cd "$folder" && printf '%s\n' "$@" | "$script")
+}
+
+text_change=("@@ -4,3 +4,3 @@" " ---" " " "-First line of text." "+First line of the text." " Second line of text.")
+expect_status "When the change touches only the text of an agent file" 1 \
+  with_lines .claude/agents/sample.md "${text_change[@]}"
+expect_status "When the change removes the first line of the text of an agent file" 1 \
+  with_lines .claude/agents/sample.md "@@ -4,3 +4,2 @@" " ---" "-" " First line of text."
+expect_status "When the change touches the text of an agent file and the docs, with their patches" 1 \
+  with_lines README.md "@@ -1 +1 @@" "-# Old" "+# New" .claude/agents/sample.md "${text_change[@]}" docs/code.md
+expect_status "When the change touches the frontmatter of an agent file" 0 \
+  with_lines .claude/agents/sample.md "@@ -1,4 +1,4 @@" " ---" " name: sample" "-model: claude-opus-5-4" \
+  "+model: claude-opus-5-5" " ---"
+expect_status "When the change adds a line at the end of the frontmatter of an agent file" 0 \
+  with_lines .claude/agents/sample.md "@@ -2,3 +2,4 @@" " name: sample" " model: claude-opus-5-5" "+effort: max" " ---"
+expect_status "When the change touches the text of an agent file and another file in .claude/" 0 \
+  with_lines .claude/agents/sample.md "${text_change[@]}" .claude/settings.json
+expect_status "When the change touches an agent file without its patch" 0 with_lines .claude/agents/sample.md
+expect_status "When the change renames an agent file" 0 \
+  with_lines .claude/agents/sample.md "${text_change[@]}" .claude/agents/old.md
+expect_status "When the change adds an agent file" 0 \
+  with_lines .claude/agents/sample.md "@@ -0,0 +1,3 @@" +--- "+name: sample" +---
+expect_status "When the change deletes an agent file" 0 \
+  with_lines .claude/agents/gone.md "@@ -1,3 +0,0 @@" ---- "-name: gone" ----
+expect_status "When the input cuts a patch of an agent file short" 0 \
+  with_lines .claude/agents/sample.md "@@ -4,3 +4,3 @@" " ---" " "
 
 if ((failed_cases > 0)); then
   echo "error: $failed_cases of the $case_count cases in scripts/script-tests-needed.test failed. The errors above say which." >&2

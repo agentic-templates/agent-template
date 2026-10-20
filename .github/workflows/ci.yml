@@ -46,7 +46,7 @@ jobs:
           SKIP_SCRIPT_TESTS: 1
 
   # Says whether the change needs the tests of the scripts and hooks, as scripts/script-tests-needed decides from the
-  # files it changes. When it can't list them, the tests run.
+  # files it changes and the patches of its agent files. When it can't list them, the tests run.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -56,8 +56,11 @@ jobs:
     outputs:
       script_tests: ${{ steps.decide.outputs.script_tests }}
     steps:
+      # scripts/script-tests-needed reads the agent files as the patches leave them, which for a pull request is its
+      # head, not the merge commit that the other jobs check out.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       # GitHub's compare API lists at most 300 files, so a merge group with more runs the tests.
@@ -70,21 +73,21 @@ jobs:
           BASE: ${{ github.event.merge_group.base_sha }}
           HEAD: ${{ github.event.merge_group.head_sha }}
         run: |
-          paths=scripts/
+          changes=scripts/
           case $EVENT in
             pull_request)
-              paths=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST/files" \
-                --jq '.[] | .filename, (.previous_filename // empty)') || paths=scripts/
+              changes=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST/files" \
+                --jq '.[] | .filename, (select(.filename | startswith(".claude/agents/")) | .patch // empty), (.previous_filename // empty)') || changes=scripts/
               ;;
             merge_group)
-              paths=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE...$HEAD" \
-                --jq 'if (.files | length) < 300 then (.files[] | .filename, (.previous_filename // empty)) else "scripts/" end') ||
-                paths=scripts/
+              changes=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE...$HEAD" \
+                --jq 'if (.files | length) < 300 then (.files[] | .filename, (select(.filename | startswith(".claude/agents/")) | .patch // empty), (.previous_filename // empty)) else "scripts/" end') ||
+                changes=scripts/
               ;;
           esac
           # Only code 1 means that the change doesn't need the tests.
           needed=0
-          scripts/script-tests-needed <<<"$paths" || needed=$?
+          scripts/script-tests-needed <<<"$changes" || needed=$?
           script_tests=true
           if ((needed == 1)); then
             script_tests=false
