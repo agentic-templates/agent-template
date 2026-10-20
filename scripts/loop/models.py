@@ -19,6 +19,8 @@ READ_EVERY = dt.timedelta(days=1)
 NAME = "models.json"
 TESTED_MODELS = Path(__file__).resolve().parents[2] / ".claude" / "tested-models.json"
 TIMEOUT_SECONDS = 120
+# How many characters of claude's output and of its errors a problem quotes
+QUOTED = 200
 PROMPT = "Reply with the word OK."
 
 
@@ -78,21 +80,27 @@ def ask(alias: str, account: Account) -> list[str]:
             raise NoModel("claude isn't installed. Install Claude Code.") from error
         except subprocess.TimeoutExpired as error:
             raise NoModel(f"claude didn't answer within {TIMEOUT_SECONDS} seconds.") from error
-    return model_ids(done.stdout + done.stderr, alias)
+    return model_ids(done.stdout, done.stderr, alias)
 
 
-def model_ids(output: str, alias: str) -> list[str]:
+def model_ids(output: str, errors: str, alias: str) -> list[str]:
+    """The model IDs in the modelUsage of the output. The errors can hold warnings, so only a problem quotes them."""
     try:
         usage = json.loads(output).get("modelUsage")
     except ValueError, AttributeError:
         usage = None
     if not isinstance(usage, dict) or not usage:
-        first_line = next((line.strip() for line in output.splitlines() if line.strip()), "nothing")
         raise NoModel(
-            f'claude -p --model {alias} --output-format json printed no modelUsage, and began with "{first_line}". '
-            "Run it in an empty folder to see why."
+            f"claude -p --model {alias} --output-format json printed no modelUsage. Its output began with "
+            f"{beginning(output)}, and its errors with {beginning(errors)}. Run it in an empty folder to see why."
         )
     return sorted(usage)
+
+
+def beginning(text: str) -> str:
+    """The first QUOTED characters of the text on one line, in quotes, or nothing."""
+    words = " ".join(text.split())
+    return f'"{words[:QUOTED]}"' if words else "nothing"
 
 
 def tested() -> set[str]:
