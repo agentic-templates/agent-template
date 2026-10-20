@@ -1,19 +1,43 @@
 #!/usr/bin/env -S uv run --script --quiet
 """Prints the usage of each account that the loop builds with, and advice on whether the loop may start more work.
 
-Each account's line ends with its advice:
+Each account's line gives its meters, and the usage per agent-minute of each meter that its advice counts with. It ends
+with the account's advice, which names the agent types that the account can start:
 
-  go      Start work freely.
-  watch   A meter is at 80% or more.
-  near    The session meter is within 3 percentage points of its stop point, or a weekly meter within 1 point of its
-          stop.
-  stop    The session meter reached its stop point, or a weekly meter reached its stop less than 10 hours before its
-          reset. Start nothing on the account until that reset. The advice stays stop until then.
-  parked  A weekly meter reached its stop more than 10 hours before its reset. Start nothing on the account until that
-          reset.
+  go         Every type fits.
+  <types>    Only the types listed fit, such as builder-small, researcher, reviewer.
+  stop       No type fits. Start nothing on the account until its running agents end or a meter resets.
+  parked     A weekly meter reached 99% more than 10 hours before its reset. Start nothing on the account until that
+             reset.
 
-The session meter's stop point is 100% minus the larger of 2 percentage points and the usage of 8 minutes at the rate
-between the last two readings. Each weekly meter, the one for all models and each model's own, stops at 99%.
+The types of a Claude account are the agent types in .claude/agents, and a Codex account has the type codex. A type
+fits while each of the account's meters, 5-hour and weekly, has room for a long run of the type, after what the agents
+that run on the account still need:
+
+- A meter's room is what is left of it, up to 100% for the 5-hour meter and 99% for a weekly meter.
+- A type's run is the usage of the 90th percentile of the minutes of the type's earlier runs in .loop/agents.jsonl, at
+  the account's usage per agent-minute. A type without an earlier run takes the runs of all types.
+- A running agent still needs the usage of the 90th percentile of how much longer the earlier runs of its type went
+  on, among those that ran at least as long as it has. On the orchestrator's own account, the orchestrator still needs
+  its usage until the weekly reset, at the share of its time that it worked so far.
+- Only the usage before a meter's reset counts, because the room comes back then.
+
+The usage per agent-minute is the rise of a meter since the newest reading of the account that is {period} to {gap}
+minutes old, over the minutes that the account's agents worked since that reading. On its own account, the
+orchestrator counts as an agent for the minutes that its transcript shows it working. When the agents didn't work or
+the meter didn't rise, the meter takes the last usage per agent-minute that it measured, and before it measured one,
+the usage that scripts/loop/account_room.py starts with.
+
+The line after the accounts names the Claude account to start each agent type on, other than the auditor: the account
+with the lowest 5-hour meter among those where the type fits. Between accounts with the same 5-hour meter, it names the
+one whose week resets first, and then one other than the orchestrator's own account.
+
+With --start-on TYPE, the meter reads no account, and prints the Claude account to start an agent of the type on, as
+that line names it, or "no account". It takes each account's newest reading in .loop/meter.jsonl, and leaves out an
+account whose newest reading is more than {start} minutes old. As the agents that run on the account, it counts those
+that ran at the reading, at their minutes then, each agent that started on the account since then, and each agent that
+--start-on named the account for since then. So one pass of the loop starts only as many agents on each account as fit.
+It adds a line with the type and the account that it named to .loop/meter.jsonl.
 
 The line before the last lists the agents that run: those with a start line and no end line in .loop/agents.jsonl,
 each with its type and the number of its issue or pull request. It leaves out an agent whose Claude Code process or
@@ -55,10 +79,11 @@ background, so that its end wakes the orchestrator.
                 {"name": "codex", "tool": "codex", "env": {"CODEX_HOME": "~/.codex"}}]}
 
 Without the file, the meter reads the Claude account that this machine is signed in to. It adds each reading of an
-account to .loop/meter.jsonl. Each time it reads the accounts, it first adds a line with no account and the
-machine's numbers under "machine", as scripts/loop/machine.py describes them. A number that the machine doesn't give
-is null. The meter exits with code 1 when an account gives no reading. It reads
-the orchestrator's context size from the transcript of the session that the session: line of .loop/state.md names.
+account to .loop/meter.jsonl, with the usage per agent-minute that it measured under "per_agent_minute". Each time it
+reads the accounts, it first adds a line with no account and the machine's numbers under "machine", as
+scripts/loop/machine.py describes them. A number that the machine doesn't give is null. The meter exits with code 1
+when an account gives no reading. It reads the orchestrator's context size and the times when it worked from the
+transcript of the session that the session: line of .loop/state.md names.
 """
 
 import argparse
@@ -74,36 +99,28 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import account_room
 import agent_log
 import heavy_log
 import models
 import paths
 import request_events
 import waste
-from accounts import SIGNED_IN, Account, AccountsError, claude_environment, load_accounts
+from accounts import SIGNED_IN, Account, AccountsError, claude_environment, load_accounts, own_account
 from github import GitHubError, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, note_files
 from machine import Machine, read_machine
-from meter_waits import READ_EVERY_SECONDS, WAKE_EVERY
+from meter_waits import LONGEST_READING_GAP, READ_EVERY_SECONDS, WAKE_EVERY
 from usage import Meter, parse_usage
 
-WATCH_PERCENT = 80.0
-NEAR_MARGIN_PERCENT = 3.0
-# The session's stop point leaves room for the usage until the next reading, and for the minutes that the running
-# agents take to finish their turns.
-STOP_FLOOR_PERCENT = 2.0
-STOP_MINUTES_OF_USAGE = 8.0
-# The rate in percent per minute until two readings in one session window give one.
-DEFAULT_RATE = 0.3
-# /usage rounds a reset time differently from one reading to the next, such as 4:30am and then 4:29am.
-SAME_WINDOW_DRIFT = dt.timedelta(minutes=10)
-# /usage gives whole percents, so two readings closer than this would give a rate far above the real one.
-SHORTEST_RATE_INTERVAL = dt.timedelta(seconds=30)
-# The stop of each meter other than the session's
-WEEK_STOP_PERCENT = 99.0
-WEEK_NEAR_MARGIN_PERCENT = 1.0
-# Waiting at a stop wakes the orchestrator every 50 minutes, and each wake spends some of the week. So a weekly stop
-# further than this from its reset parks the account instead.
+# The period over which the meter measures the usage per agent-minute. It measures from the newest reading at least
+# this old. A reading older than LONGEST_READING_GAP is from before a time when the loop stopped, and measures nothing.
+USAGE_PERIOD = dt.timedelta(minutes=30)
+# A pass of the loop starts its agents from the reading that it starts with, so --start-on names an account only from a
+# reading this recent.
+OLDEST_START_READING = dt.timedelta(minutes=30)
+# Waiting at a stop wakes the orchestrator every 50 minutes, and each wake spends some of the week. So a weekly meter
+# that reaches its limit further than this from its reset parks the account instead.
 LONGEST_STOP = dt.timedelta(hours=10)
 SHORTEST_WAIT_SECONDS = 60
 # A wait for a reset ends this long after it, so that the next reading sees the new window.
@@ -129,11 +146,11 @@ PRINTED_FINDINGS = "printed-findings.json"
 
 
 class Advice(NamedTuple):
-    state: str
-    # The session meter's stop point
-    stop_at: float
+    # go, stop, parked, or the types that fit, separated by commas
+    text: str
     wait_seconds: int
-    meters_at_stop: list[str]
+    # The types that fit
+    fitting: list[str]
 
 
 class Readings(NamedTuple):
@@ -162,7 +179,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="scripts/loop/meter", description=help_text(), formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--wake", action="store_true", help="keep reading until the orchestrator needs to wake")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--wake", action="store_true", help="keep reading until the orchestrator needs to wake")
+    modes.add_argument(
+        "--start-on",
+        metavar="TYPE",
+        choices=agent_types("claude"),
+        help="print the Claude account to start an agent of the type on, without reading the accounts",
+    )
     options = parser.parse_args(argv)
     loop_folder = paths.loop_dir()
     loop_folder.mkdir(parents=True, exist_ok=True)
@@ -172,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 1
     log = loop_folder / "meter.jsonl"
+    if options.start_on:
+        return start_on(options.start_on, accounts, log)
     hand_offs = loop_folder / FOLDER_NAME
     checkout = paths.main_checkout()
     printed = loop_folder / PRINTED_FINDINGS
@@ -204,9 +230,19 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def help_text() -> str:
-    """The docstring, with HOURS_PER_RETROSPECTIVE in place of {hours}, so that a retrospective changes the number in
-    one place. The docstring's JSON example has braces of its own, so str.format can't fill it in."""
-    return str(__doc__).replace("{hours}", f"{HOURS_PER_RETROSPECTIVE:g}")
+    """The docstring, with the numbers that the code keeps in place of {hours}, {period}, {gap} and {start}, so that
+    changing a number takes one edit. The docstring's JSON example has braces of its own, so str.format can't fill it
+    in."""
+    numbers = {
+        "{hours}": f"{HOURS_PER_RETROSPECTIVE:g}",
+        "{period}": f"{USAGE_PERIOD.total_seconds() / 60:g}",
+        "{gap}": f"{LONGEST_READING_GAP.total_seconds() / 60:g}",
+        "{start}": f"{OLDEST_START_READING.total_seconds() / 60:g}",
+    }
+    text = str(__doc__)
+    for placeholder, number in numbers.items():
+        text = text.replace(placeholder, number)
+    return text
 
 
 def now() -> dt.datetime:
@@ -260,6 +296,12 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
     machine = read_machine(log.parent)
     with log.open("a") as handle:
         handle.write(json.dumps({"at": machine_time.isoformat(timespec="seconds"), "machine": machine}) + "\n")
+    runs = agent_log.read_runs(log.parent / "agents.jsonl")
+    earlier_runs = run_minutes_by_type(runs)
+    orchestrators = own_account(accounts, os.environ)
+    transcript = orchestrator_transcript(log.parent / "state.md", paths.main_checkout())
+    orchestrator_periods = agent_log.session_periods(transcript) if transcript else []
+    candidates: list[account_room.Candidate] = []
     for account in accounts:
         reading_time = now()
         try:
@@ -273,15 +315,19 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
             "account": account["name"],
             "meters": meters,
         }
-        previous = last_reading(log, account["name"])
-        rate = rate_per_minute(previous, reading)
-        result = advise(meters, rate, reading_time, is_held_at_session_stop(previous, reading))
-        reading["meters_at_stop"] = result.meters_at_stop
+        is_orchestrators = orchestrators is not None and orchestrators["name"] == account["name"]
+        orchestrator = orchestrator_periods if is_orchestrators else []
+        room, measured = read_room(account["name"], meters, reading_time, log, runs, orchestrator)
+        result = advise(room, agent_types(account["tool"]), earlier_runs, reading_time)
+        reading["per_agent_minute"] = measured
         with log.open("a") as handle:
             handle.write(json.dumps(reading) + "\n")
-        advice[account["name"]] = result.state
+        advice[account["name"]] = result.text
         waits.append(result.wait_seconds)
-        lines.append(account_line(account["name"], meters, rate, result, notes, reading_time))
+        lines.append(account_line(account["name"], meters, room.per_agent_minute, result, notes, reading_time))
+        if account["tool"] == "claude":
+            candidates.append(account_room.Candidate(account["name"], result.fitting, meters, is_orchestrators))
+    lines.append(start_line(candidates))
     return Readings(
         lines,
         advice,
@@ -289,6 +335,77 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
         has_every_account,
         machine,
     )
+
+
+def start_on(agent_type: str, accounts: list[Account], log: Path) -> int:
+    """Prints the Claude account to start an agent of the type on, as at each account's newest reading, and logs the
+    account that it names, so that the next call counts the agent."""
+    runs = agent_log.read_runs(log.parent / "agents.jsonl")
+    earlier_runs = run_minutes_by_type(runs)
+    orchestrators = own_account(accounts, os.environ)
+    transcript = orchestrator_transcript(log.parent / "state.md", paths.main_checkout())
+    orchestrator_periods = agent_log.session_periods(transcript) if transcript else []
+    candidates: list[account_room.Candidate] = []
+    for account in accounts:
+        readings = account_readings(log, account["name"]) if log.exists() else []
+        if account["tool"] != "claude" or not readings:
+            continue
+        reading_time = dt.datetime.fromisoformat(readings[-1]["at"])
+        if now() - reading_time > OLDEST_START_READING:
+            continue
+        is_orchestrators = orchestrators is not None and orchestrators["name"] == account["name"]
+        orchestrator = orchestrator_periods if is_orchestrators else []
+        room = room_at_reading(account["name"], readings, runs, log, orchestrator)
+        fitting = advise(room, agent_types("claude"), earlier_runs, reading_time).fitting
+        candidates.append(account_room.Candidate(account["name"], fitting, room.meters, is_orchestrators))
+    if not candidates:
+        minutes = OLDEST_START_READING.total_seconds() / 60
+        print(
+            f"error: no Claude account has a reading from the last {minutes:g} minutes. Run scripts/loop/meter, and "
+            "then scripts/loop/meter --start-on again.",
+            file=sys.stderr,
+        )
+        return 1
+    named = account_room.account_for(agent_type, candidates)
+    if named is not None:
+        entry = {"at": now().isoformat(timespec="seconds"), "start_on": named, "type": agent_type}
+        with log.open("a") as handle:
+            handle.write(json.dumps(entry) + "\n")
+    print(named or "no account")
+    return 0
+
+
+def room_at_reading(
+    account: str,
+    readings: list[dict[str, Any]],
+    runs: list[agent_log.AgentRun],
+    log: Path,
+    orchestrator: list[agent_log.Period],
+) -> account_room.Room:
+    """The account's room at its newest reading, with the agents that ran then, and each agent that started on it since
+    then or that --start-on named it for since then."""
+    newest = readings[-1]
+    reading_time = dt.datetime.fromisoformat(newest["at"])
+    meters = newest["meters"]
+    per_agent_minute = {name: last_measured(readings, name) for name in meters}
+    running: list[account_room.Running] = []
+    started: list[tuple[dt.datetime, str]] = []
+    for run in runs:
+        if run.start.get("account") != account:
+            continue
+        if agent_log.started(run) > reading_time:
+            started.append((agent_log.started(run), run.start["type"]))
+        elif is_running(run) or (run.end is not None and dt.datetime.fromisoformat(run.end["at"]) > reading_time):
+            minutes = (reading_time - agent_log.started(run)).total_seconds() / 60
+            running.append(account_room.Running(run.start["type"], minutes))
+    entries = (json.loads(line) for line in log.read_text().splitlines())
+    namings = [
+        (dt.datetime.fromisoformat(entry["at"]), entry["type"]) for entry in entries if entry.get("start_on") == account
+    ]
+    named = [(at, agent_type) for at, agent_type in namings if at >= reading_time]
+    running += account_room.agents_since_reading(started, named)
+    share = account_room.working_share(orchestrator, reading_time)
+    return account_room.Room(meters, per_agent_minute, running, share)
 
 
 def read_meters(account: Account, reading_time: dt.datetime) -> tuple[dict[str, Meter], list[str]]:
@@ -381,76 +498,127 @@ def codex_meter(window: dict[str, Any], reading_time: dt.datetime) -> Meter:
     return {"used": used, "resets": reset.isoformat() if reset else None}
 
 
-def last_reading(log: Path, account: str) -> dict[str, Any] | None:
-    for line in reversed(log.read_text().splitlines()):
-        entry: dict[str, Any] = json.loads(line)
-        if entry.get("account") == account:
-            return entry
-    return None
+def run_minutes_by_type(runs: list[agent_log.AgentRun]) -> dict[str, list[float]]:
+    """The minutes of the runs that ended, by type."""
+    minutes: dict[str, list[float]] = {}
+    for run in runs:
+        if run.end is not None:
+            minutes.setdefault(run.start["type"], []).append(float(run.end["minutes"]))
+    return minutes
 
 
-def rate_per_minute(previous: dict[str, Any] | None, current: dict[str, Any]) -> float | None:
-    """How fast the session meter rose between two readings of the same window, in percent per minute, or None."""
-    if not previous or not is_same_session_window(previous, current):
-        return None
-    interval = dt.datetime.fromisoformat(current["at"]) - dt.datetime.fromisoformat(previous["at"])
-    if interval < SHORTEST_RATE_INTERVAL:
-        return None
-    used = float(current["meters"]["session"]["used"] - previous["meters"]["session"]["used"])
-    return max(0.0, used / (interval.total_seconds() / 60))
+def agent_types(tool: str) -> list[str]:
+    """The agent types that an account of the tool can start: those in .claude/agents for Claude, and codex for
+    Codex, as agents.jsonl names a run of Codex."""
+    if tool == "codex":
+        return ["codex"]
+    return sorted(file.stem for file in agent_log.AGENTS_FOLDER.glob("*.md"))
 
 
-def is_held_at_session_stop(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
-    """Whether the session meter reached its stop earlier in the current window. It stays at its stop until the reset,
-    because otherwise a rate that falls once the agents finish would lift the stop."""
-    if not previous or "session" not in previous.get("meters_at_stop", []):
-        return False
-    return is_same_session_window(previous, current)
+def read_room(
+    account: str,
+    meters: dict[str, Meter],
+    reading_time: dt.datetime,
+    log: Path,
+    runs: list[agent_log.AgentRun],
+    orchestrator: list[agent_log.Period],
+) -> tuple[account_room.Room, dict[str, float]]:
+    """The account's room, and the usage per agent-minute that the reading measured. orchestrator holds the periods
+    when the orchestrator worked if the account is its own."""
+    readings = account_readings(log, account)
+    measured: dict[str, float] = {}
+    earlier = next((entry for entry in reversed(readings) if is_measuring_base(entry, reading_time)), None)
+    if earlier is not None:
+        since = dt.datetime.fromisoformat(earlier["at"])
+        minutes = agent_minutes(runs, account, since, reading_time, log.parent / "runs")
+        minutes += agent_log.minutes_after(orchestrator, since)
+        measured = account_room.measured_per_agent_minute(meters, earlier["meters"], minutes)
+    per_agent_minute = {name: measured.get(name) or last_measured(readings, name) for name in meters}
+    running = [
+        account_room.Running(run.start["type"], (reading_time - agent_log.started(run)).total_seconds() / 60)
+        for run in runs
+        if run.start.get("account") == account and is_running(run)
+    ]
+    share = account_room.working_share(orchestrator, reading_time)
+    return account_room.Room(meters, per_agent_minute, running, share), measured
 
 
-def is_same_session_window(previous: dict[str, Any], current: dict[str, Any]) -> bool:
-    before, after = previous["meters"].get("session"), current["meters"].get("session")
-    if not before or not after or before["resets"] is None or after["resets"] is None:
-        return False
-    drift = dt.datetime.fromisoformat(after["resets"]) - dt.datetime.fromisoformat(before["resets"])
-    return abs(drift) <= SAME_WINDOW_DRIFT
+def account_readings(log: Path, account: str) -> list[dict[str, Any]]:
+    """The account's readings in the log, oldest first."""
+    entries = (json.loads(line) for line in log.read_text().splitlines())
+    return [entry for entry in entries if entry.get("account") == account]
+
+
+def is_measuring_base(entry: dict[str, Any], reading_time: dt.datetime) -> bool:
+    age = reading_time - dt.datetime.fromisoformat(entry["at"])
+    return USAGE_PERIOD <= age <= LONGEST_READING_GAP
+
+
+def agent_minutes(
+    runs: list[agent_log.AgentRun], account: str, since: dt.datetime, reading_time: dt.datetime, runs_folder: Path
+) -> float:
+    """The minutes that the agents on the account worked since the time. An agent without an end line counts while its
+    process runs."""
+    minutes = 0.0
+    for run in runs:
+        if run.start.get("account") != account:
+            continue
+        if run.end is not None:
+            minutes += agent_log.minutes_after(agent_log.working_periods(run, {}, runs_folder), since)
+        elif is_running(run):
+            minutes += agent_log.minutes_after([(agent_log.started(run), reading_time)], since)
+    return minutes
+
+
+def last_measured(readings: list[dict[str, Any]], meter: str) -> float:
+    """The newest usage per agent-minute of the meter in the readings, or the one before the meter measures any."""
+    for entry in reversed(readings):
+        measured = entry.get("per_agent_minute", {}).get(meter)
+        if measured is not None:
+            return float(measured)
+    return account_room.first_per_agent_minute(meter)
 
 
 def advise(
-    meters: dict[str, Meter], rate: float | None, reading_time: dt.datetime, is_held_at_session_stop: bool
+    room: account_room.Room, types: list[str], runs: dict[str, list[float]], reading_time: dt.datetime
 ) -> Advice:
-    stop_at = 100.0 - max(STOP_FLOOR_PERCENT, (DEFAULT_RATE if rate is None else rate) * STOP_MINUTES_OF_USAGE)
-    at_stop = [name for name, meter in meters.items() if meter["used"] >= stop_percent(name, stop_at)]
-    if is_held_at_session_stop and "session" not in at_stop:
-        at_stop.append("session")
-    if not at_stop:
-        state = state_before_the_stops(meters, stop_at)
-        wait = before_the_stop_point(READ_EVERY_SECONDS[state], meters.get("session"), rate, stop_at)
-        return Advice(state, stop_at, wait, [])
-    parking = [name for name in at_stop if name != "session" and is_far_from_reset(meters[name], reading_time)]
-    # The account waits for the last reset of the meters that hold it. An unknown reset could be the last.
-    waiting_for = max(parking or at_stop, key=lambda name: reset_time(meters[name]) or LATEST_TIME)
-    state = "parked" if parking else "stop"
-    return Advice(state, stop_at, wait_for_reset(meters[waiting_for], reading_time), at_stop)
+    parking = [
+        name
+        for name, meter in room.meters.items()
+        if name != account_room.SESSION
+        and meter["used"] >= account_room.WEEK_LIMIT_PERCENT
+        and is_far_from_reset(meter, reading_time)
+    ]
+    if parking:
+        # The account waits for the last reset of the meters that hold it. An unknown reset could be the last.
+        waiting_for = max(parking, key=lambda name: reset_time(room.meters[name]) or LATEST_TIME)
+        return Advice("parked", wait_for_reset(room.meters[waiting_for], reading_time), [])
+    fitting = account_room.fitting_types(room, types, runs, reading_time)
+    if not fitting:
+        return Advice("stop", wait_at_stop(room, types, runs, reading_time), [])
+    state = "go" if fitting == types else "some"
+    # A reading after the advice changed comes too late to stop anything, so the next one comes before half the time
+    # until it may change.
+    until_change = account_room.minutes_until_change(room, fitting, runs, reading_time) * 60 / 2
+    wait = int(max(SHORTEST_WAIT_SECONDS, min(READ_EVERY_SECONDS[state], until_change)))
+    return Advice("go" if state == "go" else ", ".join(fitting), wait, fitting)
+
+
+def wait_at_stop(
+    room: account_room.Room, types: list[str], runs: dict[str, list[float]], reading_time: dt.datetime
+) -> int:
+    """The wait until the last reset of the meters on which the shortest type doesn't fit, or a shorter one while agents
+    run on the account, because the room that they need comes back as they end."""
+    shortest = min(types, key=lambda agent_type: account_room.run_minutes(agent_type, runs))
+    full = [name for name in room.meters if not account_room.fits(shortest, name, room, runs, reading_time)]
+    waiting_for = max(full, key=lambda name: reset_time(room.meters[name]) or LATEST_TIME)
+    wait = wait_for_reset(room.meters[waiting_for], reading_time)
+    return min(wait, READ_EVERY_SECONDS["some"]) if room.running else wait
 
 
 def is_far_from_reset(meter: Meter, reading_time: dt.datetime) -> bool:
     reset = reset_time(meter)
     return reset is None or reset - reading_time > LONGEST_STOP
-
-
-def stop_percent(name: str, session_stop_at: float) -> float:
-    return session_stop_at if name == "session" else WEEK_STOP_PERCENT
-
-
-def state_before_the_stops(meters: dict[str, Meter], stop_at: float) -> str:
-    for name, meter in meters.items():
-        margin = NEAR_MARGIN_PERCENT if name == "session" else WEEK_NEAR_MARGIN_PERCENT
-        if meter["used"] >= stop_percent(name, stop_at) - margin:
-            return "near"
-    if any(meter["used"] >= WATCH_PERCENT for meter in meters.values()):
-        return "watch"
-    return "go"
 
 
 def reset_time(meter: Meter) -> dt.datetime | None:
@@ -464,26 +632,30 @@ def wait_for_reset(meter: Meter, reading_time: dt.datetime) -> int:
     return max(SHORTEST_WAIT_SECONDS, int((reset - reading_time).total_seconds()) + AFTER_RESET_SECONDS)
 
 
-def before_the_stop_point(wait: int, session: Meter | None, rate: float | None, stop_at: float) -> int:
-    """Shortens a wait so that the next reading comes before half the room to the stop point is used, because a
-    reading after the stop point comes too late to stop anything."""
-    if not session:
-        return wait
-    # A rate of 0 would never reach the stop point.
-    per_minute = rate or DEFAULT_RATE
-    seconds_to_stop = max(0.0, stop_at - session["used"]) / per_minute * 60
-    return int(max(SHORTEST_WAIT_SECONDS, min(wait, seconds_to_stop / 2)))
-
-
 def account_line(
-    name: str, meters: dict[str, Meter], rate: float | None, advice: Advice, notes: list[str], reading_time: dt.datetime
+    name: str,
+    meters: dict[str, Meter],
+    per_agent_minute: dict[str, float],
+    advice: Advice,
+    notes: list[str],
+    reading_time: dt.datetime,
 ) -> str:
     parts = [f"{name} {reading_time:%H:%M}"]
     parts += [f"{meter_name} {describe(meter, reading_time)}" for meter_name, meter in meters.items()]
-    if "session" in meters:
-        parts.append("rate unknown" if rate is None else f"rate {rate:.2f}%/min")
-        parts.append(f"stop at {advice.stop_at:.0f}%")
-    return " | ".join([*parts, *notes, advice.state])
+    usage = ", ".join(f"{meter_name} {percent:.2g}%" for meter_name, percent in per_agent_minute.items())
+    parts.append(f"per agent-minute {usage}")
+    return " | ".join([*parts, *notes, advice.text])
+
+
+def start_line(candidates: list[account_room.Candidate]) -> str:
+    """The line that names the account to start each type on, other than the auditor, which starts on the
+    orchestrator's own account."""
+    types = [agent_type for agent_type in agent_types("claude") if agent_type != AUDITOR]
+    parts = ["start on"]
+    for agent_type in types:
+        account = account_room.account_for(agent_type, candidates)
+        parts.append(f"{agent_type} {account or 'no account'}")
+    return " | ".join(parts)
 
 
 def describe(meter: Meter, reading_time: dt.datetime) -> str:
@@ -590,10 +762,15 @@ def agents_line(agents: list[Agent], thresholds: dict[str, int]) -> str:
 
 
 def orchestrator_context(state_file: Path, checkout: Path) -> int | None:
+    transcript = orchestrator_transcript(state_file, checkout)
+    return None if transcript is None else context_tokens(transcript)
+
+
+def orchestrator_transcript(state_file: Path, checkout: Path) -> Path | None:
     session = session_in_state_file(state_file)
     if session is None:
         return None
-    return context_tokens(paths.claude_project_folder(checkout) / f"{session}.jsonl")
+    return paths.claude_project_folder(checkout) / f"{session}.jsonl"
 
 
 def session_in_state_file(state_file: Path) -> str | None:

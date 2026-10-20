@@ -186,21 +186,32 @@ to hand off its work, so that you can plan the agent that takes over. Start it a
 ends.
 
 Your own account is the Claude account in `.loop/accounts.json` whose `env` values match this session's
-environment, such as `CLAUDE_CONFIG_DIR`. For each builder and researcher, and for each reviewer of a pull request,
-choose the account whose line has the lowest `week` percentage, among the accounts whose advice lets you start the
-agent. A Codex account builds only the kinds `research` and `other`. Each reviewer of a pull request, each builder of
-the type `builder-deep`, and each builder or researcher that takes over a hand-off can run only on a Claude account.
-Start the auditor, and each reviewer that reviews no pull request, such as the reviewer of a release, on your own
-account, in your session. Each account's advice says what you can start on that account:
+environment, such as `CLAUDE_CONFIG_DIR`. Each account's advice names the agent types that the account has room for:
+those whose long run, as `scripts/loop/meter --help` defines it, fits in what is left of both its 5-hour and weekly
+limits, after subtracting what its running agents still need. On your own account, the advice also leaves room for the
+usage that you still need until the weekly reset.
 
-- **go:** start any agent.
-- **watch:** keep the number of agents that run on the account from growing, and start no auditor.
-- **near:** start only reviewers, and agents for the issues that fit the types `builder-small` or `researcher`.
+- **go:** start an agent of any type.
+- **a list of types,** such as `builder-small, researcher, reviewer`: start only agents of those types.
 - **stop:** start nothing on the account.
 - **parked:** start nothing on the account. If it's your own account, also delete the heartbeat, because the meter
   wakes you a minute after the reset instead. Schedule the heartbeat again then.
 - **no reading:** start nothing on the account, and fix what the account's line names, or ask the maintainer if the
   fix needs them.
+
+The line after the accounts starts with `start on`, and names the Claude account for each type, or `no account`.
+Choose the account of each builder and researcher, and of each reviewer of a pull request, with
+`scripts/loop/meter --start-on <type>`, and start the agent on the account that it prints. It names the account as
+the `start on` line does, from the same reading, but it counts each agent that it named an account for since then.
+So one pass starts only as many agents on each account as fit. If it prints `no account`, start no agent of that type
+on a Claude account. Start the auditor, and each reviewer that reviews no pull request, such as the reviewer of a
+release, on your own account, as an agent of your session.
+
+A Codex account builds only the kinds `research` and `other`, and only while its advice is `go`. Start a builder or
+researcher on such a Codex account without running `--start-on`, when the Codex account's `week` percentage of use is
+lower than that of the account that the `start on` line names for the agent's type. Also start it on such a Codex
+account when `--start-on` prints `no account`. Each builder of the type `builder-deep`, and each builder or researcher
+that takes over a hand-off, can run only on a Claude account.
 
 To start an agent on another account, run one of these commands as a background task. For an issue, give the line
 that `scripts/take-next-issue` printed in place of `<issue> <kind>`. The command's last line says how the run ended,

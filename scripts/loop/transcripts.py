@@ -4,6 +4,7 @@ import datetime as dt
 import json
 import re
 from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -48,7 +49,7 @@ def read_transcript(file: Path) -> tuple[list[Call], list[dt.datetime]]:
     return entry_calls(transcript_entries(file))
 
 
-def entry_calls(entries: list[dict[str, Any]]) -> tuple[list[Call], list[dt.datetime]]:
+def entry_calls(entries: Iterable[dict[str, Any]]) -> tuple[list[Call], list[dt.datetime]]:
     """The calls in a transcript's entries that hold a message, in the order that they started, and the times of the
     prompts and messages in them. A response that spans several lines repeats its message's id and usage on each line,
     so its tokens count once. Each line holds other blocks of the response, so its tool calls add up."""
