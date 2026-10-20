@@ -242,8 +242,9 @@ place, unless only they may run it, such as a login or a payment.
 When the maintainer asks for one thing, such as a test of one model, do that thing, and ask before you add a similar
 one.
 
-Before you recommend an option to the maintainer, check it against each objection that you raised earlier in the same
-thread, and against each rule that it would loosen. When the maintainer answers with a word such as yes, tell them in
+Before you recommend an option to the maintainer or pass one on, check it against each objection that you raised
+earlier in the same thread, and against each rule that it would change. When it rewords a rule, check that the new
+wording asks for the same actions in the same cases. When the maintainer answers with a word such as yes, tell them in
 one line the option that you understood them to choose and what it does, before you carry it out.
 
 Each time you write a question for the maintainer in an issue with `needs-decision`, or an agent's report names an

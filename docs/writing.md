@@ -40,7 +40,7 @@ For example, in a README for people who use an expense tracker:
 ## Claim only what is true
 
 - In docs and READMEs, mention planned work only when an open issue with the `ready` label describes it, and link to that issue.
-- Say only what you verified. If you didn't run a check, don't say that it passed.
+- State something as a fact only when you saw it in a command's output, a file or a web page, such as that a check passed.
 
 ## Write error messages
 
