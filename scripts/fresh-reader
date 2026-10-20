@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Gives a page to a reader who has seen nothing else, and prints the reader's answer: scripts/fresh-reader <reader> <page>
+# Gives a page to a reader who has seen nothing else, and prints the reader's answer:
+# scripts/fresh-reader <reader> <page> [<posted version>]
 # <reader> is the page's reader and what they want to do, such as "a developer who wants to use this project", and
 # <page> is the page's path. The reader quotes each sentence they had to read twice, each sentence they didn't need,
-# and each sentence that repeats another, with the reason. When the page was on origin/main where the branch started,
-# under this name or another, the reader also gets the lines that the branch and its uncommitted edits added or rewrote.
+# and each sentence that repeats another, with the reason. With <posted version>, the path of a file with the text that
+# the page replaces, such as the posted description of a pull request, the reader also gets the lines that the page adds
+# or rewrites compared with that file. Without it, when the page was on origin/main where the branch started, under
+# this name or another, the reader also gets the lines that the branch and its uncommitted edits added or rewrote.
 # It runs claude -p in an empty temporary folder, with --safe-mode, which keeps the login but turns off CLAUDE.md,
 # skills, plugins, hooks and MCP servers, and with no tools. If claude fails, the script runs it once more. If that run
 # fails too, it prints claude's error and exits with code 1. Once the reader answers, the script adds git's hash of the
@@ -25,20 +28,34 @@ stop() {
   exit 1
 }
 
-if (($# != 2)); then
-  stop "scripts/fresh-reader takes two arguments, the page's reader and the page's path, as in scripts/fresh-reader \"a developer who wants to use this project\" README.md, and it got $#."
+if (($# != 2 && $# != 3)); then
+  stop "scripts/fresh-reader takes two arguments, the page's reader and the page's path, as in scripts/fresh-reader \"a developer who wants to use this project\" README.md, and a third one, the path of the posted version, when the page replaces one. It got $#."
 fi
 reader=$1
 page=$2
+posted=${3:-}
 if [[ ! -f $page ]]; then
   stop "$page isn't a file. Give the page's path, such as README.md."
+fi
+if [[ -n $posted && ! -f $posted ]]; then
+  stop "$posted isn't a file. Give the path of a file with the posted version, such as the one that gh pr view <number> --json body --jq .body writes."
 fi
 
 # Outside a clone with origin/main, or for a page that git doesn't track, the reader gets the whole page and no lines.
 # Until the resolution of a merge conflict in the page is staged, git lists the page once for each stage of the
 # conflict, up to three times, and --deduplicate lists it once.
 new_lines=""
-if branch_start=$(git merge-base HEAD origin/main 2>/dev/null) &&
+if [[ -n $posted ]]; then
+  # git diff --no-index exits with code 1 when the files differ.
+  diff_status=0
+  diff=$(git -c core.quotePath=false diff --no-index --no-ext-diff --no-color --unified=0 -- "$posted" "$page" 2>&1) ||
+    diff_status=$?
+  if ((diff_status > 1)); then
+    stop "can't compare $page with $posted, because git diff failed: $diff"
+  fi
+  # The diff compares one pair of files, so each line after its first hunk header that starts with + is new.
+  new_lines=$(awk '/^@@/ { in_hunks = 1; next } in_hunks && /^\+/ { print substr($0, 2) }' <<<"$diff")
+elif branch_start=$(git merge-base HEAD origin/main 2>/dev/null) &&
   path=$(git --literal-pathspecs ls-files --full-name --deduplicate -- "$page" 2>/dev/null) && [[ -n $path ]]; then
   # git diff gets no pathspec, because with only the page's new name it can't see a rename, and the renamed page
   # would look new. --diff-filter=MR leaves out a page that the branch's start doesn't have, because all of it is new.
