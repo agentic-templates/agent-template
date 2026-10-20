@@ -29,8 +29,8 @@ run_builder.__file__ = str(RUN_BUILDER)
 importlib.machinery.SourceFileLoader("run_builder", str(RUN_BUILDER)).exec_module(run_builder)
 
 # A stand-in for gh, claude, codex and uv. It writes each call to calls.jsonl in STANDIN_DIR, with its arguments, the
-# folder it runs in, the HEAD and the names of the files in the git folder of that folder's worktree, and its
-# environment. It gives the answers in answers.json there
+# folder it runs in, the HEAD, the reason of the lock and the names of the files in the git folder of that folder's
+# worktree, and its environment. It gives the answers in answers.json there
 # under the longest start of its arguments, such as "pr create", one answer for each call, and the last one again when
 # they run out. An answer can run another program with the same arguments in the stand-in's place, print to stdout and
 # stderr, exit with a status, write files in the folder it runs in, write codex's report, and push a branch from
@@ -41,13 +41,16 @@ import json, os, sys
 folder, tool, args = os.environ["STANDIN_DIR"], os.path.basename(sys.argv[0]), sys.argv[1:]
 answers = json.load(open(os.path.join(folder, "answers.json")))[tool]
 start = max((key for key in answers if args[: len(key.split())] == key.split()), key=len)
-head, git_files = None, None
+head = lock = git_files = None
 if os.path.isfile(".git"):
     git_folder = open(".git").read().split(":", 1)[1].strip()
     head, git_files = open(os.path.join(git_folder, "HEAD")).read().strip(), sorted(os.listdir(git_folder))
+    if os.path.isfile(os.path.join(git_folder, "locked")):
+        lock = open(os.path.join(git_folder, "locked")).read().strip()
 log = os.path.join(folder, "calls.jsonl")
 with open(log, "a") as handle:
-    call = {"tool": tool, "start": start, "args": args, "cwd": os.getcwd(), "head": head, "git_files": git_files}
+    call = {"tool": tool, "start": start, "args": args, "cwd": os.getcwd(), "head": head, "lock": lock}
+    call["git_files"] = git_files
     call["env"] = dict(os.environ)
     handle.write(json.dumps(call) + "\\n")
 calls = [json.loads(line) for line in open(log)]
@@ -100,6 +103,8 @@ GIT_HOOKS = ("post-checkout", "pre-commit", "pre-push")
 SAVE_SUBJECT = "chore: save the unfinished work of a stopped session"
 # A pull request that the branch has already, as gh pr list gives it.
 OWN_PULL_REQUEST = {"number": 6, "isCrossRepository": False, "isDraft": False, "autoMergeRequest": None}
+# The reason of the lock on a run's worktree, which names the process of the run, here the tests' own
+RUN_LOCK = f"scripts/loop/run-builder (pid {os.getpid()})"
 BUILDER_FILE = "---\nname: builder\ndescription: Builds one issue.\nmodel: opus\neffort: high\n---\n\nBuild it.\n"
 
 
@@ -472,7 +477,9 @@ class ClaudeTest(RunBuilderTest):
         self.assertIn(
             'of the kind `other`, for the orchestrator of this repository\'s loop. Read only\n"Build one issue"', brief
         )
-        self.assertEqual((call["cwd"], call["head"]), (str(self.worktree), f"ref: refs/heads/{BRANCH}"))
+        self.assertEqual(
+            (call["cwd"], call["head"], call["lock"]), (str(self.worktree), f"ref: refs/heads/{BRANCH}", RUN_LOCK)
+        )
         self.assertNotIn(paths.RETROSPECTIVE_MARK, call["git_files"])
         environment = call["env"]
         self.assertEqual(environment["CLAUDE_CONFIG_DIR"], "/claude-main")

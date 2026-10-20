@@ -1,0 +1,292 @@
+#!/usr/bin/env bash
+# Tests scripts/remove-ended-worktrees on copies of it in repositories that the test makes, with a stand-in for gh.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# shellcheck source=scripts/missing-tools
+source scripts/missing-tools
+# The stand-in for gh runs the script's --jq filter with jq.
+if ! has jq https://jqlang.org/download/ "scripts/remove-ended-worktrees.test"; then
+  exit 0
+fi
+
+case_count=0
+failed_cases=0
+
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+# git looks for no repository above the temporary folder, reads none of the person's settings,
+# and commits as a stand-in person.
+export GIT_CEILING_DIRECTORIES=$base
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com
+export GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
+mkdir "$base/bin"
+
+# A stand-in for gh, first on the PATH. It answers only the command that lists a branch's merged pull requests. It
+# runs the command's --jq filter on the pull requests of the branch in TEST_MERGED_HEADS, whose lines each hold a
+# branch and the head commit of one of its merged pull requests, or fails when TEST_MERGED_HEADS is fail, as gh does
+# without the network.
+cat >"$base/bin/gh" <<'STAND_IN'
+#!/usr/bin/env bash
+if [[ $1 != pr || $2 != list || $3 != --head || "${*:5:5}" != "--state merged --json headRefOid --jq" ]]; then
+  echo "The stand-in for gh doesn't answer: gh $*" >&2
+  exit 1
+fi
+if [[ $TEST_MERGED_HEADS == fail ]]; then
+  echo "error connecting to api.github.com" >&2
+  exit 1
+fi
+pull_requests=""
+while read -r branch head; do
+  if [[ -n $branch && $branch == "$4" ]]; then
+    pull_requests+="${pull_requests:+,}{\"headRefOid\": \"$head\"}"
+  fi
+done <<<"$TEST_MERGED_HEADS"
+jq --raw-output "${10}" <<<"[$pull_requests]"
+STAND_IN
+chmod +x "$base/bin/gh"
+
+# Each case starts from a copy of this folder, because making its repositories again takes a dozen git commands. It
+# holds origin.git, the repository on GitHub, and main, the repository's main folder, with main checked out. GitHub has
+# the branch of issue 12, and main has it too. start is its first commit.
+starting_case=$base/starting-case
+git init --quiet --bare "$starting_case/origin.git"
+git init --quiet --initial-branch=main "$starting_case/main"
+mkdir "$starting_case/main/scripts"
+cp scripts/remove-ended-worktrees "$starting_case/main/scripts/"
+printf 'January: 120\n' >"$starting_case/main/totals.txt"
+git -C "$starting_case/main" add --all
+git -C "$starting_case/main" commit --quiet -m "feat: total the expenses"
+git -C "$starting_case/main" remote add origin "$starting_case/origin.git"
+git -C "$starting_case/main" push --quiet origin main main:12-fix-totals
+git -C "$starting_case/main" fetch --quiet origin
+git -C "$starting_case/main" branch --quiet --track 12-fix-totals origin/12-fix-totals
+start=$(git -C "$starting_case/main" rev-parse HEAD)
+
+# A process that has ended, whose id a lock can name
+true &
+ended_process=$!
+wait "$ended_process"
+
+# Makes a copy of the starting folder for a case, and sets case_dir and worktrees to it and its folder of worktrees:
+# new_case
+new_case() {
+  case_dir=$(mktemp -d "$base/case.XXXXXX")
+  cp -R "$starting_case/." "$case_dir"
+  git -C "$case_dir/main" remote set-url origin "$case_dir/origin.git"
+  worktrees=$case_dir/main/.claude/worktrees
+}
+
+# Adds a worktree in the main folder's .claude/worktrees with a branch checked out, or with a commit and no branch:
+# add_worktree <name> <branch or commit>
+add_worktree() {
+  if [[ $2 == "$start" ]]; then
+    git -C "$case_dir/main" worktree add --quiet --detach "$worktrees/$1" "$2"
+  else
+    git -C "$case_dir/main" worktree add --quiet "$worktrees/$1" "$2"
+  fi
+}
+
+# Commits a line in a worktree: commit_line <name> <line>
+commit_line() {
+  printf '%s\n' "$2" >>"$worktrees/$1/totals.txt"
+  git -C "$worktrees/$1" commit --quiet -am "feat: add a line"
+}
+
+# Runs the copy of scripts/remove-ended-worktrees with its arguments, and sets status and output, with the merged pull
+# requests in merged_heads, or fail: run_remove_ended_worktrees [<argument>...]
+run_remove_ended_worktrees() {
+  status=0
+  output=$(TEST_MERGED_HEADS=$merged_heads PATH=$base/bin:$PATH "$case_dir/main/scripts/remove-ended-worktrees" "$@" 2>&1) ||
+    status=$?
+}
+merged_heads=""
+
+# Starts a case: begin_case <description>
+begin_case() {
+  description=$1
+  case_count=$((case_count + 1))
+  is_case_failed=""
+}
+
+# Prints an error for the case: report <what's wrong>
+report() {
+  echo "error: $description, $1" >&2
+  if [[ -z $is_case_failed ]]; then
+    failed_cases=$((failed_cases + 1))
+    is_case_failed=yes
+  fi
+}
+
+# Checks the script's exit code and output: expect_result <exit code> <output>
+expect_result() {
+  if [[ $status != "$1" || $output != "$2" ]]; then
+    report "scripts/remove-ended-worktrees must exit with code $1 and print \"$2\", but it exited with code $status and printed \"$output\"."
+  fi
+}
+
+# Checks a value: expect_equal <what the value is> <value> <expected value>
+expect_equal() {
+  if [[ $2 != "$3" ]]; then
+    report "$1 must be \"$3\", but it's \"$2\"."
+  fi
+}
+
+# Prints yes if a folder exists, and no if it doesn't: exists <path>
+exists() {
+  if [[ -e $1 ]]; then
+    echo yes
+  else
+    echo no
+  fi
+}
+
+begin_case "When an ended agent's worktree has commits that are all on GitHub"
+new_case
+add_worktree agent-1 12-fix-totals
+commit_line agent-1 "February: 80"
+git -C "$worktrees/agent-1" push --quiet origin 12-fix-totals
+run_remove_ended_worktrees
+expect_result 0 "Removed $worktrees/agent-1."
+expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" no
+expect_equal "the branch" "$(git -C "$case_dir/main" rev-parse 12-fix-totals)" \
+  "$(git -C "$case_dir/origin.git" rev-parse 12-fix-totals)"
+
+begin_case "When an ended agent's worktree has no branch, and its commit is on main"
+new_case
+add_worktree agent-1 "$start"
+run_remove_ended_worktrees
+expect_result 0 "Removed $worktrees/agent-1."
+expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" no
+
+begin_case "When a worktree's lock names a process that has ended"
+new_case
+add_worktree agent-1 12-fix-totals
+git -C "$case_dir/main" worktree lock --reason "claude agent agent-1 (pid $ended_process)" "$worktrees/agent-1"
+run_remove_ended_worktrees
+expect_result 0 "Removed $worktrees/agent-1."
+expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" no
+
+begin_case "When a worktree's lock names a process that still runs"
+new_case
+add_worktree agent-1 12-fix-totals
+git -C "$case_dir/main" worktree lock --reason "claude agent agent-1 (pid $$)" "$worktrees/agent-1"
+run_remove_ended_worktrees
+expect_result 0 "Left $worktrees/agent-1, because its agent may still run, because its lock names process $$, which still runs: claude agent agent-1 (pid $$)"
+expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" yes
+
+begin_case "When a worktree's lock names no process"
+new_case
+add_worktree agent-1 12-fix-totals
+git -C "$case_dir/main" worktree lock --reason "the maintainer keeps it" "$worktrees/agent-1"
+run_remove_ended_worktrees
+expect_result 0 "Left $worktrees/agent-1, because it's locked, and the lock names no process: the maintainer keeps it"
+expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" yes
+
+begin_case "When a worktree's lock gives no reason"
+new_case
+add_worktree agent-1 12-fix-totals
+git -C "$case_dir/main" worktree lock "$worktrees/agent-1"
+run_remove_ended_worktrees
+expect_result 0 "Left $worktrees/agent-1, because it's locked, and the lock gives no reason."
+expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" yes
+
+begin_case "When a worktree has a change that isn't committed"
+new_case
+add_worktree agent-1 12-fix-totals
+printf 'February: 80\n' >>"$worktrees/agent-1/totals.txt"
+run_remove_ended_worktrees
+expect_result 0 "Left $worktrees/agent-1, because it has changes that aren't committed."
+expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" yes
+
+begin_case "When a worktree has an untracked file"
+new_case
+add_worktree agent-1 12-fix-totals
+printf 'Round to whole cents.\n' >"$worktrees/agent-1/notes.txt"
+run_remove_ended_worktrees
+expect_result 0 "Left $worktrees/agent-1, because it has changes that aren't committed."
+expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" yes
+
+begin_case "When a worktree has a commit that is only local"
+new_case
+add_worktree agent-1 12-fix-totals
+commit_line agent-1 "February: 80"
+run_remove_ended_worktrees
+expect_result 0 "Left $worktrees/agent-1, because it has commits that are on no branch of origin and in no merged pull request."
+expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" yes
+
+begin_case "When a worktree's commit is only on a branch of a remote other than origin"
+new_case
+add_worktree agent-1 12-fix-totals
+commit_line agent-1 "February: 80"
+git init --quiet --bare "$case_dir/fork.git"
+git -C "$case_dir/main" remote add fork "$case_dir/fork.git"
+git -C "$worktrees/agent-1" push --quiet fork 12-fix-totals
+git -C "$case_dir/main" fetch --quiet fork
+run_remove_ended_worktrees
+expect_result 0 "Left $worktrees/agent-1, because it has commits that are on no branch of origin and in no merged pull request."
+expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" yes
+
+begin_case "When a worktree's commit is only in a ref under refs/remotes that is no branch of origin"
+new_case
+add_worktree agent-1 12-fix-totals
+commit_line agent-1 "February: 80"
+git -C "$case_dir/main" update-ref refs/remotes/pr342 "$(git -C "$worktrees/agent-1" rev-parse HEAD)"
+run_remove_ended_worktrees
+expect_result 0 "Left $worktrees/agent-1, because it has commits that are on no branch of origin and in no merged pull request."
+expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" yes
+
+begin_case "When a worktree's commits are on no branch of origin, and its last commit is the head of a merged pull request"
+new_case
+add_worktree agent-1 12-fix-totals
+commit_line agent-1 "February: 80"
+merged_heads="12-fix-totals 1111111111111111111111111111111111111111
+12-fix-totals $(git -C "$worktrees/agent-1" rev-parse HEAD)
+13-export-csv $start"
+run_remove_ended_worktrees
+merged_heads=""
+expect_result 0 "Removed $worktrees/agent-1."
+expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" no
+
+begin_case "When a worktree has a commit after the head of its branch's merged pull request"
+new_case
+add_worktree agent-1 12-fix-totals
+commit_line agent-1 "February: 80"
+merged_heads="12-fix-totals $(git -C "$worktrees/agent-1" rev-parse HEAD)"
+commit_line agent-1 "March: 95"
+run_remove_ended_worktrees
+merged_heads=""
+expect_result 0 "Left $worktrees/agent-1, because it has commits that are on no branch of origin and in no merged pull request."
+expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" yes
+
+begin_case "When gh can't list the merged pull requests of a worktree's branch"
+new_case
+add_worktree agent-1 12-fix-totals
+commit_line agent-1 "February: 80"
+merged_heads=fail
+run_remove_ended_worktrees
+merged_heads=""
+expect_result 0 "Left $worktrees/agent-1, because gh can't tell whether its branch has a merged pull request: error connecting to api.github.com"
+expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" yes
+
+begin_case "When a worktree is outside .claude/worktrees"
+new_case
+git -C "$case_dir/main" worktree add --quiet "$case_dir/elsewhere" 12-fix-totals
+run_remove_ended_worktrees
+expect_result 0 ""
+expect_equal "whether the worktree exists" "$(exists "$case_dir/elsewhere")" yes
+expect_equal "whether the main folder exists" "$(exists "$case_dir/main/totals.txt")" yes
+
+begin_case "When it gets an argument"
+new_case
+add_worktree agent-1 12-fix-totals
+run_remove_ended_worktrees agent-1
+expect_result 1 "error: scripts/remove-ended-worktrees takes no argument, and it got 1."
+expect_equal "whether the worktree exists" "$(exists "$worktrees/agent-1")" yes
+
+if ((failed_cases > 0)); then
+  echo "error: $failed_cases of the $case_count cases in scripts/remove-ended-worktrees.test failed. The errors above say which." >&2
+  exit 1
+fi
+echo "scripts/remove-ended-worktrees.test passed. Cases: $case_count."
