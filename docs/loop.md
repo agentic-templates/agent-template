@@ -162,7 +162,7 @@ heartbeat and schedule it again, because a recurring prompt ends 7 days after yo
 
 For each account in `.loop/accounts.json`, `scripts/loop/meter` prints a line that ends with the account's advice.
 The meter's last line starts with `machine`, and gives your context size and whether a retrospective is due. Each
-part of it that starts with `audit due:` names a finding for a focused audit. The line before it starts with
+of its parts between ` | ` that starts with `audit due:` names a finding for a focused audit. The line before it starts with
 `agents`, and gives the context size of each agent that runs. Run the meter once in each pass, before you launch.
 
 `scripts/loop/meter --wake` ends, and so wakes you, when an account's advice changes, and when a hook tells an agent
@@ -233,8 +233,8 @@ request is still open.
 For each part of the meter's `machine` line that starts with `audit due:`, start a focused audit of its finding,
 without waiting for the next retrospective:
 
-1. Skip a finding if the state file lists an audit whose finding has the same subject, and whose issue is still open.
-   A finding's subject is one of these:
+1. Skip a finding if the state file lists an audit of a finding with the same subject, and the audit's issue is still
+   open. A finding's subject is one of these:
    - a build, which the finding names by the builder's type and issue, such as `builder #208`
    - the builders' waits for room on the machine
    - the time of `scripts/check`
