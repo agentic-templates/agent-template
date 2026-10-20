@@ -44,8 +44,11 @@ describes:
 - On your own account, start it on the old builder's pull request, or on its issue if it opened none, and put the
   message in its prompt after the first line.
 - On another account, write the message to a file in a folder of your own in `.loop/`. Then run the command that
-  "Read the meter" gives for the account, with `<issue> other` as its first arguments, where `<issue>` is the old
-  builder's issue, and add `--message <file>`.
+  "Read the meter" gives for the account, and add `--message <file>`. For a builder that fixes a reviewer's errors,
+  give the command `<issue> other` as its first arguments, where `<issue>` is the old builder's issue. For a builder
+  that takes over a hand-off, give the command the old builder's own `<issue> <kind>` line instead, such as
+  `12 left behind 34`, which the `issue` and `kind` of the old builder's start line in `.loop/agents.jsonl` give. If
+  that start line has no kind, because the old builder started on a pull request, give `<issue> other` there too.
 
 Start the prompt of each agent of the types `builder`, `builder-small`, `builder-deep`, `researcher` and `reviewer`
 with a line that names its work: for an issue, the line that `scripts/take-next-issue` printed, and for a pull
@@ -177,8 +180,9 @@ ends.
 Your own account is the Claude account in `.loop/accounts.json` whose `env` values match this session's
 environment, such as `CLAUDE_CONFIG_DIR`. For each builder and researcher, choose the account whose line has the
 lowest `week` percentage, among the accounts whose advice lets you start the agent. A Codex account builds only the
-kinds `research` and `other`. Start a builder of the type `builder-deep` only on a Claude account. Start reviewers
-and the auditor on your own account, in your session. Each account's advice says what you can start on that account:
+kinds `research` and `other`. Start a builder of the type `builder-deep`, and each builder that takes over a hand-off,
+only on a Claude account. Start reviewers and the auditor on your own account, in your session. Each account's advice
+says what you can start on that account:
 
 - **go:** start any agent.
 - **watch:** keep the number of agents that run on the account from growing, and start no auditor.

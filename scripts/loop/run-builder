@@ -18,7 +18,8 @@ worktree or on the local branch, and the run fails and says where they are. The 
 worktree exists already, or when the issue has needs-triage.
 
 The builder's prompt holds the issue's text. With --message, the text of the file FILE follows it there, as a message
-from the orchestrator, such as the errors that a reviewer found in the issue's pull request.
+from the orchestrator, such as the errors that a reviewer found in the issue's pull request. The script doesn't start
+when it can't read FILE as UTF-8 text, or when FILE is empty or holds only whitespace.
 
 A Claude builder builds the issue as "Build one issue" in docs/building.md describes. It sends the tokens of its
 requests to .loop/requests.jsonl, as scripts/loop/claude-with-events does.
@@ -567,11 +568,16 @@ def read_message(file: str | None) -> str:
     if file is None:
         return ""
     try:
-        return Path(file).read_text().strip()
+        message = Path(file).read_text(encoding="utf-8").strip()
     except OSError as error:
         raise Stop(
             f"can't read the message file {file}: {error.strerror}. Give the path of a file that holds the message."
         ) from error
+    except UnicodeDecodeError as error:
+        raise Stop(f"the message file {file} isn't UTF-8 text. Save the message as UTF-8, and try again.") from error
+    if not message:
+        raise Stop(f"the message file {file} holds no message. Write the message in it, or leave out --message.")
+    return message
 
 
 def write_brief(issue: dict[str, Any], kind: str, message: str, run_brief: str, folders: Folders) -> str:

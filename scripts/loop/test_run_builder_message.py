@@ -40,3 +40,27 @@ class MessageTest(RunBuilderTest):
             "holds the message.\n",
         )
         self.assertEqual(self.calls("gh"), [])
+
+    def test_stops_when_the_message_file_is_empty_or_holds_only_whitespace(self) -> None:
+        message = self.root / "message.md"
+        for text in ("", " \n\t\n"):
+            with self.subTest(text=text):
+                message.write_text(text)
+                status, _, errors = self.run_builder("--tool", "claude", "--message", str(message))
+                self.assertEqual(status, 1)
+                self.assertEqual(
+                    errors,
+                    f"error: the message file {message} holds no message. Write the message in it, or leave out "
+                    "--message.\n",
+                )
+                self.assertEqual(self.calls("gh"), [])
+
+    def test_stops_when_the_message_file_is_not_utf_8_text(self) -> None:
+        message = self.root / "message.md"
+        message.write_bytes("Fix the errors in pull request #7 — all of them.".encode("utf-16"))
+        status, _, errors = self.run_builder("--tool", "claude", "--message", str(message))
+        self.assertEqual(status, 1)
+        self.assertEqual(
+            errors, f"error: the message file {message} isn't UTF-8 text. Save the message as UTF-8, and try again.\n"
+        )
+        self.assertEqual(self.calls("gh"), [])
