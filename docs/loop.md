@@ -230,8 +230,8 @@ request is still open.
 
 ## Start a focused audit
 
-For each finding after `audit due:` on the meter's `machine` line, start a focused audit, without waiting for the next
-retrospective:
+For each part of the meter's `machine` line that starts with `audit due:`, start a focused audit of its finding,
+without waiting for the next retrospective:
 
 1. Skip a finding if the state file lists an audit whose finding has the same subject, and whose issue is still open.
    A finding's subject is one of these:
