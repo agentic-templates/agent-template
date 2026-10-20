@@ -42,7 +42,7 @@ You need:
 
 4. To get the orchestrator's questions as push notifications on your phone, install the Claude app on the phone and sign in with your Claude Code account. After you start the orchestrator, as the next section describes, type `/remote-control` in its session, and turn on "Push when Claude decides" in `/config`. [Remote Control](https://code.claude.com/docs/en/remote-control) describes both.
 5. To let the orchestrator shrink its own context when it grows long, write a compaction sender in your own Claude Code settings, such as `~/.claude/settings.json`. The sender is a hook that runs on both `Stop` and `StopFailure`. When the clone's folder has `.loop/compact-request.txt`, and the file's first line is the `session_id` of the hook's input, the hook types `/compact` into that session with a tool that types into a terminal, such as `tmux send-keys` when you run the orchestrator in tmux. Without a sender, the orchestrator asks you to type `/compact` yourself.
-6. If you want the agents to build on more Claude or Codex accounts than the one that Claude Code is signed in to, list all of them in `.loop/accounts.json`, that one included, as `scripts/loop/meter --help` describes.
+6. If you want the agents to build on more Claude or Codex accounts than the one that Claude Code is signed in to, list every account in `.loop/accounts.json`, including that one, as `scripts/loop/meter --help` describes.
 
 ## From a goal to a release
 
@@ -91,7 +91,7 @@ scripts/loop/claude-with-events --resume
 Issues and pull requests are public, so the orchestrator keeps a security problem in a private security advisory until a release fixes it. GitHub opens an advisory for each private report too.
 
 1. Ask the orchestrator to fix the problem. It builds the fix in the advisory's temporary private fork.
-2. Ask for a release right away if the severity is high or critical, or if the problem is public. Otherwise, ask within 90 days of a report, as `.github/SECURITY.md` promises reporters. Before the release, the orchestrator asks you in its session whether to include each fix in a private fork that no reviewer agent has passed.
+2. Ask for a release right away if the severity is high or critical, or if the problem is public. Otherwise, ask within 90 days of a report, as `.github/SECURITY.md` promises reporters. If a private fork holds a fix that no reviewer agent has passed, such as one that a reporter pushed, the orchestrator asks you in its session whether the release should include it.
 3. In a new session, ask "Check the security advisories." The new session checks each fix more closely than the orchestrator, whose context also holds the work of the release.
 4. Ask that session to publish only the advisories that you're sure are fixed, and only once users can install the release, because a published advisory shows attackers where to look.
 
