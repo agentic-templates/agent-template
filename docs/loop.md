@@ -196,8 +196,9 @@ environment, such as `CLAUDE_CONFIG_DIR`. Each account's advice says which agent
   wakes you a minute after the reset instead. Schedule the heartbeat again then.
 - **no reading:** start nothing on the account, and fix what the account's line names.
 
-A Codex account can take a builder or a researcher while its advice is `go`. It can't take a `builder-deep`, an agent
-that takes over a hand-off, or an agent that must open issues, such as the researcher of a focused audit.
+While its advice is `go`, a Codex account can take a builder or a researcher that `scripts/loop/run-builder --tool codex`
+accepts. It can't take a `builder-deep`, an agent that takes over a hand-off, or an agent that must open issues, such as
+the researcher of a focused audit.
 
 The line after the accounts starts with `start on`, and names the Claude account for each type, or `no account`.
 Choose the account of each builder and researcher, and of each reviewer of a pull request, in this order:
@@ -228,8 +229,7 @@ Keep your shell in the main checkout, and run git in a worktree with `git -C <wo
 hook shows you your state file and this guide after a `/clear` or a compaction only when your shell is in the main
 checkout.
 
-`scripts/hooks/hand-off` may ask you to write a request for a `/clear` sender. A `/clear` sender is a hook in the
-maintainer's own Claude Code settings that types `/clear` into your session, and then the request's second line.
+A `/clear` sender, which `scripts/hooks/hand-off` names, is a hook in the maintainer's own Claude Code settings.
 
 ## Ask the maintainer
 
