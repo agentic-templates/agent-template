@@ -136,7 +136,7 @@ from github import GitHubError, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, note_files, note_times, told_for_room
 from machine import Machine, read_machine
 from meter_waits import LONGEST_READING_GAP, READ_EVERY_SECONDS, WAKE_EVERY
-from transcripts import is_interrupted, tail_lines
+from transcripts import context_tokens, is_interrupted
 from usage import Meter, parse_usage
 
 # The period over which the meter measures the usage per agent-minute. It measures from the newest reading at least
@@ -891,30 +891,6 @@ def session_in_state_file(state_file: Path) -> str | None:
     for line in state_file.read_text().splitlines():
         if line.startswith("session:"):
             return line.removeprefix("session:").strip() or None
-    return None
-
-
-def context_tokens(transcript: Path) -> int | None:
-    """The input of the last call in a transcript, which is the session's context size, or None. A builder's events
-    hold its subagents' calls too, each with the id of the tool call that started the subagent, and those don't
-    count."""
-    if not transcript.exists():
-        return None
-    for line in reversed(tail_lines(transcript)):
-        if '"usage"' not in line:
-            continue
-        try:
-            entry = json.loads(line)
-            usage = entry["message"]["usage"]
-        except ValueError, KeyError, TypeError:
-            continue
-        if entry.get("parent_tool_use_id"):
-            continue
-        return int(
-            usage.get("input_tokens", 0)
-            + usage.get("cache_read_input_tokens", 0)
-            + usage.get("cache_creation_input_tokens", 0)
-        )
     return None
 
 

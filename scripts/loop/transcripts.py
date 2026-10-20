@@ -167,6 +167,26 @@ def is_interruption(entry: dict[str, Any]) -> bool:
     return any(str(text).startswith(INTERRUPTION) for text in texts)
 
 
+def context_tokens(transcript: Path) -> int | None:
+    """The input of the last call in a transcript, which is the session's context size, or None. A builder's events
+    hold its subagents' calls too, each with the id of the tool call that started the subagent, and those don't
+    count."""
+    if not transcript.exists():
+        return None
+    for line in reversed(tail_lines(transcript)):
+        if '"usage"' not in line:
+            continue
+        try:
+            entry = json.loads(line)
+            usage = entry["message"]["usage"]
+        except ValueError, KeyError, TypeError:
+            continue
+        if entry.get("parent_tool_use_id"):
+            continue
+        return int(sum(usage.get(key, 0) for key in INPUT_KEYS))
+    return None
+
+
 def safety_stops(entries: list[dict[str, Any]]) -> list[dt.datetime]:
     """The times in a transcript's entries at which Claude's safety classifier stopped a response. A stop in the
     request that asks for the rest of a stopped response stops the same response, so it doesn't count again."""
