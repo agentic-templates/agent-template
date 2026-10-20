@@ -407,6 +407,27 @@ git merge --quiet --no-edit main >/dev/null
 expect_check "git push" 0 ""
 git switch --quiet main
 
+# The page counts under the name that it had on origin's branch too, so a clean merge of main that renamed a page that
+# the pull request changes, and rewrote another of its lines, adds only main's line.
+git switch --quiet -c moved-page main
+sed 's/^Give each changed page to a fresh reader\.$/Give each changed page to a reader who knows nothing else./' \
+  docs/pages.md >"$base/pages.md"
+mv "$base/pages.md" docs/pages.md
+read_page docs/pages.md
+commit_all "docs: say who reads a changed page"
+git push --quiet -u origin moved-page
+on_github "$(pull_request 9 moved-page main OPEN)"
+git switch --quiet main
+git mv docs/pages.md docs/reading.md
+sed 's/^Then give the page to a reader again\.$/Then give the page to a new reader./' docs/reading.md >"$base/reading.md"
+mv "$base/reading.md" docs/reading.md
+commit_all "docs: name the pages guide for what it asks"
+git push --quiet origin main
+git switch --quiet moved-page
+git merge --quiet --no-edit main >/dev/null
+expect_check "git push" 0 ""
+git switch --quiet main
+
 # When the check can't find the pull request's commits, it has nothing to check them with: with no branch of the name
 # that --head names, in a repository without origin, and outside a git repository.
 work_in "$clone"

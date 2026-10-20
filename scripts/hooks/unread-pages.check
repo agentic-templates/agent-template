@@ -60,8 +60,13 @@ pages_with_new_text() {
 
 # Prints the lines that a page has and a commit doesn't, one to a line: added_lines <commit> <path>
 added_lines() {
-  # With -U0, each hunk holds only the lines that it removes and adds, after the header that starts with @@.
-  git diff --no-ext-diff --no-textconv --no-color --no-relative -U0 "$1" ${pages_commit:+"$pages_commit"} -- "$2" |
+  local old_path
+  old_path=$(old_page_path "$1" "$2")
+  # A page renamed since the commit needs both its names in the pathspec, because git pairs them only when it compares
+  # both, and would otherwise print every line of the page as added. With -U0, each hunk holds only the lines that it
+  # removes and adds, after the header that starts with @@.
+  git diff --no-ext-diff --no-textconv --no-color --no-relative --find-renames -U0 "$1" ${pages_commit:+"$pages_commit"} \
+    -- ${old_path:+"$old_path"} "$2" |
     awk '/^@@/ { in_hunk = 1; next } /^diff --git / { in_hunk = 0 } in_hunk && /^\+/ { print substr($0, 2) }'
 }
 
