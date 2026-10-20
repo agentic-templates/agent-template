@@ -682,7 +682,7 @@ gh_posts() {
 
 # The flags that take text, which can hold the URL of an issue of another repository, of the gh commands whose flags the
 # hooks don't list
-text_flags=" -b --body -t --title -c -F --body-file --description -n --notes --notes-file "
+text_flags=" -b --body -t --title -c -F --body-file --description -n --notes --notes-file --template "
 
 # Sets destination to the repository that a gh command posts to, as the command or git names it, or to empty when the
 # hook can't tell. gh takes the repository from the first of these that it finds:
