@@ -45,12 +45,13 @@ that you give a message, in this way:
 
 - On your own account, start a builder on the old builder's pull request, or on its issue if it opened none, and a
   reviewer on the pull request that it reviews. Put the message in the agent's prompt after the first line.
-- On another account, write the message to a file in a folder of your own in `.loop/`. Then run the command that
-  "Read the meter" gives for the account, with `--message <file>`. In place of a builder's `<issue> <kind>`, give
-  the `issue` and the `kind` of the old builder's start line in `.loop/agents.jsonl`, such as `12 left behind 34`
-  for the issue 12 and the kind `left behind 34`. Give `<issue> other` instead when the message holds a reviewer's
-  errors, or when the start line has no kind because the old builder started on a pull request. In these two cases,
-  `<issue>` is the issue that the old builder's pull request closes.
+- On another account, once no agent of your session works on the issue, write the message to a file in a folder of
+  your own in `.loop/`. Then run the command that "Read the meter" gives for the account, with `--message <file>`. In
+  place of a builder's `<issue> <kind>`, give the `issue` and the `kind` of the old builder's start line in
+  `.loop/agents.jsonl`, such as `12 left behind 34` for the issue 12 and the kind `left behind 34`. Give
+  `<issue> other` instead when the message holds a reviewer's errors, or when the start line has no kind because the
+  old builder started on a pull request. In these two cases, `<issue>` is the issue that the old builder's pull
+  request closes.
 
 Start the prompt of each agent of the types `builder`, `builder-small`, `builder-deep`, `researcher` and `reviewer`
 with a line that names its work: for an issue, the line that `scripts/take-next-issue` printed, and for a pull
