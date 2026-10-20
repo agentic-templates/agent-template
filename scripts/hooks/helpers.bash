@@ -107,7 +107,7 @@ is_orchestrator() {
 # holds the time, the check's file name and the words, with the values that could hold a secret left out, so that its
 # reader can tell a real block from a false alarm: log_block <word>...
 log_block() {
-  local log=${HOOK_BLOCK_LOG:-} line words
+  local log=${HOOK_BLOCK_LOG:-} line safe_words
   if [[ -z ${is_run_by_hook:-} ]]; then
     return 0
   fi
@@ -115,9 +115,10 @@ log_block() {
     log=$(hook_loop_folder)/blocks.log || return 0
     mkdir -p "${log%/*}" || return 0
   fi
-  line="$(date -u +%Y-%m-%dT%H:%M:%SZ) $check_name"
-  if (($# > 0)) && words=$(words_without_secrets "$@"); then
-    line+=" $words"
+  # The subshell runs date with exec, because bash 3.2 would start date in a process of its own after the subshell's.
+  line="$(exec date -u +%Y-%m-%dT%H:%M:%SZ) $check_name"
+  if (($# > 0)) && words_without_secrets "$@"; then
+    line+=" $safe_words"
   fi
   printf '%s\n' "$line" >>"$log"
 }

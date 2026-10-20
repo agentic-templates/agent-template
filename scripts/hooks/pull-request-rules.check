@@ -27,8 +27,8 @@ source "${BASH_SOURCE[0]%/*}/helpers.bash"
 source "${BASH_SOURCE[0]%/*}/../text-rules"
 
 # The folder of scripts/check-title, scripts/check-pull-request and scripts/consequential-paths, as an absolute path,
-# because the hook changes to the folder that the agent works in.
-scripts_folder=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
+# because the hook changes to the folder that the agent works in. hooks_folder in helpers.bash is absolute.
+scripts_folder=${hooks_folder%/*}
 
 no_title="Blocked: the command gives no title, so this hook can't check it. Give the title with --title."
 

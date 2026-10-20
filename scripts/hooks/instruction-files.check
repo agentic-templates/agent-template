@@ -6,10 +6,9 @@ source "${BASH_SOURCE[0]%/*}/helpers.bash"
 # shellcheck source=scripts/instruction-file-names
 source "${BASH_SOURCE[0]%/*}/../instruction-file-names"
 
-repository_root=$(CDPATH='' cd -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P)
-
 block_if_instruction_file() {
-  local path relative
+  local repository_root path relative
+  repository_root=$(CDPATH='' cd -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P)
   path=$(physical_path "$1" "${cwd:-$PWD}")
   if [[ $path != "$repository_root"/* ]]; then
     return 0

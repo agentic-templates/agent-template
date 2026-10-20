@@ -99,7 +99,7 @@ read_input
 if [[ $tool_name == Bash ]]; then
   # A relative path to a body file starts from the folder the agent works in. Cursor doesn't send that folder, so for
   # Cursor the hook's own folder counts.
-  cd -- "${cwd:-.}" 2>/dev/null || exit 0
+  cd -- "${cwd:-.}" 2>/dev/null || return 0
   written_files=()
   for_each_simple_command check_simple_command "$shell_command"
 fi

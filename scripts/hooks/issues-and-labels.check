@@ -26,21 +26,22 @@ heading_line='^ {0,3}#{1,6}([[:space:]]+(.*))?$'
 # The #s that can close a heading, after a space. Group 1 holds the text before them.
 closing_hashes='^(.*[^[:space:]])[[:space:]]+#+$'
 
-# Prints a list of words in prose, such as "bug and feature": join_words <word>...
+# Sets joined_words to a list of words in prose, such as "bug and feature": join_words <word>...
 join_words() {
-  local text="" i
+  local i
+  joined_words=""
   for ((i = 1; i <= $#; i++)); do
     if ((i > 1 && i == $#)); then
-      text+=" and "
+      joined_words+=" and "
     elif ((i > 1)); then
-      text+=", "
+      joined_words+=", "
     fi
-    text+=${!i}
+    joined_words+=${!i}
   done
-  printf '%s' "$text"
 }
 
-type_label_rule="An issue has exactly one of the type labels $(join_words "${type_labels[@]}"), chosen by what changes for users, as \"Labels\" in AGENTS.md describes."
+join_words "${type_labels[@]}"
+type_label_rule="An issue has exactly one of the type labels $joined_words, chosen by what changes for users, as \"Labels\" in AGENTS.md describes."
 
 # Succeeds if a list holds a label. GitHub matches label names in any case: has_label <label> [<label in the list>]...
 has_label() {
@@ -157,7 +158,10 @@ check_type_labels() {
   case ${#type_labels_after[@]} in
     1) return 0 ;;
     0) block "Blocked: $1 would have no type label. $type_label_rule $2" ;;
-    *) block "Blocked: $1 would have the type labels $(join_words "${type_labels_after[@]}"). $type_label_rule $3" ;;
+    *)
+      join_words "${type_labels_after[@]}"
+      block "Blocked: $1 would have the type labels $joined_words. $type_label_rule $3"
+      ;;
   esac
 }
 
@@ -181,7 +185,8 @@ check_headings() {
   if ((${#missing[@]} == 1)); then
     message="Blocked: $subject lacks the heading ${missing[0]}."
   else
-    message="Blocked: $subject lacks the headings $(join_words "${missing[@]}")."
+    join_words "${missing[@]}"
+    message="Blocked: $subject lacks the headings $joined_words."
   fi
   message+=" $heading_rule Write each heading on a line of its own, such as ## ${missing[0]//\"/}.$advice"
   if [[ -n $body_may_expand ]]; then
@@ -261,7 +266,7 @@ read_input
 if [[ $tool_name == Bash ]]; then
   # A relative path to a body file starts from the folder the agent works in, and gh finds the repository from it.
   # Cursor doesn't send that folder, so for Cursor the hook's own folder counts.
-  cd -- "${cwd:-.}" 2>/dev/null || exit 0
+  cd -- "${cwd:-.}" 2>/dev/null || return 0
   written_files=()
   for_each_simple_command check_simple_command "$shell_command"
 fi
