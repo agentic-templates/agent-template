@@ -211,9 +211,9 @@ usage that you still need until the weekly reset.
 The line after the accounts starts with `start on`, and names the Claude account for each type, or `no account`.
 Choose the account of each builder and researcher, and of each reviewer of a pull request, with
 `scripts/loop/meter --start-on <type>`, and start the agent on the account that it prints. It names the account as
-the `start on` line does, from the same reading, but it counts each agent that it named an account for since then.
-So one pass starts only as many agents on each account as fit. If it prints `no account`, start no agent of that type
-on a Claude account. Start the auditor, and each reviewer that reviews no pull request, such as the reviewer of a
+the `start on` line does, from the same reading, but counts each agent that it named an account for since then, so
+that one pass starts only as many agents on each account as fit. If it prints `no account`, start no agent of that
+type on a Claude account. Start the auditor, and each reviewer that reviews no pull request, such as the reviewer of a
 release, on your own account, as an agent of your session.
 
 A Codex account builds only the kinds `research` and `other`, and only while its advice is `go`. Start a builder or
