@@ -17,11 +17,11 @@ Triage is for ideas: anything a maintainer wants judged before deciding whether 
    - Do its claims about the project, such as how the code works, match the code and AGENTS.md? If they don't, judge the idea with the claims corrected.
 3. Give each idea one verdict:
    - **Accept:** the idea becomes an issue in the backlog, with `needs-breakdown` if it's too big for one pull request. If a closed issue covered the idea, mention that issue in the new one.
-     If an open issue meets either of these, add the idea to it instead of creating a new issue, and rewrite its body to hold both, as "Write issues, pull requests and commit messages" in `docs/writing.md` describes:
-     - The open issue covers the idea.
-     - The open issue has no assignee and no pull request, and it would change the same code or the same rule as the idea.
+     If an open issue meets either of these, add the idea to it instead of creating a new issue:
+     - It covers the idea.
+     - It has no assignee and no pull request, and it would change the same code or the same rule as the idea.
 
-     If that issue has `ready`, check that the combined issue still meets "Definition of ready" and belongs to the current goal. If it doesn't, remove `ready` and plan the issue again, as "Plan the next work" describes.
+     If that issue has `ready`, check that it still meets "Definition of ready" and belongs to the current goal. If it doesn't, plan it again, as "Plan" in `docs/loop.md` describes.
    - **Research first:** the idea can't be judged until a question is answered. It becomes an issue with `needs-decision`, blocked by a new research issue for the question.
    - **Drop:** it doesn't fit the project's direction, can't be built, isn't worth its cost, or was closed as not planned before. Nothing is created.
    - **Ask:** only the maintainer can settle it, such as an idea too vague to judge, or one that needs a decision that "Decide or ask" in AGENTS.md leaves to the maintainer.
@@ -33,11 +33,11 @@ If the maintainer's answers change the project's direction, open a pull request 
 
 ## Triage issues that others open
 
-Triage every issue that has `needs-triage` or has no type label. Judge each issue as step 2 of "Triage new ideas" describes, give it one of the verdicts below, and carry the verdict out right away, without waiting for the maintainer. In your next message to the maintainer, list each issue with its verdict.
+Triage every issue that has `needs-triage` or has no type label. Judge each issue as step 2 of "Triage new ideas" describes, give it one of the verdicts below, and carry the verdict out right away. In your next message to the maintainer, list each issue with its verdict.
 
 - **Accept:** remove `needs-triage` and give the issue its type label, plus `needs-breakdown` if it's too big.
 - **Research first:** give the issue its type label, and replace `needs-triage` with `needs-decision`. Create a research issue for the question, and mark this issue as blocked by it.
-- **Needs a decision:** only the maintainer can settle it, such as an issue that doesn't fit the project's direction. Give the issue its type label, replace `needs-triage` with `needs-decision`, and ask your question in the issue, as "Labels" describes.
+- **Needs a decision:** only the maintainer can settle it, such as an issue that doesn't fit the project's direction. Give the issue its type label, replace `needs-triage` with `needs-decision`, and ask your question as "Labels" describes.
 - **Too vague:** comment with a question that asks for the missing detail, and leave `needs-triage`. If nobody answers within two weeks, comment that the issue is closing for lack of detail, and close it as not planned.
 - **Duplicate:** close it with `gh issue close <issue> --duplicate-of <other issue>`.
 - **Question:** for a question about using the project, answer it in a comment, and close the issue. If the docs should have answered it, also open a `bug` about the docs.
@@ -59,7 +59,7 @@ If an issue came from an account that isn't a maintainer's, and its verdict is *
 
 ## Definition of ready
 
-Only an issue that a maintainer's account opened can get the `ready` label, including research issues and parents. Besides the orchestrator, an agent adds the label only to a bug that it finds and reproduces while it works on another issue, as step 4 of "Make a change" in AGENTS.md describes.
+Only an issue that a maintainer's account opened can get the `ready` label, and only while it has one type label. Agents other than the orchestrator add the label only to a bug that they find and reproduce while they work on another issue, as step 4 of "Make a change" in AGENTS.md describes.
 
 An issue can get `ready` when all of these are true:
 
