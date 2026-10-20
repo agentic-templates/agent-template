@@ -149,6 +149,7 @@ Besides the `session:` and `pid:` lines, it holds:
 - each running agent, with its issue or pull request, and its agent id or `scripts/loop/run-builder` task
 - the drafts that a reviewer has read
 - the issues whose builder stopped once
+- the focused audits, each with its finding and its issue
 - the `BLOCKED` pull requests from your last pass
 - what you do next, and the open questions
 
@@ -160,9 +161,9 @@ heartbeat and schedule it again, because a recurring prompt ends 7 days after yo
 ## Read the meter
 
 For each account in `.loop/accounts.json`, `scripts/loop/meter` prints a line that ends with the account's advice.
-Its last line starts with `machine`, and gives your context size and whether a retrospective is due. The line before
-it starts with `agents`, and gives the context size of each agent that runs. Run the meter once in each pass, before
-you launch.
+The meter's last line starts with `machine`, and gives your context size, whether a retrospective is due, and each
+finding for a focused audit, in a part that starts with `audit due:`. The line before it starts with `agents`, and
+gives the context size of each agent that runs. Run the meter once in each pass, before you launch.
 
 `scripts/loop/meter --wake` ends, and so wakes you, when an account's advice changes, and when a hook tells an agent
 to hand off its work, so that you can plan the agent that takes over. Start it again as a background task each time it
@@ -171,11 +172,12 @@ ends.
 Your own account is the Claude account in `.loop/accounts.json` whose `env` values match this session's
 environment, such as `CLAUDE_CONFIG_DIR`. In "Launch", for the builder or researcher of each issue that
 `scripts/take-next-issue` gives you, choose the account whose line has the lowest `week` percentage, among the
-accounts whose advice lets you start the agent. A Codex account builds only the kinds `research` and `other`. Start
-a builder of the type `builder-deep` only on a Claude account. Start reviewers, the auditor and each builder that needs
-more than its issue, such as one that fixes a pull request or takes over a hand-off, on your own account, in your
-session. `scripts/loop/run-builder` can't start such a builder, because it gives a builder only its issue's text. Each
-account's advice says what you can start on that account:
+accounts whose advice lets you start the agent. Start these agents on your own account instead, in your session:
+reviewers, the auditor, the researcher of a focused audit, and each builder that needs more than its issue, such as
+one that fixes a pull request or takes over a hand-off. `scripts/loop/run-builder` can't start such a builder,
+because it gives a builder only its issue's text. A Codex account builds only the kinds `research` and `other`. Start
+a builder of the type `builder-deep` only on a Claude account. Each account's advice says what you can start on that
+account:
 
 - **go:** start any agent.
 - **watch:** keep the number of agents that run on the account from growing, and start no auditor.
@@ -226,3 +228,21 @@ issue where it wrote one, send the maintainer a push notification with the issue
 
 When the meter's `machine` line says `retrospective due`, start an `auditor` agent, unless one runs or its pull
 request is still open.
+
+## Start a focused audit
+
+For each finding after `audit due:` on the meter's `machine` line, start a focused audit, without waiting for the next
+retrospective:
+
+1. Skip a finding about a build, which names the builder's type and issue, such as `builder #208`, if the state
+   file lists an audit of the same build. Skip a finding about the builders' waits for room on the machine, or about
+   the time of `scripts/check`, if the state file lists an audit of the same measure, and that audit's issue is still
+   open.
+2. Open an issue with the label `research` that quotes the finding, and asks the researcher to find its cause and to
+   open an issue for each fix. Say in it that the logs are in the `.loop` folder of the main checkout. Add `ready` to
+   it, because agents take instructions only from issues with that label. Assign it to yourself, so that
+   `scripts/take-next-issue` doesn't give it to anyone.
+3. Start a `researcher` agent on it, with `<issue> research` as its prompt's first line.
+4. Add the audit to the state file's list of focused audits.
+
+A focused audit doesn't count as a retrospective, so the meter goes on counting toward the next one.

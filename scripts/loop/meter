@@ -32,6 +32,11 @@ agents have worked {hours} hours since the last retrospective instead. The hours
 last end line in .loop/agents.jsonl, which scripts/loop/agent_log.py describes. An agent without an end line counts
 until the last line of its transcript. The test builds and the auditors don't count.
 
+The last line ends with a part that starts with "audit due:" for each sign of clear waste, so that the orchestrator
+starts a focused audit of it. scripts/loop/waste.py gives the thresholds of the three signs: a build of a builder type
+that took far longer than the median of its type, builders that waited long in scripts/loop/run-heavy's line over the
+last hour, and passing runs of scripts/check that grew slower since the last retrospective.
+
 With --wake, the meter keeps reading, and prints and ends when an account's advice changes, when an account gives no
 reading, when scripts/hooks/hand-off tells an agent to hand off its work, and 50 minutes after it started while an
 account's advice is stop. Run it in the background, so that its end wakes the orchestrator.
@@ -61,8 +66,10 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import agent_log
+import heavy_log
 import paths
 import request_events
+import waste
 from accounts import Account, AccountsError, claude_environment, load_accounts
 from github import GitHubError, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, note_files
@@ -156,10 +163,20 @@ def main(argv: list[str] | None = None) -> int:
     readings = wait_for_wake(accounts, log, hand_offs) if options.wake else read_accounts(accounts, log)
     checkout = paths.main_checkout()
     agents = agents_line(running_agents(loop_folder, checkout), hand_off_thresholds(note_files(hand_offs)))
+    runs = agent_log.read_runs(loop_folder / "agents.jsonl")
+    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
+    try:
+        last = max(retrospective_merges(checkout), default=None)
+    except GitHubError as error:
+        last = None
+        retrospective = f"retrospective unknown: {error}"
+    else:
+        retrospective = retrospective_note(last, runs, transcripts, loop_folder)
     machine = machine_line(
         readings.machine,
         context=orchestrator_context(loop_folder / "state.md", checkout),
-        retrospective=read_retrospective(checkout, loop_folder),
+        retrospective=retrospective,
+        findings=waste_findings(runs, transcripts, loop_folder, last),
     )
     print("\n".join([*readings.lines, agents, machine]))
     return 0 if readings.has_every_account else 1
@@ -457,7 +474,7 @@ def describe(meter: Meter, reading_time: dt.datetime) -> str:
     return f"{meter['used']:g}% resets {shown}"
 
 
-def machine_line(machine: Machine, context: int | None, retrospective: str) -> str:
+def machine_line(machine: Machine, context: int | None, retrospective: str, findings: list[str]) -> str:
     memory, swap = machine["memory_free_gb"], machine["swap_used_gb"]
     context_part = "orchestrator context unknown" if context is None else f"orchestrator context {context // 1000}k"
     return " | ".join(
@@ -470,6 +487,7 @@ def machine_line(machine: Machine, context: int | None, retrospective: str) -> s
             f"load {machine['load']:.1f} on {machine['cores']} cores",
             context_part,
             retrospective,
+            *(f"audit due: {finding}" for finding in findings),
         ]
     )
 
@@ -592,14 +610,10 @@ def context_tokens(transcript: Path) -> int | None:
     return None
 
 
-def read_retrospective(checkout: Path, loop_folder: Path) -> str:
-    try:
-        last = max(retrospective_merges(checkout), default=None)
-    except GitHubError as error:
-        return f"retrospective unknown: {error}"
-    runs = agent_log.read_runs(loop_folder / "agents.jsonl")
+def retrospective_note(
+    last: dt.datetime | None, runs: list[agent_log.AgentRun], transcripts: dict[str, Path], loop_folder: Path
+) -> str:
     counted = [run for run in runs if not run.start["test"] and run.start["type"] != AUDITOR]
-    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
     if OUTPUT_TOKENS_PER_RETROSPECTIVE is not None:
         requests = loop_folder / request_events.REQUESTS_FILE
         event_tokens = request_events.output_tokens(requests.read_text() if requests.exists() else "")
@@ -611,6 +625,27 @@ def read_retrospective(checkout: Path, loop_folder: Path) -> str:
         for run in counted
     )
     return hours_note(last, minutes / 60)
+
+
+def waste_findings(
+    runs: list[agent_log.AgentRun], transcripts: dict[str, Path], loop_folder: Path, last: dt.datetime | None
+) -> list[str]:
+    """The findings of scripts/loop/waste.py. Without a last retrospective, the time of scripts/check has nothing to
+    compare with."""
+    reading_time = now()
+    heavy = heavy_log.read(loop_folder / heavy_log.NAME)
+    builder_minutes = sum(
+        agent_log.minutes_after(
+            agent_log.working_periods(run, transcripts, loop_folder / "runs"), reading_time - waste.RECENT
+        )
+        for run in runs
+        if run.start["type"] in waste.BUILDER_TYPES
+    )
+    findings = waste.long_builds(runs, reading_time)
+    for finding in (waste.long_waits(heavy, builder_minutes, reading_time), waste.slower_check(heavy, last)):
+        if finding:
+            findings.append(finding)
+    return findings
 
 
 def since_words(last: dt.datetime | None) -> str:
