@@ -268,7 +268,10 @@ push_flags_with_value=" --repo --recurse-submodules --receive-pack --exec -o --p
 # - flags: the flags, without their values
 # - push_remote: the first word that isn't a flag or a flag's value, which names a remote or a URL, or empty
 # - push_refspecs: the other words that aren't flags or flags' values
-# Run read_git_options first.
+# Blocks the push when the remote or a refspec has a variable, a $( ) or backticks, as starts_expansion finds them, as
+# in git push origin "$branch", because the hook can't tell before the command runs which remote or branch the word
+# names. forbidden-commands.check and unread-pages.check need the branches, and maintainer-only.check needs the remote.
+# A flag and its value go ahead, because no check needs them. Run read_git_options first.
 read_push_arguments() {
   local i word
   local -a words=()
@@ -282,13 +285,49 @@ read_push_arguments() {
           i=$((i + 1))
         fi
         ;;
-      *) words+=("$word") ;;
+      *)
+        if [[ -n ${command_word_may_expand[i]:-} ]]; then
+          block "Blocked: the shell expands $word in this git push, so this hook can't tell which remote or branch it names. Write the remote and each branch in plain words, as in git push origin <branch>."
+        fi
+        words+=("$word")
+        ;;
     esac
   done
   if ((${#words[@]} > 0)); then
     push_remote=${words[0]}
     push_refspecs=("${words[@]:1}")
   fi
+}
+
+# Sets push_sources and push_branches to the source and the branch of each refspec, [+]<source>[:<branch>], that
+# read_push_arguments found, in the same order. A refspec without a colon pushes to the branch of the source's name, and
+# a push without a refspec pushes HEAD, as git's default push.default, simple, does. git reads @ as HEAD in the source,
+# though not after the colon. For HEAD, the branch is HEAD's, which git gives with these options, such as -C <folder>,
+# and a refspec is left out when HEAD has no branch. A refspec with nothing before its colon, as in :feature, deletes
+# the branch, and its source is empty: read_push_branches [<git option>...]
+read_push_branches() {
+  local refspec source branch
+  local -a refspecs=(HEAD)
+  push_sources=() push_branches=()
+  if ((${#push_refspecs[@]} > 0)); then
+    refspecs=("${push_refspecs[@]}")
+  fi
+  for refspec in "${refspecs[@]}"; do
+    refspec=${refspec#+}
+    source=${refspec%%:*}
+    if [[ $source == @ ]]; then
+      source=HEAD
+    fi
+    branch=$source
+    if [[ $refspec == *:* ]]; then
+      branch=${refspec#*:}
+    fi
+    if [[ $branch == HEAD ]]; then
+      branch=$(git "$@" symbolic-ref --quiet --short HEAD 2>/dev/null) || continue
+    fi
+    push_sources+=("$source")
+    push_branches+=("${branch#refs/heads/}")
+  done
 }
 
 # Puts the group of a gh command, its subcommand and the subcommand of a nested group, such as add of
@@ -695,9 +734,9 @@ find_head_commit() {
   head_commit=$(git rev-parse --verify --quiet "$head_ref^{commit}") || return 1
 }
 
-# Succeeds if the pull request's latest commit, as find_head_commit finds it, is HEAD. A commit before gh in the same
-# command, as in git commit -am ... && gh pr create, then adds the changes on disk to the pull request, because the
-# hooks run before the whole command.
+# Succeeds if head_commit, the pull request's latest commit, such as find_head_commit finds it, is HEAD. A commit before
+# gh in the same command, as in git commit -am ... && gh pr create, then adds the changes on disk to the pull request,
+# because the hooks run before the whole command.
 is_pull_request_at_head() {
   local head
   head=$(git rev-parse --verify --quiet HEAD) || return 1

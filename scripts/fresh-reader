@@ -10,7 +10,8 @@
 # page to the record of the pages read, in the git folder of the current folder's worktree, as
 # scripts/hooks/pages-read.bash describes. Outside a git repository, it records nothing. "Review a changed page with a
 # fresh reader" in docs/pages.md runs it, and a hook blocks gh pr create until the record has each page that the pull
-# request adds or rewrites text in, as the pull request has it.
+# request adds or rewrites text in, as the pull request has it. The hook blocks each later git push to the pull
+# request's branch that adds or rewrites text in a page in the same way.
 set -euo pipefail
 # shellcheck source=scripts/hooks/pages-read.bash
 source "$(dirname "$0")/hooks/pages-read.bash"

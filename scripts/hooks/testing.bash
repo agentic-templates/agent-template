@@ -180,6 +180,12 @@ expect_repository_flags() {
   done
 }
 
+# Prints the message that blocks a git push whose remote or refspec the shell expands, as read_push_arguments in
+# helpers.bash reads them: expanded_push_word <the word as the command writes it, without its quotes>
+expanded_push_word() {
+  echo "Blocked: the shell expands $1 in this git push, so this hook can't tell which remote or branch it names. Write the remote and each branch in plain words, as in git push origin <branch>."
+}
+
 # Checks a gh command with words of its subcommand before the group, between the group and the subcommand, and just
 # after the subcommand, against a fixed result:
 # expect_before_and_after_subcommand <exit code> <message> <group> <words> <subcommand> <remaining words>
