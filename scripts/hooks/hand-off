@@ -8,7 +8,10 @@
 # each time its context passes the threshold: the hook creates .loop/told-to-compact when it gives the note, and deletes
 # the file once the context is below the threshold again, as after a compaction. Until the note, the hook refuses the
 # orchestrator's request for a compaction: it deletes the request while the context is at or below compact_tokens,
-# because the note comes at the first tool call past that size.
+# because the note comes at the first tool call past that size. While the request is more than late_request_minutes
+# old, the hook tells the orchestrator that the compaction hasn't come, with what the maintainer's compaction sender
+# says in .loop/compact-waiting.txt that it waits for. It sets the request's time to now when it tells, so that it
+# tells again only after late_request_minutes more.
 # A builder, an auditor, a reviewer or a researcher hands off its work: once its context first passes soon_tokens, at
 # its next stopping point, and once it first passes now_tokens, after the step it's on. These are the subagents of
 # those types that the orchestrator's session starts itself, and the agents that scripts/loop/run-builder starts,
@@ -23,6 +26,7 @@
 compact_tokens=300000
 soon_tokens=400000
 now_tokens=500000
+late_request_minutes=10
 # The latest reply is near the end of the transcript, followed only by the results of its tool calls.
 transcript_tail_bytes=400000
 
@@ -92,8 +96,24 @@ refuse_request() {
   fi
 }
 
+# Prints that the orchestrator's request for a compaction hasn't come, if the request is more than
+# late_request_minutes old, and sets the request's time to now: tell_late_request <request> <loop folder>
+tell_late_request() {
+  local waiting message
+  if [[ -z $(find "$1" -prune -mmin +"$late_request_minutes" 2>/dev/null) ]]; then
+    return 0
+  fi
+  message="The compaction that you asked for in $1 hasn't come in $late_request_minutes minutes."
+  if waiting=$(cat "$2/compact-waiting.txt" 2>/dev/null); then
+    message+=" The compaction sender says that it waits for this: ${waiting%.}."
+  fi
+  # When the hook can't set the time, it tells the orchestrator again at each tool call.
+  touch "$1" 2>/dev/null
+  echo "$message Read your compaction sender's log, or ask the maintainer to check the sender or to type /compact."
+}
+
 # Tells the orchestrator to ask for a compaction, once each time its context passes compact_tokens, and refuses a
-# request for one before then.
+# request for one before then. Tells it when the compaction that it asked for hasn't come.
 tell_orchestrator() {
   local loop size told request message=""
   loop=$(find_loop_folder) || return 0
@@ -119,6 +139,10 @@ tell_orchestrator() {
     return 0
   fi
   if ! claim_note "$told"; then
+    message=$(tell_late_request "$request" "$loop")
+    if [[ -n $message ]]; then
+      tell "$message"
+    fi
     return 0
   fi
   message="Your context has passed $((compact_tokens / 1000))k tokens. If the maintainer installed a compaction sender, ask for a compaction, as \"Compact your context\" in docs/loop.md describes: finish the step you're on, and bring your state file up to date. Then write $request with $session_id on its first line and \"Resume from .loop/state.md.\" on its second, and end your turn. Without a sender, ask the maintainer to type /compact, and go on with the loop."

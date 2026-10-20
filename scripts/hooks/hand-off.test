@@ -115,6 +115,12 @@ write_request() {
   printf '%s\nResume from .loop/state.md.\n' "$orchestrator" >"$request"
 }
 
+# Sets the time of the last change to the orchestrator's request for a compaction: age_request <minutes ago>
+age_request() {
+  python3 -I -c 'import os, sys, time; then = time.time() - 60 * int(sys.argv[2]); os.utime(sys.argv[1], (then, then))' \
+    "$request" "$1"
+}
+
 # Checks that the hook didn't create the file of the orchestrator's note: expect_no_compact_file <description>
 expect_no_compact_file() {
   case_count=$((case_count + 1))
@@ -262,6 +268,26 @@ expect_request "For a request that comes with the first tool call past 300k toke
 add_reply "$orchestrator" a11 100000
 run_hook "$orchestrator" a11
 expect_request "For a builder in the orchestrator's session, under 300k tokens" kept
+
+# A request for a compaction that hasn't come, and the file in which the sender writes what it waits for
+late="The compaction that you asked for in $request hasn't come in 10 minutes."
+late_steps="Read your compaction sender's log, or ask the maintainer to check the sender or to type /compact."
+waiting=$repository/.loop/compact-waiting.txt
+age_request 9
+run_hook "$orchestrator" ""
+expect_note "For a request 9 minutes old" ""
+age_request 11
+run_hook "$orchestrator" ""
+expect_note "For a request 11 minutes old" "$late $late_steps"
+expect_request "For a request 11 minutes old" kept
+run_hook "$orchestrator" ""
+expect_note "For a request right after the note that the compaction hasn't come" ""
+age_request 11
+echo "the builders to finish." >"$waiting"
+run_hook "$orchestrator" ""
+expect_note "For a request 11 minutes old, while the sender waits" \
+  "$late The compaction sender says that it waits for this: the builders to finish. $late_steps"
+rm "$waiting"
 rm "$request"
 mkdir "$request"
 add_reply "$orchestrator" "" 250000
