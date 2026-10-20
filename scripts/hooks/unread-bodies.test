@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# Tests scripts/hooks/unread-bodies.check, on records that scripts/fresh-reader writes with a stand-in for claude.
+# The cases run the check alone, so that the other checks on these commands, which need a title, headings and a pass of
+# scripts/check, don't decide them.
+set -euo pipefail
+# shellcheck source=scripts/hooks/testing.bash
+source "${BASH_SOURCE[0]%/*}/testing.bash"
+fresh_reader=${hooks_folder%/hooks}/fresh-reader
+
+# The cases run in repositories in a temporary folder, and git looks for no repository above it.
+base=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$base"' EXIT
+export GIT_CEILING_DIRECTORIES=$base
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+# A stand-in for claude, first on the PATH, that gives scripts/fresh-reader the reader's answer.
+mkdir "$base/bin"
+printf '#!/usr/bin/env bash\necho "The reader found nothing to change."\n' >"$base/bin/claude"
+chmod +x "$base/bin/claude"
+PATH=$base/bin:$PATH
+
+# A folder for a PATH with the commands that the check runs, but no claude
+no_claude=$base/no-claude
+mkdir "$no_claude"
+for command in bash jq git grep; do
+  ln -s "$(command -v "$command")" "$no_claude/$command"
+done
+
+issue_reader="a developer who builds this issue"
+pr_reader="a developer who joins the project later and reads this pull request"
+
+# The body of each command, as text, and in the file body.md of each repository
+body="## What should change
+
+When you import a file, the app skips the expenses that it already has."
+
+# Makes a folder the one that the agent works in: work_in <folder>
+work_in() {
+  test_cwd=$1
+  cd "$1"
+}
+
+# Makes a git repository with body.md, in which no reader has read anything: new_repository <folder>
+new_repository() {
+  git init --quiet "$1"
+  printf '%s\n' "$body" >"$1/body.md"
+}
+
+# Runs the check on a command from the folder that the agent works in, and checks its exit code and message:
+# expect_check <command> <exit code> <message>
+expect_check() {
+  hook_status=0
+  hook_message=$(run_check unread-bodies "$(sample_input claude-code Bash "$1")" 2>&1 >/dev/null) || hook_status=$?
+  expect_result "In $test_cwd, unread-bodies.check for \"$1\"" "$2" "$3"
+}
+
+# Gives a file to a reader with scripts/fresh-reader, in the folder that the agent works in: read_file <file>
+read_file() {
+  "$fresh_reader" "a developer who builds the project" "$1" >/dev/null
+}
+
+# Removes the record of what the readers read, in the repository that the agent works in.
+forget_readings() {
+  rm -f "$(git rev-parse --git-path pages-read)"
+}
+
+# Prints the message that blocks a command whose body file no reader has read: unread_file <command> <reader> <file>
+unread_file() {
+  echo "Blocked: no fresh reader has read this body as it is now. Give the body file to a reader, and change the body as the reader's answer shows, as steps 1 and 2 of \"Review a changed page with a fresh reader\" in docs/pages.md describe:"
+  echo "scripts/fresh-reader \"$2\" $3"
+  echo "If you change the body after the reader read it, run the reader again. Then run $1 again."
+}
+
+# Prints the message that blocks a command whose body, given as text, no reader has read: unread_text <command> <reader>
+unread_text() {
+  echo "Blocked: no fresh reader has read this body as it is now. Write the body to a file, give the file to a reader, and change the body as the reader's answer shows, as steps 1 and 2 of \"Review a changed page with a fresh reader\" in docs/pages.md describe:"
+  echo "scripts/fresh-reader \"$2\" <file>"
+  echo "If you change the body after the reader read it, run the reader again. Then run $1 again with --body-file <file>."
+}
+
+project=$base/project
+new_repository "$project"
+work_in "$project"
+
+# Each command, with its body from body.md and as text, is blocked until a reader reads body.md:
+# expect_blocked_until_read <command, such as gh issue create> <its other words> <reader>
+expect_blocked_until_read() {
+  forget_readings
+  expect_check "$1 $2 --body-file body.md" 2 "$(unread_file "$1" "$3" body.md)"
+  expect_check "$1 $2 --body \"$body\"" 2 "$(unread_text "$1" "$3")"
+  read_file body.md
+  expect_check "$1 $2 --body-file body.md" 0 ""
+  expect_check "$1 $2 --body \"$body\"" 0 ""
+}
+expect_blocked_until_read "gh issue create" "--title 'Skip imported expenses' --label feature" "$issue_reader"
+expect_blocked_until_read "gh issue new" "--title 'Skip imported expenses' --label feature" "$issue_reader"
+expect_blocked_until_read "gh issue edit" 7 "$issue_reader"
+expect_blocked_until_read "gh pr create" "--title 'feat: skip imported expenses'" "$pr_reader"
+expect_blocked_until_read "gh pr new" "--title 'feat: skip imported expenses'" "$pr_reader"
+expect_blocked_until_read "gh pr edit" 12 "$pr_reader"
+
+# A body from a here-document, on the input of gh or in $( ), counts as text.
+forget_readings
+from_input="gh issue create --title 'Skip imported expenses' -F - <<'EOF'
+$body
+EOF"
+in_substitution="gh pr edit 12 --body \"\$(cat <<'EOF'
+$body
+EOF
+)\""
+expect_check "$from_input" 2 "$(unread_text "gh issue create" "$issue_reader")"
+expect_check "$in_substitution" 2 "$(unread_text "gh pr edit" "$pr_reader")"
+read_file body.md
+expect_check "$from_input" 0 ""
+expect_check "$in_substitution" 0 ""
+
+# A body that changes after the reader read it needs the reader again.
+echo "It compares the date, the amount and the description." >>body.md
+expect_check "gh pr edit 12 --body-file body.md" 2 "$(unread_file "gh pr edit" "$pr_reader" body.md)"
+read_file body.md
+expect_check "gh pr edit 12 --body-file body.md" 0 ""
+
+# The line breaks at the end of the file that the reader read don't count.
+forget_readings
+printf '%s' "$body" >no-line-break.md
+read_file no-line-break.md
+expect_check "gh issue edit 7 --body \"$body\"" 0 ""
+expect_check "gh issue edit 7 --body-file body.md" 2 "$(unread_file "gh issue edit" "$issue_reader" body.md)"
+forget_readings
+printf '%s\n\n\n' "$body" >line-breaks.md
+read_file line-breaks.md
+expect_check "gh issue edit 7 --body \"$body\"" 0 ""
+forget_readings
+
+# A command that gives no body, a dry run, a command that shows its help, and another command that posts a body
+expect_check "gh issue edit 7 --add-label ready" 0 ""
+expect_check "gh pr edit 12 --title 'feat: skip imported expenses'" 0 ""
+expect_check "gh pr create --dry-run --title 'feat: skip imported expenses' --body-file body.md" 0 ""
+expect_check "gh issue create --title 'Skip imported expenses' --body-file body.md --help" 0 ""
+expect_check "gh issue comment 7 --body-file body.md" 0 ""
+
+# Without claude, scripts/fresh-reader can't run.
+path_with_claude=$PATH
+PATH=$no_claude
+expect_check "gh issue create --title 'Skip imported expenses' --body-file body.md" 0 ""
+PATH=$path_with_claude
+
+# Each repository has a record of its own, and a cd before gh changes the folder that the body file's path starts from
+# and the repository whose record counts. Outside a git repository, scripts/fresh-reader records nothing.
+read_file body.md
+other=$base/other
+new_repository "$other"
+expect_check "cd ../other && gh issue create --title 'Skip imported expenses' --body-file body.md" 2 \
+  "$(unread_file "gh issue create" "$issue_reader" body.md)"
+mkdir "$base/outside"
+printf '%s\n' "$body" >"$base/outside/body.md"
+work_in "$base/outside"
+expect_check "gh issue create --title 'Skip imported expenses' --body-file body.md" 0 ""
+expect_check "cd ../project && gh issue create --title 'Skip imported expenses' --body-file body.md" 0 ""
+expect_check "cd ../other && gh issue create --title 'Skip imported expenses' --body-file body.md" 2 \
+  "$(unread_file "gh issue create" "$issue_reader" body.md)"
+
+finish_tests

@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Blocks gh issue create, its alias gh issue new, gh issue edit, gh pr create, its alias gh pr new, and gh pr edit when
+# the command gives a body that no fresh reader has read, because nobody reviews the body of an issue, and the body of a
+# pull request grows with each round of fixes. scripts/fresh-reader records the hash of each file that it gives a
+# reader, as pages-read.bash describes, and this check looks up the body's hash, as body_hash there prints it.
+# - It reads the body as read_body in helpers.bash reads it, as the command writes it, without running $( ) or filling
+#   in variables.
+# - A relative path to a body file starts from the folder that gh runs in, and the record is that of the repository
+#   there. That's the folder the agent works in, or the one that a cd before gh changes to, as follow_cd in helpers.bash
+#   finds it.
+# It allows the command:
+# - when claude isn't installed, because scripts/fresh-reader runs claude
+# - outside a git repository, where scripts/fresh-reader records nothing
+# - after a cd to a folder that it can't tell
+# - when the command gives no body, does a dry run of gh pr create, or shows its help
+# shellcheck source=scripts/hooks/helpers.bash
+source "${BASH_SOURCE[0]%/*}/helpers.bash"
+# shellcheck source=scripts/hooks/pages-read.bash
+source "${BASH_SOURCE[0]%/*}/pages-read.bash"
+
+# Succeeds if command_words gives a body to one of the commands at the top of this file, and sets the variables that
+# read_body reads.
+gives_body() {
+  if [[ ${command_words[0]##*/} != gh ]]; then
+    return 1
+  fi
+  case "${command_words[1]:-} ${command_words[2]:-}" in
+    "issue create" | "issue new") read_pull_request_flags "$issue_create_flags_with_value" || return 1 ;;
+    "issue edit") read_pull_request_flags "$issue_edit_flags_with_value" || return 1 ;;
+    "pr create" | "pr new") read_pull_request_flags "$pr_create_flags_with_value" || return 1 ;;
+    "pr edit") read_pull_request_flags "$pr_edit_flags_with_value" || return 1 ;;
+    *) return 1 ;;
+  esac
+  [[ -n $body_source ]]
+}
+
+# Prints the message that blocks a command whose body no reader has read.
+unread_message() {
+  local command="gh ${command_words[1]} ${command_words[2]}" reader="a developer who builds this issue"
+  local review_steps="change the body as the reader's answer shows, as steps 1 and 2 of \"Review a changed page with a fresh reader\" in docs/pages.md describe"
+  if [[ ${command_words[1]} == pr ]]; then
+    reader="a developer who joins the project later and reads this pull request"
+  fi
+  if [[ $body_source == file && $body_file != - ]]; then
+    echo "Blocked: no fresh reader has read this body as it is now. Give the body file to a reader, and $review_steps:"
+    echo "scripts/fresh-reader \"$reader\" $body_file"
+    echo "If you change the body after the reader read it, run the reader again. Then run $command again."
+    return 0
+  fi
+  echo "Blocked: no fresh reader has read this body as it is now. Write the body to a file, give the file to a reader, and $review_steps:"
+  echo "scripts/fresh-reader \"$reader\" <file>"
+  echo "If you change the body after the reader read it, run the reader again. Then run $command again with --body-file <file>."
+}
+
+check_body() {
+  local record
+  if ! gives_body || ! command -v claude >/dev/null; then
+    return 0
+  fi
+  if [[ -z $command_folder ]] || ! cd -- "$command_folder" 2>/dev/null || ! record=$(pages_read_path 2>/dev/null); then
+    return 0
+  fi
+  read_body "whether a fresh reader has read the body"
+  if [[ -f $record ]] && grep -qxF -- "$(body_hash "$body")" "$record"; then
+    return 0
+  fi
+  block "$(unread_message)"
+}
+
+check_simple_command() {
+  record_written_files
+  drop_command_prefixes "$@"
+  move_flags_after_gh_subcommand
+  if ((${#command_words[@]} == 0)); then
+    return 0
+  fi
+  check_body
+  follow_cd
+}
+
+read_input
+if [[ $tool_name == Bash ]]; then
+  # The folder that gh runs in, as follow_cd in helpers.bash describes.
+  command_folder=${cwd:-$PWD}
+  written_files=()
+  for_each_simple_command check_simple_command "$shell_command"
+fi

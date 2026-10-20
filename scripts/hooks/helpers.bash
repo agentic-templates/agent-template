@@ -669,6 +669,7 @@ read_help_flag() {
 
 # Reads the flags of a gh pr command from command_words, from its fourth word on, and fails when the command shows its
 # help or does a dry run: read_pull_request_flags <flags that take a value>
+# gh issue create and gh issue edit give a body with the same flags, so unread-bodies.check reads theirs with it too.
 # It sets pr_base, pr_head and pr_title to the values of --base, --head and --title, or to empty when the command
 # doesn't give the flag, and pr_has_title to yes when it gives --title, whose value can be empty. It sets pr_is_draft
 # to yes when the command opens a draft. It also records expansion syntax in the title and body, and sets the body
