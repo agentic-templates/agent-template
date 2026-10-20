@@ -59,10 +59,22 @@ EVERY_TEST = {
     "scripts/hooks/command-prefixes.bash",
 }
 
+# The script doesn't follow the files that these name, because they use the names only as data, as this script does in
+# its lists.
+NAMES_AS_DATA = {"scripts/affected-tests"}
+
 # The files that a test file tests or runs, when neither its name nor the code of the files that it tests gives them.
 TESTED_FILES = {
     "scripts/test-check": ["scripts/check"],
-    "scripts/ci.test": [".github/workflows/ci.yml"],
+    # ci.test copies affected-tests into a case folder, and checks that test-scripts --branch runs what it prints.
+    "scripts/ci.test": [".github/workflows/ci.yml", "scripts/affected-tests"],
+    # These tests run these files without sourcing them.
+    "scripts/hooks/session-start.test": ["scripts/hooks/before-compact"],
+    "scripts/admin-access.test": [
+        "scripts/configure-github",
+        "scripts/create-private-fork",
+        "scripts/waiting-fixes",
+    ],
     "scripts/draft-assets.test": ["scripts/fixtures/draft-assets.yml"],
     "scripts/hooks/settings.test": [".claude/settings.json", ".codex/hooks.json"],
     "scripts/hooks/block-log.test": [
@@ -152,7 +164,7 @@ def affected_tests(test_files: list[str], changed: set[str], texts: dict[str, st
         reached = {test_file, *unread}
         while unread:
             path = unread.pop()
-            if path in EVERY_TEST:
+            if path in EVERY_TEST or path in NAMES_AS_DATA:
                 continue
             for name in names_of(path) - reached:
                 reached.add(name)

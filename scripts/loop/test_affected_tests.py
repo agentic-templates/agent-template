@@ -201,7 +201,7 @@ class ThisRepositoryTest(unittest.TestCase):
         )
         self.assertIn("scripts/hooks/simple-commands.test", selected)
 
-    def test_runs_the_test_files_that_check_what_a_check_blocks_or_reads(self) -> None:
+    def test_runs_the_test_files_that_run_or_read_a_changed_file_without_sourcing_it(self) -> None:
         cases = {
             "scripts/hooks/secret-files.check": "scripts/hooks/block-log.test",
             "scripts/hooks/forbidden-commands.check": "scripts/hooks/block-log.test",
@@ -211,6 +211,11 @@ class ThisRepositoryTest(unittest.TestCase):
             "scripts/hooks/issues-and-labels.check": "scripts/hooks/expansion-notes.test",
             "scripts/hooks/pull-request-rules.check": "scripts/hooks/expansion-notes.test",
             "scripts/consequential-paths": "scripts/hooks/pull-request-rules.test",
+            "scripts/hooks/before-compact": "scripts/hooks/session-start.test",
+            "scripts/configure-github": "scripts/admin-access.test",
+            "scripts/waiting-fixes": "scripts/admin-access.test",
+            "scripts/create-private-fork": "scripts/admin-access.test",
+            "scripts/affected-tests": "scripts/ci.test",
         }
         for changed, test_file in cases.items():
             with self.subTest(changed):
