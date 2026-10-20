@@ -204,6 +204,32 @@ expect_block Bash "git -C notes/drafts merge --no-ff -F - topic <clean.md" "$(bl
 body_with "$published" >"$test_cwd/notes/published.md"
 expect_allow Bash "git -C notes commit -F published.md"
 
+# git writes the names of the commits that it merges, and the value of --into-name, into the message of a merge commit
+# when the command gives no message. With --log, or the setting merge.log, it writes the names after a message that the
+# command gives, too.
+blocked_merge() {
+  echo "Blocked: this git merge names a commit by a name that holds $1, the ID of a security advisory of this repository that isn't published yet, and git can write that name into the merge commit's message. Name the commit by its SHA, and run the command again."
+}
+merge_templates=(
+  "git merge --no-edit refs/private-fork/ID/fix"
+  "git merge refs/private-fork/ID/fix"
+  "git merge --no-ff topic refs/private-fork/ID/fix"
+  "git merge --no-edit -- refs/private-fork/ID/fix"
+  "git -C notes merge -s ort refs/private-fork/ID/fix"
+  "git merge -m 'Merge the fix' refs/private-fork/ID/fix"
+  "git merge -F clean.md --log refs/private-fork/ID/fix"
+)
+for template in "${merge_templates[@]}"; do
+  expect_block Bash "${template/ID/$draft}" "$(blocked_merge "$draft")"
+  expect_allow Bash "${template/ID/$published}"
+done
+expect_block Bash "git merge --no-edit expenses-ghsa-2c5x-3m4v-7q8r/main" "$(blocked_merge ghsa-2c5x-3m4v-7q8r)"
+expect_block Bash "git merge --no-edit --into-name $draft topic" "$(blocked "$draft")"
+expect_block Bash "git merge --no-edit --into-name=fix-$draft topic" "$(blocked "$draft")"
+expect_allow Bash "git merge --no-edit --into-name $published topic"
+# git commit reads the words after -- as paths, which its message doesn't hold.
+expect_allow Bash "git commit -m 'feat: skip imported expenses' -- notes/$draft.md"
+
 # After a cd or a git -C that the hook can't follow, it still reads the text that the command writes, and a body file by
 # its absolute path, but it can't tell which file a relative path names.
 unknown_folder_block="Blocked: this hook checks the body file before the command runs, but it can't tell which folder the path body.md starts from, such as after a cd to a folder that a variable names. Give the file's absolute path."
@@ -219,6 +245,12 @@ expect_block Bash "git -C \"\$WORKTREE\" commit -m 'fix: check the paths that $d
 expect_block Bash "git -C \"\$WORKTREE\" commit -F body.md" "$unknown_folder_block"
 expect_block Bash "git -C /no/such/folder commit -F body.md" "$unknown_folder_block"
 expect_block Bash "git -C \"\$WORKTREE\" commit -F - <body.md" "$(blocked "$draft")"
+
+# An absolute -C names the folder that git opens the file of -F from, also after a cd that the hook can't follow.
+expect_block Bash "cd \"\$WORKTREE\" && git -C '$test_cwd/notes' commit -F message.md" "$(blocked "$draft")"
+expect_block Bash "cd \"\$WORKTREE\" && git -C ~/project -C notes commit -F message.md" "$(blocked "$draft")"
+expect_allow Bash "cd \"\$WORKTREE\" && git -C '$test_cwd/notes' commit -F published.md"
+expect_block Bash "git -C '$test_cwd' -C \"\$WORKTREE\" commit -F body.md" "$unknown_folder_block"
 
 # The ID in capitals, in a link, and in lower case in the name of the advisory's private fork, as the text writes it
 expect_block Bash "gh issue comment 7 --body 'Fix GHSA-2C5X-3M4V-7Q8R'" "$(blocked GHSA-2C5X-3M4V-7Q8R)"

@@ -10,7 +10,8 @@
 # - the subject and body of the commit that gh pr merge makes
 # - the title and notes of gh release create, its alias gh release new, and gh release edit
 # - each message and trailer that -m, --message, -F, --file and --trailer give git commit
-# - each message that -m, --message, -F and --file give git merge, for the merge commit
+# - each message that -m, --message, -F and --file give git merge, the value of its --into-name, and the names of the
+#   commits that it merges, which git can write into the merge commit's message
 # It reads the text as read_text and read_body in helpers.bash read it, as the command writes it, without running $( )
 # or filling in variables. It blocks a relative path to a body file when it can't tell the folder that the path starts
 # from, as after cd "$folder". It finds an ID in any case, because the name of an advisory's private fork holds the ID in
@@ -21,7 +22,10 @@
 # It allows a gh command whose -R or --repo names the advisory's private fork, because the fork is private too. A commit
 # message counts in any repository, because step 3 of "Fix a security vulnerability" in docs/releasing.md pushes the
 # fork's commits to origin before the advisory is published. A command that posts to the advisory itself, such as gh api
-# with the advisory's endpoint, goes ahead, because the hook reads no gh api command.
+# with the advisory's endpoint, goes ahead, because the hook reads no gh api command. It doesn't read the names that git
+# finds in the repository and writes into the message of a merge commit: the branch that the merge goes into, the URL
+# that git fetched FETCH_HEAD from, and the branch that @{-1} or - names. Nor does it read git pull, whose merge commit
+# names the URL that it pulls from.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 
@@ -79,9 +83,14 @@ read_gh_command_text() {
 git_file_folder() {
   local i
   for ((i = 2; i < ${#git_folder[@]}; i += 2)); do
-    if [[ ${git_folder[i]} == -C ]]; then
-      change_command_folder "${git_folder[i + 1]}"
+    if [[ ${git_folder[i]} != -C ]]; then
+      continue
     fi
+    # An absolute folder doesn't depend on the folder before it, which the hook may not know, as after cd "$folder".
+    if expand_home "${git_folder[i + 1]}" && [[ $expanded_path == /* ]]; then
+      command_folder=/
+    fi
+    change_command_folder "${git_folder[i + 1]}"
   done
   printf '%s' "$command_folder"
 }
@@ -100,22 +109,32 @@ read_message_file() {
   body_folder=$(git_file_folder)
 }
 
-# Adds each message and trailer that a git commit or git merge command in command_words gives to posted_text.
+# Adds each message and trailer that a git commit or git merge command in command_words gives to posted_text, and the
+# value of the --into-name of git merge. Adds the names of the commits that git merge merges to merged_names.
 read_commit_message() {
-  local flags_with_value i word flag value value_is_next_word flags_before
+  local subcommand flags_with_value i word has_dashes="" flag value value_is_next_word flags_before
   read_git_options
-  case ${command_words[git_subcommand]:-} in
+  subcommand=${command_words[git_subcommand]:-}
+  case $subcommand in
     commit) flags_with_value=$git_commit_flags_with_value ;;
     merge) flags_with_value=$git_merge_flags_with_value ;;
     *) return 0 ;;
   esac
   for ((i = git_subcommand + 1; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
-    case $word in
-      --) return 0 ;;
-      -*) split_flag_word "$word" "$flags_with_value" ;;
-      *) continue ;;
-    esac
+    # git merge reads each word that isn't a flag or a flag's value as a commit, also after --, and git commit reads it
+    # as a path.
+    if [[ -n $has_dashes || $word != -* ]]; then
+      if [[ $subcommand == merge ]]; then
+        merged_names+=$word$'\n'
+      fi
+      continue
+    fi
+    if [[ $word == -- ]]; then
+      has_dashes=yes
+      continue
+    fi
+    split_flag_word "$word" "$flags_with_value"
     if [[ -n $value_is_next_word ]]; then
       i=$((i + 1))
       value=${command_words[i]:-}
@@ -124,6 +143,10 @@ read_commit_message() {
     case $flag in
       -m | --message | --trailer) body_source=text body_word=$value body_may_expand=${command_word_may_expand[i]:-} ;;
       -F | --file) read_message_file "$value" ;;
+      --into-name)
+        posted_text+=$value$'\n'
+        continue
+        ;;
       *) continue ;;
     esac
     read_body "$what_is_checked" -m -F
@@ -161,10 +184,11 @@ posts_to() {
   return "$result"
 }
 
-# Blocks the command when posted_text holds the ID of an advisory of this repository that isn't published, closed or
-# withdrawn, unless the command posts to the advisory's private fork.
-check_advisory_ids() {
-  local rest=$posted_text found id
+# Sets unpublished_id to the first ID in a text, as the text writes it, of an advisory of this repository that isn't
+# published, closed or withdrawn, unless the command posts to the advisory's private fork. Fails when the text holds no
+# such ID: find_unpublished_id <text>
+find_unpublished_id() {
+  local rest=$1 found id
   while [[ $rest =~ $ghsa_id ]]; do
     found=${BASH_REMATCH[0]}
     rest=${rest#*"$found"}
@@ -178,19 +202,28 @@ check_advisory_ids() {
     if posts_to "$advisory_fork"; then
       continue
     fi
-    block "Blocked: this command would post $found, the ID of a security advisory of this repository that isn't published yet. Write the text without the ID, and run the command again."
+    unpublished_id=$found
+    return 0
   done
+  return 1
 }
 
 # Blocks the gh or git command in command_words when it would post the ID of an advisory that isn't published. A
 # relative path to a body file starts from the folder that the command runs in, as follow_cd in helpers.bash finds it.
 check_posted_text() {
-  posted_text="" destination="" body_folder=$command_folder
+  posted_text="" merged_names="" destination="" body_folder=$command_folder
   case ${command_words[0]##*/} in
     gh) read_gh_command_text ;;
     git) read_commit_message ;;
   esac
-  check_advisory_ids
+  if find_unpublished_id "$posted_text"; then
+    block "Blocked: this command would post $unpublished_id, the ID of a security advisory of this repository that isn't published yet. Write the text without the ID, and run the command again."
+  fi
+  # git writes the names into the message of a merge commit when the command gives none, and with --log, or the
+  # setting merge.log, also after a message that it gives.
+  if find_unpublished_id "$merged_names"; then
+    block "Blocked: this git merge names a commit by a name that holds $unpublished_id, the ID of a security advisory of this repository that isn't published yet, and git can write that name into the merge commit's message. Name the commit by its SHA, and run the command again."
+  fi
 }
 
 check_simple_command() {
