@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 import account_room
 import paths
-from machine import CpuTicks, CpuTicksError, Machine
+from machine import CpuTicks, CpuTicksError, CpuTime, Machine
 from test_transcripts import write_transcript
 
 METER = Path(__file__).with_name("meter")
@@ -759,15 +759,29 @@ class MachineLineTest(MeterTest):
         self.assertIn(" | GPU 23% busy, memory unknown | ", line)
 
     def test_gives_the_cores_that_were_busy_while_it_read_the_accounts(self) -> None:
+        self.assertIn(" | 4.2 of 10 cores busy | ", self.last_line_with_cpu(CpuTime(2.0, 100.0), CpuTime(2.0, 103.0)))
+
+    def test_leaves_the_meters_own_work_out_of_the_busy_cores(self) -> None:
+        # The meter and the claude -p that it waited for used 1.5 s of CPU time over 3 s.
+        self.assertIn(" | 3.7 of 10 cores busy | ", self.last_line_with_cpu(CpuTime(2.0, 100.0), CpuTime(3.5, 103.0)))
+
+    def last_line_with_cpu(self, *meters_times: CpuTime) -> str:
+        """The meter's last line on 10 cores that were 4.2 busy, while the meter's own CPU time was each of the times
+        in turn."""
         ticks = iter([CpuTicks(1000, 5000), CpuTicks(1420, 6000)])
-        with mock.patch.object(meter, "read_cpu_ticks", lambda: next(ticks)), mock.patch("os.cpu_count", lambda: 10):
-            self.assertIn(" | 4.2 of 10 cores busy | ", self.run_meter()[1][-1])
+        times = iter(meters_times)
+        with (
+            mock.patch("machine.read_cpu_ticks", lambda: next(ticks)),
+            mock.patch("machine.read_cpu_time", lambda: next(times)),
+            mock.patch("os.cpu_count", lambda: 10),
+        ):
+            return self.run_meter()[1][-1]
 
     def test_gives_no_busy_cores_when_the_cpu_ticks_cannot_be_read(self) -> None:
         def unreadable() -> CpuTicks:
             raise CpuTicksError("can't read the machine's CPU ticks from /proc/stat")
 
-        with mock.patch.object(meter, "read_cpu_ticks", unreadable), mock.patch("os.cpu_count", lambda: 10):
+        with mock.patch("machine.read_cpu_ticks", unreadable), mock.patch("os.cpu_count", lambda: 10):
             _, lines, errors = self.run_meter()
         self.assertIn(" | busy cores of 10 unknown | ", lines[-1])
         warning = "warning: can't read the machine's CPU ticks from /proc/stat, so the busy cores are unknown.\n"

@@ -47,12 +47,12 @@ run of scripts/loop/run-builder has ended, such as a builder of an orchestrator 
 agent's context size, and the threshold at which scripts/hooks/hand-off told the agent to hand off its work, if it did.
 
 The last line gives the machine's free disk, free memory, swap in use, GPU use and GPU memory in use, how many of its
-cores were busy on average while the meter read the accounts, the orchestrator's context size, and whether a
-retrospective is due. One is due once the output tokens of the agents that started since the last retrospective,
-reasoning tokens included, reach OUTPUT_TOKENS_PER_RETROSPECTIVE in this script. The last retrospective is the newest
-merged pull request with the label retrospective, or the start of .loop/agents.jsonl before there is one. The meter
-counts the output tokens as scripts/loop/report counts them, and an agent of a session without an end line until the
-last line of its transcript. A request with no event in
+cores were busy on average while the meter read the accounts, leaving out the meter's own work, the orchestrator's
+context size, and whether a retrospective is due. One is due once the output tokens of the agents that started since
+the last retrospective, reasoning tokens included, reach OUTPUT_TOKENS_PER_RETROSPECTIVE in this script. The last
+retrospective is the newest merged pull request with the label retrospective, or the start of .loop/agents.jsonl
+before there is one. The meter counts the output tokens as scripts/loop/report counts them, and an agent of a session
+without an end line until the last line of its transcript. A request with no event in
 .loop/requests.jsonl counts the output tokens that the transcript gives, which leave out most of them, so the line
 says how many requests have none. Until a retrospective sets OUTPUT_TOKENS_PER_RETROSPECTIVE, one is due once the
 agents have worked {hours} hours since the last retrospective instead. The hours come from the periods on each agent's
@@ -116,7 +116,7 @@ import waste
 from accounts import SIGNED_IN, Account, AccountsError, claude_environment, load_accounts, own_account
 from github import GitHubError, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, note_files
-from machine import CpuTicks, CpuTicksError, Machine, busy_cores, read_cpu_ticks, read_machine
+from machine import CpuReading, CpuTicksError, Machine, busy_cores_besides, read_cpu, read_machine
 from meter_waits import LONGEST_READING_GAP, READ_EVERY_SECONDS, WAKE_EVERY
 from usage import Meter, parse_usage
 
@@ -317,7 +317,9 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
     machine = read_machine(log.parent)
     with log.open("a") as handle:
         handle.write(json.dumps({"at": machine_time.isoformat(timespec="seconds"), "machine": machine}) + "\n")
-    ticks_before = cpu_ticks()
+    # The busy cores leave out the meter's own work, because reading a Claude account runs claude -p /usage, which
+    # used 1.57 s of CPU time over 2.94 s.
+    cpu_before = cpu_reading()
     runs = agent_log.read_runs(log.parent / "agents.jsonl")
     earlier_runs = run_minutes_by_type(runs)
     orchestrators = own_account(accounts, os.environ)
@@ -356,14 +358,14 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
         min(waits, default=UNKNOWN_RESET_WAIT_SECONDS),
         has_every_account,
         machine,
-        None if ticks_before is None else busy_cores(ticks_before, cpu_ticks(), machine["cores"]),
+        None if cpu_before is None else busy_cores_besides(cpu_before, cpu_reading(), machine["cores"]),
     )
 
 
-def cpu_ticks() -> CpuTicks | None:
-    """The machine's CPU ticks, or None with a warning that says what couldn't be read."""
+def cpu_reading() -> CpuReading | None:
+    """The machine's CPU ticks and the meter's CPU time, or None with a warning that says what couldn't be read."""
     try:
-        return read_cpu_ticks()
+        return read_cpu()
     except CpuTicksError as error:
         print(f"warning: {error}, so the busy cores are unknown.", file=sys.stderr)
         return None

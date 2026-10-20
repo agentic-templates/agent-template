@@ -54,6 +54,14 @@ class CpuTicks(NamedTuple):
     total: int
 
 
+class CpuTime(NamedTuple):
+    """The CPU time that this process and the children that it waited for used, and the time on the clock, in seconds
+    since a fixed point in the past."""
+
+    used_seconds: float
+    elapsed_seconds: float
+
+
 class CpuTicksError(Exception):
     """The machine's CPU ticks can't be read. The message says from where."""
 
@@ -114,6 +122,38 @@ def busy_cores(earlier: CpuTicks | None, later: CpuTicks | None, cores: int) -> 
     if earlier is None or later is None or later.total <= earlier.total or later.busy < earlier.busy:
         return None
     return round(cores * (later.busy - earlier.busy) / (later.total - earlier.total), 2)
+
+
+def read_cpu_time() -> CpuTime:
+    """The CPU time that this process and the children that it waited for used until now."""
+    times = os.times()
+    return CpuTime(times.user + times.system + times.children_user + times.children_system, times.elapsed)
+
+
+class CpuReading(NamedTuple):
+    """The machine's CPU ticks and this process's CPU time at the same moment."""
+
+    ticks: CpuTicks
+    time: CpuTime
+
+
+def read_cpu() -> CpuReading:
+    """The CPU ticks and this process's CPU time now, which busy_cores_besides compares with an earlier reading."""
+    return CpuReading(read_cpu_ticks(), read_cpu_time())
+
+
+def busy_cores_besides(earlier: CpuReading | None, later: CpuReading | None, cores: int) -> float | None:
+    """The cores that were busy on average between two readings, other than the cores that this process and its
+    children kept busy. None when busy_cores gives none, or without time between the readings."""
+    if earlier is None or later is None:
+        return None
+    busy = busy_cores(earlier.ticks, later.ticks, cores)
+    elapsed = later.time.elapsed_seconds - earlier.time.elapsed_seconds
+    if busy is None or elapsed <= 0:
+        return None
+    own = (later.time.used_seconds - earlier.time.used_seconds) / elapsed
+    # The busy cores and the CPU time come from separate counters, so the process can seem to use more than all.
+    return round(max(busy - own, 0.0), 2)
 
 
 @functools.cache

@@ -123,6 +123,41 @@ class CpuTicksTest(unittest.TestCase):
         # The counters of macOS start again from 0 after 49 days on 10 cores.
         self.assertIsNone(machine.busy_cores(later, machine.CpuTicks(10, 7000), 10))
 
+    def test_leaves_out_the_cores_that_this_process_and_its_children_kept_busy(self) -> None:
+        earlier = machine.CpuReading(machine.CpuTicks(1000, 5000), machine.CpuTime(2.0, 100.0))
+        later = machine.CpuReading(machine.CpuTicks(1460, 6000), machine.CpuTime(3.5, 103.0))
+        self.assertEqual(machine.busy_cores_besides(earlier, later, 10), 4.1)
+
+    def test_gives_no_fewer_than_zero_busy_cores_besides_this_process(self) -> None:
+        earlier = machine.CpuReading(machine.CpuTicks(1000, 5000), machine.CpuTime(2.0, 100.0))
+        later = machine.CpuReading(machine.CpuTicks(1040, 6000), machine.CpuTime(3.5, 103.0))
+        self.assertEqual(machine.busy_cores_besides(earlier, later, 10), 0.0)
+
+    def test_gives_no_busy_cores_besides_this_process_without_busy_cores_or_time_between_the_readings(self) -> None:
+        earlier = machine.CpuReading(machine.CpuTicks(1000, 5000), machine.CpuTime(2.0, 100.0))
+        later = machine.CpuReading(machine.CpuTicks(1460, 6000), machine.CpuTime(3.5, 103.0))
+        self.assertIsNone(machine.busy_cores_besides(None, later, 10))
+        self.assertIsNone(machine.busy_cores_besides(earlier, None, 10))
+        self.assertIsNone(machine.busy_cores_besides(earlier, later._replace(ticks=earlier.ticks), 10))
+        self.assertIsNone(machine.busy_cores_besides(earlier, later._replace(time=earlier.time), 10))
+
+    def test_reads_the_cpu_time_of_this_process_and_its_children(self) -> None:
+        times = os.times_result((1.0, 0.5, 2.0, 0.25, 100.0))
+        with mock.patch("os.times", lambda: times):
+            self.assertEqual(machine.read_cpu_time(), machine.CpuTime(3.75, 100.0))
+
+    def test_reads_the_cpu_ticks_and_the_cpu_time_together(self) -> None:
+        times = os.times_result((1.0, 0.5, 2.0, 0.25, 100.0))
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            mock.patch.object(machine, "PROC_STAT", Path(folder) / "stat"),
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch("os.times", lambda: times),
+        ):
+            machine.PROC_STAT.write_text("cpu 100 20 30 400\n")
+            reading = machine.read_cpu()
+        self.assertEqual(reading, machine.CpuReading(machine.CpuTicks(150, 550), machine.CpuTime(3.75, 100.0)))
+
     def test_reads_the_ticks_of_a_linux_machine_and_says_when_proc_stat_gives_none(self) -> None:
         with tempfile.TemporaryDirectory() as folder, mock.patch.object(sys, "platform", "linux"):
             stat = Path(folder) / "stat"
