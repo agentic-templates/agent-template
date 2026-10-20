@@ -8,13 +8,13 @@
 # the file once the context is below the threshold again, as after a compaction. Until the note, the hook refuses the
 # orchestrator's request for a compaction: it deletes the request while the context is at or below compact_tokens,
 # because the note comes at the first tool call past that size.
-# A builder or an auditor hands off its work: once its context first passes soon_tokens, at its next stopping point,
-# and once it first passes now_tokens, after the step it's on. These are the subagents of a builder type or of the
-# type auditor that the orchestrator's session starts itself, and the builders that scripts/loop/run-builder starts
-# for an issue, which have LOOP_HAND_OFF set. Other agents, and the maintainer's other sessions, get no note, because
-# the notes' steps are those of the orchestrator, a builder and an auditor. Each note comes once to each builder and
-# auditor. For each note, the hook creates a file in .loop/hand-offs, named <agent>.<threshold>, where <agent> is a
-# subagent's agent id or a session's id. scripts/loop/meter reads them.
+# A builder, an auditor, a reviewer or a researcher hands off its work: once its context first passes soon_tokens, at
+# its next stopping point, and once it first passes now_tokens, after the step it's on. These are the subagents of
+# those types that the orchestrator's session starts itself, and the agents that scripts/loop/run-builder starts,
+# which have their type in LOOP_HAND_OFF. Each type gets the steps of its own hand-off. Other agents, and the
+# maintainer's other sessions, get no note, because the notes' steps are those of the orchestrator and these types.
+# Each note comes once to each agent. For each note, the hook creates a file in .loop/hand-offs, named
+# <agent>.<threshold>, where <agent> is a subagent's agent id or a session's id. scripts/loop/meter reads them.
 # The files are in the .loop of the main checkout. When the hook can't create a note's file, the note says so. The hook
 # says nothing when it can't tell the context's size, such as when it can't find the agent's transcript, or after a
 # compaction until the agent's next reply.
@@ -132,13 +132,25 @@ if [[ -z $agent_id && -z ${LOOP_HAND_OFF:-} ]]; then
   tell_orchestrator
   exit 0
 fi
-# A subagent of a builder that scripts/loop/run-builder started has LOOP_HAND_OFF too.
+# A subagent of an agent that scripts/loop/run-builder started has LOOP_HAND_OFF too.
 if [[ -n $agent_id && -n ${LOOP_HAND_OFF:-} ]]; then
   exit 0
 fi
-# The types in .claude/agents that hand off are auditor, builder and builder-<kind of issue>.
+# The input of a session that scripts/loop/run-builder started has no type, so the session has it in LOOP_HAND_OFF.
+if [[ -z $agent_id ]]; then
+  agent_type=${LOOP_HAND_OFF:-}
+fi
+# The types in .claude/agents that hand off are auditor, builder, builder-<kind of issue>, reviewer and researcher.
 case $agent_type in
-  "" | auditor | builder | builder-*) ;;
+  auditor | builder | builder-*)
+    how="To hand off, push your branch. Then write a comment on your issue or pull request with what's done, what's left, the commands you ran and where their outputs are, and the open questions. End with a report that says that you handed off, with the comment's link."
+    ;;
+  reviewer)
+    how="To hand off, end with a report that says that you handed off, with the errors that you have found so far, and the parts of the diff that you haven't read yet."
+    ;;
+  researcher)
+    how="To hand off, write a comment on your issue with what you have found so far, what's left to find out, and the open questions. End with a report that says that you handed off, with the comment's link."
+    ;;
   *) exit 0 ;;
 esac
 # A subagent's hook gets the transcript of its session, and the subagent's own is in a folder next to it.
@@ -170,7 +182,6 @@ fi
 notes=$loop/hand-offs
 mkdir -p "$notes" 2>/dev/null
 
-how="To hand off, push your branch. Then write a comment on your issue or pull request with what's done, what's left, the commands you ran and where their outputs are, and the open questions. End with a report that says that you handed off, with the comment's link."
 note=""
 if ((size > now_tokens)); then
   # The note to hand off at the next stopping point would come too late after this one.

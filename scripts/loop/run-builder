@@ -155,7 +155,7 @@ REVIEW_BRIEF = """You review pull request #{number} for the orchestrator of this
 while you work, so decide what you can. You work in a worktree of your own, detached at the pull request's head, so you
 needn't check it out. Push nothing. Your last message is your report to the orchestrator.
 """
-# The environment variable that tells scripts/hooks/hand-off that a session is a builder that may hand off its work
+# The environment variable that tells scripts/hooks/hand-off the type of a session that may hand off its work
 HAND_OFF_VARIABLE = "LOOP_HAND_OFF"
 CODEX_BRIEF = """Your sandbox can't write the git folder or reach the network, so don't run git or gh. Edit the files in
 this worktree, which is on the issue's branch. Run scripts/check, and fix each failure that your change causes. In the
@@ -265,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
         elif is_test:
             outcome = test_build(settings, work.kind, message, account, subject, options.test, folders)
         else:
-            outcome = build(work.tool, settings, work.kind, message, account, subject, folders)
+            outcome = build(work, settings, message, account, subject, folders)
     except Stop as stop:
         outcome = Outcome(f"failed: {stop}", is_ok=False)
     minutes = (time.monotonic() - begun) / 60
@@ -336,9 +336,8 @@ def type_settings(tool: str, agent_type: str | None, test: int | None) -> agent_
 
 
 def build(
-    tool: str,
+    work: Work,
     settings: agent_log.AgentSettings,
-    kind: str,
     message: str,
     account: Account,
     issue: dict[str, Any],
@@ -349,12 +348,12 @@ def build(
     branch = issue_branch(issue["number"], folders)
     try:
         add_worktree(branch, folders)
-        if tool == "claude":
-            brief = write_brief(issue, kind, message, CLAUDE_BRIEF, folders)
-            run_claude(brief, account, settings, folders, can_hand_off=True)
+        if work.tool == "claude":
+            brief = write_brief(issue, work.kind, message, CLAUDE_BRIEF, folders)
+            run_claude(brief, account, settings, folders, hand_off_type=work.agent_type)
             outcome = Outcome("finished")
         else:
-            run_codex(write_brief(issue, kind, message, CODEX_BRIEF, folders), account, folders)
+            run_codex(write_brief(issue, work.kind, message, CODEX_BRIEF, folders), account, folders)
             outcome = finish_codex(issue, branch, folders)
     except Stop as stop:
         outcome = Outcome(f"failed: {stop}", is_ok=False)
@@ -387,7 +386,7 @@ def test_build(
     try:
         # A hand-off posts a comment on the issue, and a test build changes nothing on GitHub.
         brief = write_brief(issue, kind, message, TEST_BRIEF, folders)
-        run_claude(brief, account, settings, folders, can_hand_off=False)
+        run_claude(brief, account, settings, folders, hand_off_type=None)
         outcome = Outcome(f"test finished, changes in {folders.run / CHANGES_FILE}")
     except Stop as stop:
         outcome = Outcome(f"failed: {stop}", is_ok=False)
@@ -417,8 +416,7 @@ def review(
         message_text = MESSAGE_BRIEF.format(message=message) if message else ""
         brief = REVIEW_NUMBER.format(number=number) + message_text + REVIEW_BRIEF.format(number=number)
         (folders.run / "brief.md").write_text(brief)
-        # A hand-off posts a comment on an issue, and a reviewer has none.
-        run_claude(brief, account, settings, folders, can_hand_off=False)
+        run_claude(brief, account, settings, folders, hand_off_type=REVIEWER_TYPE)
         outcome = Outcome("finished")
     except Stop as stop:
         outcome = Outcome(f"failed: {stop}", is_ok=False)
@@ -633,11 +631,12 @@ def write_brief(issue: dict[str, Any], kind: str, message: str, run_brief: str, 
 
 
 def run_claude(
-    brief: str, account: Account, settings: agent_log.AgentSettings, folders: Folders, *, can_hand_off: bool
+    brief: str, account: Account, settings: agent_log.AgentSettings, folders: Folders, *, hand_off_type: str | None
 ) -> None:
     """Runs claude with the type's settings until it ends, and writes its result to report.md in the run folder.
     claude sends the tokens of its requests to the loop's receiver, which this starts if it isn't running. With
-    can_hand_off, scripts/hooks/hand-off tells the builder to hand off its work once its context grows too long."""
+    hand_off_type, scripts/hooks/hand-off tells the agent to hand off its work once its context grows too long, with the
+    steps of that agent type."""
     try:
         port = request_events.receiver_port(paths.loop_dir())
     except request_events.ReceiverError as error:
@@ -645,10 +644,10 @@ def run_claude(
     # The first variable makes claude wait through a usage limit. The second keeps the hooks from logging the agents
     # that the builder starts, because the run's tokens count theirs.
     variables = {"CLAUDE_CODE_RETRY_WATCHDOG": "1", agent_log.RUN_VARIABLE: "1"}
-    if can_hand_off:
-        variables[HAND_OFF_VARIABLE] = "1"
+    if hand_off_type:
+        variables[HAND_OFF_VARIABLE] = hand_off_type
     environment = request_events.with_events(claude_environment(account) | variables, port)
-    if not can_hand_off:
+    if not hand_off_type:
         environment.pop(HAND_OFF_VARIABLE, None)
     model_options = [
         *option("--model", settings.model),

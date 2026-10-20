@@ -70,7 +70,7 @@ class ReviewTest(RunBuilderTest):
         self.assertTrue(brief.startswith("7\n\nYou review pull request #7 for the orchestrator"))
         self.assertNotIn("CLAUDE_CONFIG_DIR", call["env"])
         self.assertEqual(call["env"]["LOOP_RUN"], "1")
-        self.assertNotIn("LOOP_HAND_OFF", call["env"])
+        self.assertEqual(call["env"]["LOOP_HAND_OFF"], "reviewer")
         self.assertFalse(self.worktree.exists())
         self.assertEqual(self.git("worktree", "list", "--porcelain").count("worktree "), 1)
         self.assert_changed_nothing_on_github()
