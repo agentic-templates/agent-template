@@ -29,6 +29,11 @@ importlib.machinery.SourceFileLoader("meter", str(METER)).exec_module(meter)
 NEW_YORK = ZoneInfo("America/New_York")
 NOW = dt.datetime(2026, 10, 18, 3, 8, tzinfo=NEW_YORK)
 
+# The line that Claude Code writes in an agent's transcript when the user interrupts the agent
+INTERRUPTION = json.dumps(
+    {"type": "user", "message": {"content": [{"type": "text", "text": "[Request interrupted by user for tool use]"}]}}
+)
+
 # A stand-in for claude and gh. It writes each call to calls.jsonl in STANDIN_DIR, with the folder it runs in, the files
 # there and some variables. claude gives the next answer in claude.json there, and the last one again when they run out.
 # gh gives the answer in gh.json. An answer can sleep, print to stdout and stderr, and exit with a status. -S keeps
@@ -388,6 +393,25 @@ class AccountLineTest(MeterTest):
         self.answer("claude", [usage_output(14)])
         self.assertIn(" | per agent-minute session 0.2%, week 0.02% | ", self.run_meter()[1][0])
 
+    def test_counts_the_minutes_that_an_agent_worked_before_the_user_interrupted_it(self) -> None:
+        self.run_meter()
+        start = {"at": NOW.isoformat(), "event": "start", "id": "toolu_01", "type": "builder", "test": False}
+        (self.loop / "agents.jsonl").write_text(json.dumps(start | {"account": "claude", "pid": os.getpid()}) + "\n")
+        subagents = paths.claude_project_folder(paths.main_checkout()) / "abc123" / "subagents"
+        call = {"type": "assistant", "message": {"id": "m1", "usage": {"input_tokens": 1000}}}
+        lines = [
+            {"type": "user", "timestamp": NOW.isoformat(), "message": {"content": "go"}},
+            call | {"timestamp": (NOW + dt.timedelta(minutes=1)).isoformat()},
+            call | {"timestamp": (NOW + dt.timedelta(minutes=25)).isoformat()},
+            INTERRUPTION,
+        ]
+        transcript = write_transcript(subagents / "agent-a1.jsonl", lines)
+        transcript.with_suffix(".meta.json").write_text(json.dumps({"agentType": "builder", "toolUseId": "toolu_01"}))
+        self.clock.time = NOW + dt.timedelta(minutes=30)
+        # The 5-hour meter rose 5 points in the 25 minutes that the agent worked.
+        self.answer("claude", [usage_output(13)])
+        self.assertIn(" | per agent-minute session 0.2%, week 0.02% | ", self.run_meter()[1][0])
+
     def test_measures_nothing_from_a_reading_more_than_60_minutes_old(self) -> None:
         self.run_meter()
         self.log_agent("claude", NOW, NOW + dt.timedelta(minutes=61))
@@ -717,9 +741,21 @@ class WakeTest(MeterTest):
         self.assertEqual((status, self.readings), (1, [0, 1800]))
         self.assertTrue(lines[0].startswith("claude | no reading: "))
 
-    def test_ends_at_once_when_the_first_reading_fails(self) -> None:
-        self.answer("claude", [{"stdout": "Not logged in"}])
-        self.assertEqual((self.run_meter("--wake")[0], self.readings), (1, [0]))
+    def test_goes_on_while_an_account_has_no_reading_from_the_start_until_it_comes_back(self) -> None:
+        self.accounts({"name": "one", "tool": "claude"}, {"name": "two", "tool": "claude"})
+        failed, week_full = {"stdout": "Not logged in"}, usage_output(10, week=99)
+        self.answer("claude", [failed, week_full, failed, week_full, usage_output(8), week_full])
+        status, lines, _ = self.run_meter("--wake")
+        self.assertEqual((status, self.readings), (0, [0, 600, 1200]))
+        self.assertTrue(lines[0].startswith("one 03:28 | session 8% ") and lines[0].endswith(" | go"))
+
+    def test_ends_when_an_account_loses_its_reading_while_another_has_none_from_the_start(self) -> None:
+        self.accounts({"name": "one", "tool": "claude"}, {"name": "two", "tool": "claude"})
+        failed = {"stdout": "Not logged in"}
+        self.answer("claude", [failed, usage_output(8), failed, failed])
+        status, lines, _ = self.run_meter("--wake")
+        self.assertEqual((status, self.readings), (1, [0, 600]))
+        self.assertTrue(lines[1].startswith("two | no reading: "))
 
 
 # A reading of a Mac with Apple silicon

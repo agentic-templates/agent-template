@@ -144,7 +144,7 @@ fi
 # The types in .claude/agents that hand off are auditor, builder, builder-<kind of issue>, reviewer and researcher.
 case $agent_type in
   auditor | builder | builder-*)
-    how="To hand off, push your branch. Then write a comment on your issue or pull request with what's done, what's left, the commands you ran and where their outputs are, and the open questions. End with a report that says that you handed off, with the comment's link."
+    how="To hand off, push your branch. Then write a comment on your issue or pull request with what's done, what's left, the commands you ran and where their outputs are, and the open questions. End with a report that says that you handed off, with the comment's link and the GHSA ID of each vulnerability that you recorded privately."
     ;;
   reviewer)
     how="To hand off, end with a report that says that you handed off, with the errors that you have found so far, and the parts of the diff that you haven't read yet."

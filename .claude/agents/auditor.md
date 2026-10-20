@@ -13,7 +13,9 @@ docs/rules.md for a change to a rule or to an agent type's instructions.
 1. Read AGENTS.md and docs/loop.md before you change anything. Open an issue for the retrospective, and make all
    your changes in one pull request, as "Make a change" in AGENTS.md describes. If your prompt links the hand-off
    comment of an earlier auditor, open no issue. Go on with that auditor's issue and branch instead, from where the
-   comment says the work stands.
+   comment says the work stands. In your worktree, run `touch "$(git rev-parse --git-path loop-retrospective)"`
+   before your first heavy command, such as `scripts/check`, so that your heavy commands wait behind those of the
+   other agents.
 2. List the earlier retrospectives with `gh pr list --state merged --label retrospective --json number,mergedAt,body`,
    and read their descriptions.
 3. Run `scripts/loop/report --since <time> --issues`. The time is the latest `mergedAt` of the earlier retrospectives,

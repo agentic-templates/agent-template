@@ -157,3 +157,26 @@ class OpenedPullRequestTest(TranscriptTest):
             result_line(4, "toolu_2", "pull request create failed: GraphQL: No commits between main and work"),
         )
         self.assertIsNone(transcripts.opened_pull_request(self.file))
+
+
+class InterruptedTest(TranscriptTest):
+    def test_says_that_the_user_interrupted_the_agent_when_the_last_message_says_so(self) -> None:
+        interruption = prompt_line(2, [{"type": "text", "text": "[Request interrupted by user for tool use]"}])
+        lines = [prompt_line(0), call_line("a", 1), interruption, '{"type": "last-prompt"}', '{"cut off']
+        self.assertTrue(transcripts.is_interrupted(self.write(*lines)))
+
+    def test_says_no_when_a_message_or_a_call_came_after_the_interruption_or_there_was_none(self) -> None:
+        interruption = prompt_line(2, "[Request interrupted by user]")
+        cases: dict[str, list[Any]] = {
+            "message": [prompt_line(0), interruption, prompt_line(3, "Go on.")],
+            "call": [prompt_line(0), interruption, call_line("b", 3)],
+            "no interruption": [prompt_line(0), call_line("a", 1)],
+            "no message": ['{"type": "last-prompt"}'],
+        }
+        for case, lines in cases.items():
+            with self.subTest(case=case):
+                self.assertFalse(transcripts.is_interrupted(self.write(*lines)))
+
+    def test_says_no_without_a_transcript(self) -> None:
+        self.assertFalse(transcripts.is_interrupted(self.file))
+

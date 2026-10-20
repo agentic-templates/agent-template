@@ -26,7 +26,7 @@ Read each guide before you first do its kind of work in a session, even when the
 - [docs/loop.md](docs/loop.md), before you run the loop as its orchestrator.
 - [docs/writing.md](docs/writing.md), before you write anything that others read: docs, issues, pull requests, commit messages, comments, error messages, and replies and reports to the maintainer.
 - [docs/pages.md](docs/pages.md), before you write or change the README, AGENTS.md or a page in `docs/`.
-- [docs/rules.md](docs/rules.md), before you change AGENTS.md, a guide or the labels.
+- [docs/rules.md](docs/rules.md), before you change AGENTS.md, a guide or the labels, and before you write an issue that asks for such a change.
 - [docs/code.md](docs/code.md), before you write or review code.
 - [docs/dependencies.md](docs/dependencies.md), before you add or update a tool, a package or a GitHub Action.
 - [docs/languages.md](docs/languages.md), before you add a language to the project, at setup or later.
@@ -46,6 +46,8 @@ When a request doesn't fit this direction, say so, and ask the maintainer whethe
 - `scripts/check`: runs the checks that CI runs on the code.
 - `scripts/loop/run-heavy <command> [<argument>...]`: runs a heavy command, such as a build or tests, once the machine has room for it. `scripts/check` waits for room by itself.
 - `scripts/loop/run-heavy scripts/loop/run-tests`: runs only the tests of the Python scripts.
+- `scripts/loop/run-heavy <test file>`: runs the tests of one script or hook, such as `scripts/start-issue.test` for `scripts/start-issue`, or `scripts/test-check` for `scripts/check`.
+- `scripts/loop/run-heavy uv run --locked --quiet python -m unittest discover -s scripts/loop -p <test file>`: runs the tests of one Python file, such as `test_room.py` for `scripts/loop/room.py`.
 
 Keep the checks on a pull request within about a minute.
 
@@ -79,7 +81,7 @@ If a maintainer asks for something that's bigger than one pull request or needs 
 1. Start from an issue. If you don't have one yet, search with `gh issue list --state all --search "<words>"`, and use an open issue that asks for the change. Otherwise open one with `gh issue create`, and mention any closed issue that asked for the same change. Make the "Done when" section of its body a list of results that someone can check. If your issue is marked as blocked by research issues, read their answers.
 2. Run `scripts/start-issue <issue>`. It checks out the issue's branch.
 3. Before you edit a file, read every AGENTS.md from the root down to the file's own folder. Where the AGENTS.md files differ, the one closest to the file wins.
-4. Make the change. Run `scripts/check` and fix every failure that your change causes. For each failure that also happens on main, and each other problem you notice outside your issue, open an issue with the type that fits, unless one is open already. If you reproduced a bug, give its issue the `ready` label. List the issues you opened in your report, so that the orchestrator plans them. If your change can't pass until the issue for one of these problems is fixed, mark your issue as blocked by that issue with `gh issue edit <issue> --add-blocked-by <other issue>`, and say so in your report. If main or a release has a security vulnerability that isn't public yet, don't describe it in an issue, a pull request or a commit before a release fixes it. Say in your report that you found one, and record it as "Record a vulnerability privately" in `docs/releasing.md` describes.
+4. Make the change. While you work, run only the tests of the files you change, with the commands in "Commands". Run `scripts/check` once, when the change is done, and fix every failure that your change causes. For each failure that also happens on main, and each other problem you notice outside your issue, open an issue with the type that fits, unless one is open already. If you reproduced a bug, give its issue the `ready` label. List the issues you opened in your report, so that the orchestrator plans them. If your change can't pass until the issue for one of these problems is fixed, mark your issue as blocked by that issue with `gh issue edit <issue> --add-blocked-by <other issue>`, and say so in your report. If main or a release has a security vulnerability that isn't public yet, don't describe it in an issue, a pull request or a commit before a release fixes it. Say in your report that you found one, and record it as "Record a vulnerability privately" in `docs/releasing.md` describes.
 5. Push the branch, and open a pull request with `gh pr create`. In Claude Code, a hook then turns on auto-merge and says so. Elsewhere, turn it on with `gh pr merge <number>`. Auto-merge is the maintainer's standing request for every pull request of work they asked for, so don't ask about merging, and don't offer Claude Code's Auto-fix. GitHub merges the pull request once its checks pass, so don't wait for them. If the maintainer wants to see the pull request before it merges, open it with `--draft`.
 
 ## Commits
