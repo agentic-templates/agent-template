@@ -85,14 +85,12 @@ stop_process_tree() {
 
 # While the test process runs, stops each hook that has run for a whole round of hook_time_limit seconds:
 # watch_hooks <test process>
-# The hook runs in a subshell of the test, so the function stops every process that the test started, other than its
-# own. The test then gets the hook's result, with code 137, and goes on with its next case.
+# The hook runs in a subshell of the test, so the function stops every process that the test started. The test then
+# gets the hook's result, with code 137, and goes on with its next case.
 watch_hooks() {
-  local test_process=$1 own_process sleep_process="" child hook_state round_start=$hook_watch_folder/round-start
+  local test_process=$1 sleep_process="" child hook_state round_start=$hook_watch_folder/round-start
   # finish_tests stops the function. wait, unlike sleep, lets the trap run at once.
   trap 'kill "$sleep_process" 2>/dev/null; exit 0' TERM
-  # $$ is the test's process in a subshell too, and bash 3.2 has no BASHPID.
-  own_process=$(exec sh -c 'echo "$PPID"')
   while kill -0 "$test_process" 2>/dev/null; do
     touch "$round_start"
     sleep "$hook_time_limit" &
@@ -102,17 +100,19 @@ watch_hooks() {
     if [[ $hook_state == running && ! $hook_state_file -nt $round_start ]]; then
       : >"$stopped_hook_file"
       for child in $(pgrep -P "$test_process"); do
-        if [[ $child != "$own_process" ]]; then
-          stop_process_tree "$child"
-        fi
+        stop_process_tree "$child"
       done
     fi
   done
   rm -rf "$hook_watch_folder"
 }
-# Its output goes to /dev/null, so that a tool that reads the test's output doesn't wait for it to end.
-watch_hooks "$$" >/dev/null 2>&1 &
-hook_watcher=$!
+# A subshell starts the function and ends, so that the function isn't a process of the test, which a wait without
+# arguments in the test would wait for, as in session-start.test. Its output goes to /dev/null, so that a tool that
+# reads the test's output, and the subshell's here, doesn't wait for it to end.
+hook_watcher=$(
+  watch_hooks "$$" >/dev/null 2>&1 &
+  echo "$!"
+)
 
 # The checks log each block here, in place of .loop/blocks.log, so that the tests' blocks stay out of the
 # repository's log.
