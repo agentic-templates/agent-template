@@ -178,11 +178,11 @@ to hand off its work, so that you can plan the agent that takes over. Start it a
 ends.
 
 Your own account is the Claude account in `.loop/accounts.json` whose `env` values match this session's
-environment, such as `CLAUDE_CONFIG_DIR`. For each builder and researcher, choose the account whose line has the
-lowest `week` percentage, among the accounts whose advice lets you start the agent. A Codex account builds only the
-kinds `research` and `other`. Start a builder of the type `builder-deep`, and each builder that takes over a hand-off,
-only on a Claude account. Start reviewers and the auditor on your own account, in your session. Each account's advice
-says what you can start on that account:
+environment, such as `CLAUDE_CONFIG_DIR`. For each builder, researcher and reviewer, choose the account whose line has
+the lowest `week` percentage, among the accounts whose advice lets you start the agent. A Codex account builds only the
+kinds `research` and `other`. Start these agents only on a Claude account: each reviewer, each builder of the type
+`builder-deep`, and each builder that takes over a hand-off. Start the auditor on your own account, in your session.
+Each account's advice says what you can start on that account:
 
 - **go:** start any agent.
 - **watch:** keep the number of agents that run on the account from growing, and start no auditor.
@@ -193,13 +193,14 @@ says what you can start on that account:
 - **no reading:** start nothing on the account, and fix what the account's line names, or ask the maintainer if the
   fix needs them.
 
-To start an agent for an issue on another account, run one of these commands as a background task, with the line
-that `scripts/take-next-issue` printed as `<issue> <kind>`. Its last line says how the run ended, and where the
-agent's report is.
+To start an agent on another account, run one of these commands as a background task. For an issue, give the line
+that `scripts/take-next-issue` printed in place of `<issue> <kind>`. The command's last line says how the run ended,
+and where the agent's report is.
 
-- `scripts/loop/run-builder <issue> <kind> --tool codex --account <name>` for a Codex account
-- `scripts/loop/run-builder <issue> <kind> --tool claude --account <name> --type <type>` for a Claude account, with
-  the type that fits the issue, as step 3 of "Launch" chooses it
+- `scripts/loop/run-builder <issue> <kind> --tool codex --account <name>` for an issue on a Codex account
+- `scripts/loop/run-builder <issue> <kind> --tool claude --account <name> --type <type>` for an issue on a Claude
+  account, with the type that fits the issue, as step 3 of "Launch" chooses it
+- `scripts/loop/run-builder --review <pull request> --account <name>` for a reviewer
 
 If no account can take the issue that `scripts/take-next-issue` gave you, remove your assignment from it. Then run
 the script again, followed by the number of each issue that no account can take, such as
