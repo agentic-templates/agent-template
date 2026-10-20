@@ -368,6 +368,8 @@ expect_allow Bash 'gh pr -d close 7'
 # gh skips an empty word while it looks for the subcommand, and finds none after --.
 expect_before_and_after_subcommand 2 "$delete_branch" pr "'' --delete-branch=true" close '7'
 expect_allow Bash 'gh pr -- close 7 --delete-branch'
+# gh reports an unknown command x and closes nothing, rather than reading -- and x as a flag and its value.
+expect_allow Bash 'gh pr -- x close 7 --delete-branch'
 
 # gh issue develop on an issue with needs-triage
 TEST_LABELS="feature needs-triage"
