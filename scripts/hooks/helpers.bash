@@ -428,29 +428,33 @@ read_arguments() {
   target+=(${repository[@]+"${repository[@]}"})
 }
 
-# Succeeds if the gh command in command_words has the flag --help, so that it only prints its help. -h doesn't count,
-# because gh repo create and gh repo edit read it as --homepage. gh reads a word after -- as an argument, and the word
-# after a flag that takes a value as that value, as in --description --help. The hook doesn't know which flags take a
-# value, so --help counts only after a word that isn't a flag, or after a flag that gives its value after =. It counts
-# only before the first word with an expansion, such as $text, because that word can become --, or nothing, as in
+# Succeeds if the gh command in command_words gives --help a true value last, so that it only prints its help. gh reads
+# the value as is_true_flag_value does. -h doesn't count, because gh repo create and gh repo edit read it as --homepage.
+# gh reads the word after a flag that takes a value as that value, as in --description --help. The hook doesn't know
+# which flags take a value, so a true --help counts only after a word that isn't a flag, or after a flag that gives its
+# value after =, while a false one counts after any word. gh reads the words after -- as arguments, unless -- is the
+# value of the flag before it. The hook can't tell which, so the function fails at --. It also fails for a command with
+# a word that may expand, such as $text, because that word can become --help=false, --, or nothing, as in
 # --body $text --help.
 prints_help() {
-  local i previous
+  local i previous flag value value_is_next_word flags_before asks_for_help=""
+  if has_word_that_may_expand; then
+    return 1
+  fi
   for ((i = 2; i < ${#command_words[@]}; i++)); do
-    if [[ -n ${command_word_may_expand[i - 1]:-} ]]; then
-      return 1
-    fi
-    previous=${command_words[i - 1]}
     case ${command_words[i]} in
       --) return 1 ;;
-      --help)
-        if [[ $previous != -* || $previous == *=* ]]; then
-          return 0
-        fi
-        ;;
+      --help | --help=*) split_flag_word "${command_words[i]}" "" ;;
+      *) continue ;;
     esac
+    previous=${command_words[i - 1]}
+    if ! is_true_flag_value "$value"; then
+      asks_for_help=""
+    elif [[ $previous != -* || $previous == *=* ]]; then
+      asks_for_help=yes
+    fi
   done
-  return 1
+  [[ -n $asks_for_help ]]
 }
 
 # Succeeds if read_arguments or read_push_arguments found one of these flags: has_flag <flag>...
