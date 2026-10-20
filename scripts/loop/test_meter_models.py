@@ -1,12 +1,12 @@
 import datetime as dt
 import json
-import re
 import unittest
-from pathlib import Path
 from typing import Any
 from unittest import mock
 
 import models
+from agent_log import AGENTS_FOLDER
+from test_agent_files import front_matter
 from test_meter import NOW, MeterTest, usage_output
 
 TESTED = {
@@ -15,7 +15,6 @@ TESTED = {
     "haiku": "claude-haiku-5-5",
     "fable": "claude-fable-5-1",
 }
-AGENT_TYPES = Path(__file__).resolve().parents[2] / ".claude" / "agents"
 
 
 def model_answer(*model_ids: str) -> dict[str, str]:
@@ -141,10 +140,6 @@ class ModelsTest(MeterTest):
 
 class TestedModelsTest(unittest.TestCase):
     def test_lists_the_model_of_each_agent_type(self) -> None:
-        named = {
-            match.group(1)
-            for agent_type in AGENT_TYPES.glob("*.md")
-            if (match := re.search(r"^model: (\S+)$", agent_type.read_text(), re.MULTILINE))
-        }
+        named = {model for file in AGENTS_FOLDER.glob("*.md") if (model := front_matter(file).get("model"))}
         self.assertTrue(named)
         self.assertLessEqual(named, models.tested())

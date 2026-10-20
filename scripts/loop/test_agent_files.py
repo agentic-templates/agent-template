@@ -2,10 +2,18 @@
 file."""
 
 import unittest
+from pathlib import Path
+from typing import Any
 
 import yaml
 
 from agent_log import AGENTS_FOLDER
+
+
+def front_matter(file: Path) -> Any:
+    """The YAML between the first two lines of --- in an agent file."""
+    _, text, _ = file.read_text().split("---\n", 2)
+    return yaml.safe_load(text)
 
 
 class AgentFileTest(unittest.TestCase):
@@ -21,9 +29,8 @@ class AgentFileTest(unittest.TestCase):
     def test_each_agent_file_names_the_full_id_of_its_model(self) -> None:
         for file in sorted(AGENTS_FOLDER.glob("*.md")):
             with self.subTest(file=file.name):
-                _, front_matter, _ = file.read_text().split("---\n", 2)
                 self.assertRegex(
-                    str(yaml.safe_load(front_matter).get("model")),
+                    str(front_matter(file).get("model")),
                     r"^claude-[a-z]+-[0-9]",
                     "Name the model's full ID, such as claude-opus-5-5, and not an alias such as opus, so that the type "
                     "keeps its model until a retrospective tests a newer one.",

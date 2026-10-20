@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# Tests scripts/script-tests-needed, with paths and patches on standard input.
+# Tests scripts/script-tests-needed, with GitHub's objects for the changed files on standard input.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 script=$PWD/scripts/script-tests-needed
 
-# A folder with an agent file, whose frontmatter ends on line 4, for the cases with patches.
+# A folder with an agent file, whose frontmatter ends on line 4, and one without frontmatter, for the cases with
+# patches.
 folder=$(mktemp -d)
 trap 'rm -rf "$folder"' EXIT
 mkdir -p "$folder/.claude/agents"
 printf '%s\n' --- "name: sample" "model: claude-opus-5-5" --- "" "First line of text." "Second line of text." \
   >"$folder/.claude/agents/sample.md"
+printf '%s\n' "First line of text." "Second line of text." >"$folder/.claude/agents/plain.md"
 
 case_count=0
 failed_cases=0
@@ -26,13 +28,12 @@ expect_status() {
   fi
 }
 
-# Runs the script on paths given as arguments, one to a line on its standard input: with_paths [<path>...]
+# Runs the script on the objects of files that the change modifies, without their patches, given by their paths:
+# with_paths [<path>...]
 with_paths() {
-  if (($# == 0)); then
-    "$script" </dev/null
-  else
-    printf '%s\n' "$@" | "$script"
-  fi
+  local files
+  files=$(jq -nc '$ARGS.positional[] | {filename: ., status: "modified"}' --args "$@")
+  "$script" <<<"$files"
 }
 
 expect_status "When the change touches only text" 1 with_paths README.md AGENTS.md docs/code.md LICENSE
@@ -43,36 +44,66 @@ expect_status "When the change touches a workflow" 0 with_paths .github/workflow
 expect_status "When the change touches the Claude Code settings" 0 with_paths .claude/settings.json
 expect_status "When the change touches the Codex hooks" 0 with_paths .codex/hooks.json
 expect_status "When a file's name only starts like a folder" 1 with_paths scripts.md docs/scripts/notes.md
+expect_status "When a file's name looks like the first line of a hunk, and a script changes" 0 \
+  with_paths "@@ -1,9 +1,9 @@" scripts/check
 expect_status "When it gets an argument" 2 "$script" --all
 
-# Runs the script in the folder with the agent file, on lines given as arguments: with_lines <line>...
-with_lines() {
+# Prints GitHub's object for a changed file, with a patch of the lines given: changed_file <path> <status> <line>...
+changed_file() {
+  local path=$1 status=$2
+  shift 2
+  jq -nc --arg path "$path" --arg status "$status" --arg patch "$(printf '%s\n' "$@")" \
+    '{filename: $path, status: $status, patch: $patch}'
+}
+
+# Runs the script in the folder with the agent files, on the objects given as arguments: with_files <object>...
+with_files() {
   (cd "$folder" && printf '%s\n' "$@" | "$script")
 }
 
-text_change=("@@ -4,3 +4,3 @@" " ---" " " "-First line of text." "+First line of the text." " Second line of text.")
-expect_status "When the change touches only the text of an agent file" 1 \
-  with_lines .claude/agents/sample.md "${text_change[@]}"
+text_change=$(changed_file .claude/agents/sample.md modified "@@ -4,3 +4,3 @@" " ---" " " "-First line of text." \
+  "+First line of the text." " Second line of text.")
+first_text_line_removed=$(changed_file .claude/agents/sample.md modified "@@ -4,3 +4,2 @@" " ---" "-" \
+  " First line of text.")
+docs_change=$(changed_file README.md modified "@@ -1 +1 @@" "-# Old" "+# New")
+frontmatter_change=$(changed_file .claude/agents/sample.md modified "@@ -1,4 +1,4 @@" " ---" " name: sample" \
+  "-model: claude-opus-5-4" "+model: claude-opus-5-5" " ---")
+frontmatter_end_change=$(changed_file .claude/agents/sample.md modified "@@ -2,3 +2,4 @@" " name: sample" \
+  " model: claude-opus-5-5" "+effort: max" " ---")
+lines_before_hunk=$(changed_file .claude/agents/sample.md modified " ---" " name: sample" " model: claude-opus-5-5" \
+  " ---" " " "-First line of text." "+First line of the text.")
+removal_without_context=$(changed_file .claude/agents/sample.md modified "@@ -5 +4,0 @@" "-")
+change_without_frontmatter=$(changed_file .claude/agents/plain.md modified "@@ -1,2 +1,2 @@" " First line of text." \
+  "-Second line of text." "+Second line of the text.")
+renamed_from_docs=$(jq -c '. + {status: "renamed", previous_filename: "docs/sample.md"}' <<<"$text_change")
+renamed_in_agents=$(jq -c '. + {status: "renamed", previous_filename: ".claude/agents/old.md"}' <<<"$text_change")
+added=$(changed_file .claude/agents/sample.md added "@@ -0,0 +1,3 @@" +--- "+name: sample" +---)
+removed=$(changed_file .claude/agents/gone.md removed "@@ -1,3 +0,0 @@" ---- "-name: gone" ----)
+
+expect_status "When the change touches only the text of an agent file" 1 with_files "$text_change"
 expect_status "When the change removes the first line of the text of an agent file" 1 \
-  with_lines .claude/agents/sample.md "@@ -4,3 +4,2 @@" " ---" "-" " First line of text."
-expect_status "When the change touches the text of an agent file and the docs, with their patches" 1 \
-  with_lines README.md "@@ -1 +1 @@" "-# Old" "+# New" .claude/agents/sample.md "${text_change[@]}" docs/code.md
-expect_status "When the change touches the frontmatter of an agent file" 0 \
-  with_lines .claude/agents/sample.md "@@ -1,4 +1,4 @@" " ---" " name: sample" "-model: claude-opus-5-4" \
-  "+model: claude-opus-5-5" " ---"
+  with_files "$first_text_line_removed"
+expect_status "When the change touches the text of an agent file and the docs" 1 \
+  with_files "$docs_change" "$text_change" '{"filename": "docs/code.md", "status": "modified"}'
+expect_status "When the change touches the frontmatter of an agent file" 0 with_files "$frontmatter_change"
 expect_status "When the change adds a line at the end of the frontmatter of an agent file" 0 \
-  with_lines .claude/agents/sample.md "@@ -2,3 +2,4 @@" " name: sample" " model: claude-opus-5-5" "+effort: max" " ---"
+  with_files "$frontmatter_end_change"
 expect_status "When the change touches the text of an agent file and another file in .claude/" 0 \
-  with_lines .claude/agents/sample.md "${text_change[@]}" .claude/settings.json
-expect_status "When the change touches an agent file without its patch" 0 with_lines .claude/agents/sample.md
-expect_status "When the change renames an agent file" 0 \
-  with_lines .claude/agents/sample.md "${text_change[@]}" .claude/agents/old.md
-expect_status "When the change adds an agent file" 0 \
-  with_lines .claude/agents/sample.md "@@ -0,0 +1,3 @@" +--- "+name: sample" +---
-expect_status "When the change deletes an agent file" 0 \
-  with_lines .claude/agents/gone.md "@@ -1,3 +0,0 @@" ---- "-name: gone" ----
-expect_status "When the input cuts a patch of an agent file short" 0 \
-  with_lines .claude/agents/sample.md "@@ -4,3 +4,3 @@" " ---" " "
+  with_files "$text_change" '{"filename": ".claude/settings.json", "status": "modified"}'
+expect_status "When the change touches the text of an agent file, a file whose name looks like a hunk, and a script" 0 \
+  with_files "$text_change" '{"filename": "@@ -1,9 +1,9 @@", "status": "added"}' \
+  '{"filename": "scripts/check", "status": "modified"}'
+expect_status "When the change touches an agent file without its patch" 0 \
+  with_files '{"filename": ".claude/agents/sample.md", "status": "modified"}'
+expect_status "When the change removes the first line of the text of an agent file, in a hunk without context" 1 \
+  with_files "$removal_without_context"
+expect_status "When the patch of an agent file has lines before its first hunk" 0 with_files "$lines_before_hunk"
+expect_status "When the change touches an agent file without frontmatter" 0 with_files "$change_without_frontmatter"
+expect_status "When the change moves a file from docs/ into .claude/agents/ and changes its text" 0 \
+  with_files "$renamed_from_docs"
+expect_status "When the change renames an agent file and changes its text" 0 with_files "$renamed_in_agents"
+expect_status "When the change adds an agent file" 0 with_files "$added"
+expect_status "When the change deletes an agent file" 0 with_files "$removed"
 
 if ((failed_cases > 0)); then
   echo "error: $failed_cases of the $case_count cases in scripts/script-tests-needed.test failed. The errors above say which." >&2
