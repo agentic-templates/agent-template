@@ -858,11 +858,38 @@ expect_takes_away 'mv .loop/advisory-marks /tmp/old-marks' mv 'move .loop/adviso
 expect_takes_away 'mv .loop/advisory-marks .loop/old-marks' mv 'move .loop/advisory-marks'
 expect_takes_away 'mv -t /tmp .loop/advisory-marks' mv 'move .loop/advisory-marks'
 expect_takes_away 'mv .loop .loop-old' mv 'move .loop'
+# The shell turns a word with a brace expansion into several words before the command runs, so the last word of mv can
+# turn into a source too.
+expect_takes_away 'mv .loop/advisory-marks{,.old}' mv 'move .loop/advisory-marks{,.old}'
+expect_takes_away 'mv .loop/blocks.log .loop{,-old}' mv 'move .loop{,-old}'
+expect_takes_away 'rm .loop/advisory-marks{,.bak}' rm 'delete .loop/advisory-marks{,.bak}'
+expect_takes_away 'rm -rf .loop/{runs,advisory-marks}' rm 'delete .loop/{runs,advisory-marks}'
+expect_takes_away 'rm .loop/advisory-mark{r..t}' rm 'delete .loop/advisory-mark{r..t}'
+# git clean -x or -X deletes the files that git ignores, such as the loop's folder, and git stash -a or --all stashes
+# them, also when git runs in a folder inside the main checkout.
+for command in 'git clean -fdx' 'git clean -f -X' 'cd scripts && git clean -fdx' 'git -C scripts clean -fdx'; do
+  expect_takes_away "$command" git "delete the files that it ignores in $project"
+done
+for command in 'git stash -a' 'git stash push --all -m wip' 'git stash push --al' 'git stash save -ka wip'; do
+  expect_takes_away "$command" git "stash the files that it ignores in $project"
+done
 expect_allow Bash 'rm -rf .loop/runs/review-1 .loop/blocks.log'
 expect_allow Bash 'rm .loop/advisory-marks.bak'
 expect_allow Bash 'find .loop/runs -delete'
 expect_allow Bash 'mv .loop/runs/review-1 .loop/runs/review-2'
 expect_allow Bash 'cp .loop/advisory-marks /tmp/marks'
+expect_allow Bash 'mv .loop/blocks{,.old}.log'
+expect_allow Bash 'rm .loop/advisory-marks.{bak,old}'
+expect_allow Bash 'rm -rf .loop/runs/{review-1,review-2}'
+expect_allow Bash 'git clean -fd'
+# The letters after -e are the pattern that git clean keeps, and the ones after -m are the stash's message.
+expect_allow Bash "git clean -fd -e'*.xml'"
+expect_allow Bash 'git stash -u'
+expect_allow Bash 'git stash list'
+expect_allow Bash "git stash push -m'keep all'"
+# The hook can't tell the folder that git runs in.
+# shellcheck disable=SC2016 # The command is the text that the agent sends, so $folder stays as written.
+expect_allow Bash 'cd "$folder" && git clean -fdx'
 for session in abc123 "$orchestrator"; do
   expect_from "$session" agent-7 'rm .loop/reviewed-fixes' 0 ""
   expect_from "$session" agent-7 'mv .loop/reviewed-fixes /tmp/old-fixes' 0 ""
@@ -870,7 +897,12 @@ done
 # A worktree's own loop folder holds no file that a release reads.
 test_cwd=$worktree
 expect_takes_away "rm -rf '$project/.loop'" rm "delete $project/.loop"
+expect_takes_away "git -C '$project' clean -fdx" git "delete the files that it ignores in $project"
+expect_takes_away "GIT_DIR='$project/.git' GIT_WORK_TREE='$project' git stash -a" git \
+  "stash the files that it ignores in $project"
 expect_allow Bash 'rm -rf .loop'
+expect_allow Bash 'git clean -fdx'
+expect_allow Bash 'git stash -a'
 test_cwd=$project
 
 # Without an origin, the hook can't tell which repository is this one.

@@ -8,8 +8,8 @@
 #   orchestrator's session writes it, because a release includes each fix in a private fork that the first marks as
 #   reviewed without asking the maintainer, and waits for the advisories that the second marks as holding it
 # - deleting with rm, find and the like outside the repository's worktrees and the temporary folders, and deleting or
-#   moving away .loop/advisory-marks in the main checkout, or a folder that holds it, unless the orchestrator's session
-#   does it, because without the file a release waits for no advisory
+#   moving away .loop/advisory-marks in the main checkout, or a folder that holds it, also with git clean -x and
+#   git stash --all, unless the orchestrator's session does it, because without the file a release waits for no advisory
 # - making a gist public, and making a repository public or posting with gh to a repository other than this one, unless
 #   the list of allowed repositories names it. The list is .loop/allowed-repositories in the main checkout, with one
 #   owner/name to a line.
@@ -47,6 +47,9 @@ ask="Ask the maintainer, and go on with the other work."
 test_repositories="If it's a repository that agents created from this template to test it, add its owner/name to .loop/allowed-repositories in the main checkout first. Otherwise, ask the maintainer, and go on with the other work."
 security_change="Blocked: this changes the repository's rules or security settings, and only the maintainer may do that. $ask"
 marks_reason="a release waits for the fix of each advisory that it marks as holding the release"
+# A word that the shell's brace expansion can turn into several words, as in advisory-marks{,.old} and file{1..3}. Each
+# of those words keeps the text before the first { and after the last }.
+brace_expansion='^([^{]*)[{].*(,|[.][.]).*[}]([^}]*)$'
 
 # The physical paths of the home folder and of the loop's folder, and the folders inside which an agent may delete,
 # which is_settings_file, find_physical_loop and may_delete find when they first need them.
@@ -229,16 +232,19 @@ block_if_protected_file() {
 
 # Succeeds if deleting or moving a physical path takes away the loop's file of advisory marks: if the path is the file
 # or a folder that holds it. A path with the shell's wildcards, as in .loop/*, counts when they match the file or the
-# folder, also with a * that matches a /. A name in another case counts too, as in is_orchestrator_file:
-# takes_away_marks <physical path>
+# folder, also with a * that matches a /. A path with a brace expansion counts as if a * stood from its first { to its
+# last }. A name in another case counts too, as in is_orchestrator_file: takes_away_marks <physical path>
 takes_away_marks() {
-  local held
+  local held pattern=$1
   find_physical_loop || return 1
+  if [[ $pattern =~ $brace_expansion ]]; then
+    pattern="${BASH_REMATCH[1]}*${BASH_REMATCH[3]}"
+  fi
   held=$physical_loop/advisory-marks
   shopt -s nocasematch
   while [[ -n $held ]]; do
     # shellcheck disable=SC2053 # The path's wildcards match, as the shell fills them in before the command runs.
-    if [[ $held == $1 ]]; then
+    if [[ $held == $pattern ]]; then
       shopt -u nocasematch
       return 0
     fi
@@ -286,12 +292,27 @@ read_copy_operands() {
   done
 }
 
+# Blocks mv when it moves away a file that block_if_takes_away_marks protects. Without -t, the last word names where mv
+# moves to, but the shell can turn a last word with a brace expansion into sources too, as in
+# mv .loop/advisory-marks{,.old}. Run read_copy_operands first.
+check_move_sources() {
+  local count=${#copy_operands[@]} i
+  if [[ -z $copy_folder ]] && ((count > 0)) && [[ ! ${copy_operands[count - 1]} =~ $brace_expansion ]]; then
+    count=$((count - 1))
+  fi
+  for ((i = 0; i < count; i++)); do
+    block_if_takes_away_marks "${copy_operands[i]}" "move ${copy_operands[i]}"
+  done
+}
+
 # Blocks cp, mv, install or ln when it writes a file that block_if_protected_file protects: the file that its last
-# word names, or a file in the folder that its last word or -t names. It also blocks mv when it moves away a file that
-# block_if_takes_away_marks protects.
+# word names, or a file in the folder that its last word or -t names. It also blocks mv as check_move_sources does.
 check_copy() {
   local destination path source
   read_copy_operands
+  if [[ ${command_words[0]##*/} == mv ]]; then
+    check_move_sources
+  fi
   if [[ -z $copy_folder ]]; then
     # With one word, ln makes the link in the folder that it runs in, and the other commands fail.
     if ((${#copy_operands[@]} < 2)); then
@@ -299,11 +320,6 @@ check_copy() {
     fi
     destination=${copy_operands[${#copy_operands[@]} - 1]}
     unset 'copy_operands[${#copy_operands[@]} - 1]'
-  fi
-  if [[ ${command_words[0]##*/} == mv ]]; then
-    for source in ${copy_operands[@]+"${copy_operands[@]}"}; do
-      block_if_takes_away_marks "$source" "move $source"
-    done
   fi
   if [[ -z $copy_folder ]]; then
     path=$(resolved_path "$destination" "$command_folder") || return 0
@@ -390,6 +406,49 @@ check_git_config() {
   if [[ -n $writes ]] || ((count > 1)); then
     block "Blocked: git config $scope changes the settings of git outside this repository, and only the maintainer may change them. $ask"
   fi
+}
+
+# Succeeds if the git clean or git stash command in command_words deletes the files that git ignores, with clean -x or
+# -X, or stashes them, with stash -a or --all or the start of --all, such as --al. A short option can stand in a group,
+# as in clean -fdx, but the letters after the e of clean -e or the m of stash -m are its value. Run read_git_options
+# first.
+takes_ignored_files() {
+  local i=$((git_subcommand + 1)) word short_option='^-[^-e]*[xX]' long_option=""
+  if [[ ${command_words[git_subcommand]} == stash ]]; then
+    # Without push or save, git stash pushes only when an option follows.
+    case ${command_words[i]:-} in
+      push | save) i=$((i + 1)) ;;
+      -*) ;;
+      *) return 1 ;;
+    esac
+    short_option='^-[^-m]*a'
+    long_option=--all
+  fi
+  while ((i < ${#command_words[@]})); do
+    word=${command_words[i]}
+    if [[ $word =~ $short_option || ($word == --?* && $long_option == "$word"*) ]]; then
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Blocks git clean or git stash when it deletes or stashes the files that git ignores, as takes_ignored_files describes,
+# in a work tree that holds the loop's file of advisory marks, because git ignores the loop's folder. It allows the
+# command when the hook can't tell the work tree:
+# check_ignored_files <word that sets a variable for git>...
+check_ignored_files() {
+  local top action=delete
+  if ! takes_ignored_files || [[ -z $command_folder ]]; then
+    return 0
+  fi
+  read_git_variables "$@"
+  top=$(run_git_as_command rev-parse --show-toplevel 2>/dev/null) || return 0
+  if [[ ${command_words[git_subcommand]} == stash ]]; then
+    action=stash
+  fi
+  block_if_takes_away_marks "$top" "$action the files that it ignores in $top"
 }
 
 # Sets deletable_folders to the folders inside which an agent may delete: the repository's worktrees, the main checkout
@@ -526,6 +585,18 @@ add_git_option() {
   fi
 }
 
+# Sets git_variables to the words before git that set a variable which says where git's repository and its settings
+# are: read_git_variables <word that sets a variable for git>...
+read_git_variables() {
+  local word
+  git_variables=()
+  for word in "$@"; do
+    if [[ $word =~ $git_location_variable ]]; then
+      git_variables+=("$word")
+    fi
+  done
+}
+
 # Runs git as the git command in command_words runs, in command_folder, with its options before the subcommand and the
 # variables in git_variables, but with other arguments. It fills in HOME where the shell would, in the folders, as
 # add_git_option does, and in the variables' values, where ~ after NAME= counts too. Run it in a subshell, because it
@@ -578,13 +649,8 @@ block_unknown_hooks() {
 # exports. env's -i and -u don't count either, because they only take variables away, and of these variables the
 # agent's environment usually holds only HOME: check_push_hooks <word that sets a variable for git>...
 check_push_hooks() {
-  local word hooks worktrees physical_hooks line
-  git_variables=()
-  for word in "$@"; do
-    if [[ $word =~ $git_location_variable ]]; then
-      git_variables+=("$word")
-    fi
-  done
+  local hooks worktrees physical_hooks line
+  read_git_variables "$@"
   if [[ -z $command_folder ]]; then
     block "Blocked: the hook can't tell which folder this push runs in, so it can't check that the pre-push hook scans the push for leaks. Push in a folder that exists, and name it without variables or \$( ), as in git -C <folder> push."
   fi
@@ -842,6 +908,7 @@ check_simple_command() {
       case ${command_words[git_subcommand]:-} in
         push) check_git_push ${assignment_words[@]+"${assignment_words[@]}"} ;;
         config) check_git_config ;;
+        clean | stash) check_ignored_files ${assignment_words[@]+"${assignment_words[@]}"} ;;
       esac
       ;;
     gh) check_gh ${assignment_words[@]+"${assignment_words[@]}"} ;;
