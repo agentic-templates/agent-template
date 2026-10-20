@@ -152,6 +152,8 @@ when "Start a focused audit" says so.
   and start it again each time it ends. When a pull request merges, the script fast-forwards `main` in the main
   checkout to `origin/main`, so that you and the agents you start get the hooks, scripts and agent types that merged.
   If the script says it can't fast-forward, fix what it names, such as by switching the main checkout back to `main`.
+  After each merge, run `scripts/remove-ended-worktrees`, which removes the worktree of each ended agent whose work is
+  on GitHub.
 - **Settings.** Once a pull request that changes `scripts/configure-github` merges, and the fast-forward is done, run
   `scripts/configure-github` in the main checkout, so that GitHub's settings match main.
 - **Releases.** Once a goal is done, publish a release as "Publish a release" in `docs/releasing.md` describes, and

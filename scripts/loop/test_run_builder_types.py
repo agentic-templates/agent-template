@@ -16,6 +16,7 @@ from test_run_builder import (
     OWN_PULL_REQUEST,
     REPORT,
     RESULT,
+    RUN_LOCK,
     RunBuilderTest,
     lines,
     run_builder,
@@ -294,7 +295,7 @@ class TestBuildTest(RunBuilderTest):
         changes = run / "changes.diff"
         self.assertRegex(printed, rf"^issue 12 \| claude main \| test finished, changes in {changes} \| [0-9.]+ min \|")
         [call] = self.calls("claude")
-        self.assertEqual((call["cwd"], call["head"]), (str(self.worktree), self.base))
+        self.assertEqual((call["cwd"], call["head"], call["lock"]), (str(self.worktree), self.base, RUN_LOCK))
         self.assertEqual(call["env"]["LOOP_RUN"], "1")
         self.assertNotIn("LOOP_HAND_OFF", call["env"])
         self.assertIn("This build is a test", call["args"][-1])

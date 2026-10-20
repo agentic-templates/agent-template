@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# Removes each worktree in .claude/worktrees of the main checkout whose agent has ended, once its work is on GitHub:
+# it has no changes that aren't committed, and each of its commits is on a branch of origin, such as main, or in a
+# merged pull request of its branch. It leaves every other worktree, and prints each one it leaves with the reason.
+# The orchestrator runs it after each merge, as "Land" in docs/loop.md describes, and the auditor runs it at its end.
+# Claude Code locks the worktree of a subagent, and scripts/loop/run-builder the worktree of its agent, with a reason
+# that names the process that runs the agent, such as "pid 123". So the script takes a worktree's agent to have ended
+# when the worktree has no lock, or when the process that the lock names no longer runs. It leaves a worktree whose
+# lock names no process.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# Prints an error and stops: stop <message>
+stop() {
+  echo "error: $1" >&2
+  exit 1
+}
+
+# Prints a folder's path with the symbolic links resolved, or the path as it is when the folder doesn't exist:
+# real_path <path>
+real_path() {
+  (cd "$1" 2>/dev/null && pwd -P) || printf '%s\n' "$1"
+}
+
+if (($# > 0)); then
+  stop "scripts/remove-ended-worktrees takes no argument, and it got $#."
+fi
+
+if ! listing=$(git worktree list --porcelain 2>&1); then
+  stop "can't list the worktrees, because git failed: $listing"
+fi
+
+# The worktrees in .claude/worktrees of the main checkout, which git lists first: each one's path, the branch it has
+# checked out or nothing, and its lock. The lock is "no", or "locked" and the lock's reason, if it has one.
+worktree_paths=()
+worktree_branches=()
+worktree_locks=()
+worktrees_folder=""
+path="" branch="" lock=no
+# Adds the worktree that the lines so far describe to the lists, if it's in .claude/worktrees.
+add_worktree() {
+  if [[ -z $path ]]; then
+    return 0
+  fi
+  path=$(real_path "$path")
+  if [[ -z $worktrees_folder ]]; then
+    worktrees_folder=$path/.claude/worktrees/
+  elif [[ $path == "$worktrees_folder"* ]]; then
+    worktree_paths+=("$path")
+    worktree_branches+=("$branch")
+    worktree_locks+=("$lock")
+  fi
+  path="" branch="" lock=no
+}
+# git ends each worktree with an empty line.
+while IFS= read -r line; do
+  case $line in
+    "worktree "*) path=${line#worktree } ;;
+    "branch refs/heads/"*) branch=${line#branch refs/heads/} ;;
+    locked*) lock=$line ;;
+    "") add_worktree ;;
+  esac
+done <<<"$listing"
+add_worktree
+
+# Sets reason and fails if a worktree's lock keeps it: check_lock <lock>
+check_lock() {
+  local lock=$1 pid_pattern='pid ([0-9]+)'
+  if [[ $lock == no ]]; then
+    return 0
+  fi
+  if [[ $lock == locked ]]; then
+    reason="it's locked, and the lock gives no reason."
+    return 1
+  fi
+  if [[ ! $lock =~ $pid_pattern ]]; then
+    reason="it's locked, and the lock names no process: ${lock#locked }"
+    return 1
+  fi
+  # A process that ended may have left its id to a new one, which keeps the worktree until that one ends too.
+  if kill -0 "${BASH_REMATCH[1]}" 2>/dev/null; then
+    reason="its agent may still run, because its lock names process ${BASH_REMATCH[1]}, which still runs: ${lock#locked }"
+    return 1
+  fi
+}
+
+# Prints the head commits of the branch's merged pull requests that this repository has: merged_heads <branch>
+merged_heads() {
+  local heads head
+  heads=$(gh pr list --head "$1" --state merged --json headRefOid --jq '.[].headRefOid' 2>&1) || {
+    printf '%s\n' "$heads"
+    return 1
+  }
+  for head in $heads; do
+    if git cat-file -e "$head^{commit}" 2>/dev/null; then
+      printf '%s\n' "$head"
+    fi
+  done
+}
+
+# Sets reason and fails if a worktree has work that isn't on GitHub: check_work <path> <branch>
+check_work() {
+  local path=$1 branch=$2 changes local_commits heads
+  if ! changes=$(git -C "$path" status --porcelain 2>&1); then
+    reason="git can't read it: $changes"
+    return 1
+  fi
+  if [[ -n $changes ]]; then
+    reason="it has changes that aren't committed."
+    return 1
+  fi
+  if ! local_commits=$(git -C "$path" rev-list --count HEAD --not --remotes 2>&1); then
+    reason="git can't list its commits: $local_commits"
+    return 1
+  fi
+  if [[ $local_commits == 0 ]]; then
+    return 0
+  fi
+  # A squash merge leaves the branch's commits out of main, and GitHub deletes the branch after the merge.
+  if [[ -n $branch ]]; then
+    if ! heads=$(merged_heads "$branch"); then
+      reason="gh can't tell whether its branch has a merged pull request: $heads"
+      return 1
+    fi
+    # $heads holds one commit to a line, and git takes each as an argument.
+    # shellcheck disable=SC2086
+    local_commits=$(git -C "$path" rev-list --count HEAD --not --remotes $heads)
+  fi
+  if [[ $local_commits != 0 ]]; then
+    reason="it has commits that are on no branch of origin and in no merged pull request."
+    return 1
+  fi
+}
+
+# Unlocks a worktree if it's locked, and removes it. Sets reason and fails if git refuses: remove_worktree <index>
+remove_worktree() {
+  local path=${worktree_paths[$1]} output
+  if [[ ${worktree_locks[$1]} != no ]] && ! output=$(git worktree unlock "$path" 2>&1); then
+    reason="git refused to unlock it: $output"
+    return 1
+  fi
+  if ! output=$(git worktree remove "$path" 2>&1); then
+    reason="git refused to remove it: $output"
+    return 1
+  fi
+}
+
+for ((index = 0; index < ${#worktree_paths[@]}; index++)); do
+  path=${worktree_paths[index]}
+  reason=""
+  if check_lock "${worktree_locks[index]}" && check_work "$path" "${worktree_branches[index]}" &&
+    remove_worktree "$index"; then
+    echo "Removed $path."
+  else
+    echo "Left $path, because $reason"
+  fi
+done
