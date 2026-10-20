@@ -59,9 +59,9 @@ If an issue came from an account that isn't a maintainer's, and its verdict is *
 
 ## Definition of ready
 
-Only an issue that a maintainer's account opened can get the `ready` label, and only while it has one type label and no status label. Agents other than the orchestrator add the label only to a bug that they find and reproduce while they work on another issue, as step 4 of "Make a change" in AGENTS.md describes.
+Only an issue that a maintainer's account opened can get the `ready` label, and only while it has one type label. Agents other than the orchestrator add the label only to a bug that they find and reproduce while they work on another issue, as step 4 of "Make a change" in AGENTS.md describes.
 
-An issue other than a research issue or a parent can get `ready` when all of these are true:
+An issue can get `ready` when all of these are true:
 
 - It asks for one change that fits in one pull request.
 - "Why" says who needs the change and what for.
@@ -69,8 +69,9 @@ An issue other than a research issue or a parent can get `ready` when all of the
 - Nothing is left that only the maintainer can decide.
 - "What should change" says what's out of scope, if the agent that builds the issue might otherwise do more than the issue asks for.
 - It's blocked by every issue whose change it needs first.
+- It has no status label.
 
-A research issue is ready when its question and what depends on the answer are clear. A parent is ready when someone could check each of its "Done when" items, and each of its sub-issues is ready.
+A research issue is ready when its question and what depends on the answer are clear, and it has no status label. A parent is ready when someone could check each of its "Done when" items, it has no status label, and each of its sub-issues is ready.
 
 ## Plan the next work
 
