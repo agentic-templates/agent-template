@@ -1,0 +1,13 @@
+# shellcheck shell=bash
+# The function branch_changes, which scripts/check and scripts/python-tests-needed use to list the files that a branch
+# changes.
+
+# Prints the path of each file that the branch changes since it leaves origin/main, with the changes that aren't
+# committed and the new files, each followed by a NUL. Fails when it can't find the commit where the branch leaves
+# origin/main, or can't list the files: branch_changes
+branch_changes() {
+  local base
+  base=$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null) || return 1
+  git diff -z --name-only --no-renames "$base" -- || return 1
+  git ls-files -z --others --exclude-standard
+}

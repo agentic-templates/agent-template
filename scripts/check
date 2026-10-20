@@ -394,14 +394,71 @@ shebang='^#!(/bin/|/usr/bin/env )(sh|bash)([[:space:]]|$)'
 
 # scripts/test-check sets CHECK_UNDER_TEST in its copies to skip unrelated checks and prevent recursion.
 # Only its ShellCheck cases set the value to shellcheck, to test the real invocation and file discovery below.
+# Prints each file that sources a path, a tab and the path, one pair to a line. A file sources the path that a
+# "# shellcheck source=" directive names, and the path that a source or . command names without an expansion.
+sourced_paths() {
+  local file line
+  local directive='#[[:space:]]*shellcheck[[:space:]]+source=([^[:space:]]+)'
+  local source_command='^[[:space:]]*(source|\.)[[:space:]]+["'"'"']?([^[:space:]"'"'"'$;&|]+)'
+  # git grep prints the file, NUL and the line, for each line that may source a path.
+  while IFS= read -r -d '' file && IFS= read -r line; do
+    if [[ $line =~ $directive ]]; then
+      printf '%s\t%s\n' "$file" "${BASH_REMATCH[1]}"
+    elif [[ $line =~ $source_command ]]; then
+      printf '%s\t%s\n' "$file" "${BASH_REMATCH[2]}"
+    fi
+  done < <(git grep --null -I -E -e 'shellcheck[[:space:]]+source=' -e '^[[:space:]]*(source|\.)[[:space:]]')
+}
+
+# Prints the paths, and each file that sources one of them, directly or through other files, one to a line:
+# with_files_that_source <paths, one to a line>
+with_files_that_source() {
+  local paths=$1 sources file sourced is_growing=yes
+  sources=$(sourced_paths)
+  while [[ -n $is_growing ]]; do
+    is_growing=""
+    while IFS=$'\t' read -r file sourced; do
+      if has_line "$paths" "$sourced" && ! has_line "$paths" "$file"; then
+        paths+=$'\n'$file
+        is_growing=yes
+      fi
+    done <<<"$sources"
+  done
+  printf '%s\n' "$paths"
+}
+
 if [[ -z "${CHECK_UNDER_TEST:-}" || ${CHECK_UNDER_TEST:-} == shellcheck ]]; then
   if has shellcheck https://github.com/koalaman/shellcheck#installing; then
+    shell_scripts=()
     # -f skips the submodules and deleted files that git ls-files also lists.
-    git ls-files -z | while IFS= read -r -d '' file; do
+    while IFS= read -r -d '' file; do
       if [[ -f $file ]] && IFS= read -r first_line < "$file" && [[ $first_line =~ $shebang ]]; then
-        printf '%s\0' "$file"
+        shell_scripts+=("$file")
       fi
-    done | xargs -0 shellcheck -x
+    done < <(git ls-files -z)
+    # With -x, shellcheck also checks the files that a script sources, so a change to such a file needs only the scripts
+    # that source it. When the branch's changes can't be listed, as in CI, which has no origin/main, every script is
+    # checked. A path with a line break splits in two, and the script of that path is left out.
+    # shellcheck source=scripts/branch-changes
+    source scripts/branch-changes
+    scripts_to_check=()
+    if ((${#shell_scripts[@]} > 0)) && changed_paths=$(branch_changes | tr '\0' '\n'); then
+      paths_to_check=$(with_files_that_source "$changed_paths")
+      for file in "${shell_scripts[@]}"; do
+        if has_line "$paths_to_check" "$file"; then
+          scripts_to_check+=("$file")
+        fi
+      done
+      echo "Ran shellcheck on ${#scripts_to_check[@]} of the ${#shell_scripts[@]} shell scripts, those that this branch changes or that source a file it changes. CI runs it on them all." >&2
+    elif ((${#shell_scripts[@]} > 0)); then
+      scripts_to_check=("${shell_scripts[@]}")
+    fi
+    # Split over 8 processes, shellcheck took 6 of the 17 seconds that it took in one, as issue #294 measured.
+    processes=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || processes=1
+    if ((${#scripts_to_check[@]} > 0)); then
+      printf '%s\0' "${scripts_to_check[@]}" |
+        xargs -0 -P "$processes" -n $(((${#scripts_to_check[@]} + processes - 1) / processes)) shellcheck -x
+    fi
   fi
 fi
 

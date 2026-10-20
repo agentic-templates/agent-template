@@ -215,9 +215,64 @@ SCRIPT
   chmod +x "$copy/$shellcheck_fixture"
 }
 
+# The copy has no origin/main, so scripts/check can't list the branch's changes, and checks every script.
 run_case shellcheck_unquoted_variable fail \
   "$shellcheck_fixture" \
   "SC2086"
+
+# Cases for a branch, whose changes scripts/check lists, so that it checks only the scripts that the branch changes or
+# that source a file it changes. Each fixture script fails shellcheck, so the output names each script it checks.
+shellcheck_library=$shellcheck_fixture-library
+shellcheck_sourcing_fixture=$shellcheck_fixture-sourcing
+
+# Writes a script that fails shellcheck to the copy, and that sources the arguments:
+# write_unquoted_variable <path> [<sourced path>...]
+write_unquoted_variable() {
+  local path=$1 sourced
+  shift
+  {
+    echo '#!/usr/bin/env bash'
+    for sourced in "$@"; do
+      echo "# shellcheck source=$sourced"
+      echo "source $sourced"
+    done
+    cat <<'SCRIPT'
+value='two words'
+printf '%s\n' $value
+SCRIPT
+  } > "$copy/$path"
+  chmod +x "$copy/$path"
+}
+
+# Commits the copy's files, and makes the commit origin/main, so that the branch changes only what follows.
+start_branch() {
+  git -C "$copy" add --all
+  git -C "$copy" -c user.name=Tester -c user.email=tester@example.com commit --quiet --no-verify -m "the first commit"
+  git -C "$copy" update-ref refs/remotes/origin/main HEAD
+}
+
+shellcheck_unchanged_script_on_a_branch() {
+  write_unquoted_variable "$shellcheck_fixture"
+  start_branch
+}
+
+shellcheck_changed_script_on_a_branch() {
+  start_branch
+  write_unquoted_variable "$shellcheck_fixture"
+}
+
+shellcheck_script_that_sources_a_changed_file_on_a_branch() {
+  printf '%s\n' '# shellcheck shell=bash' 'greeting=hello' > "$copy/$shellcheck_library"
+  write_unquoted_variable "$shellcheck_sourcing_fixture" "$shellcheck_library"
+  write_unquoted_variable "$shellcheck_fixture"
+  start_branch
+  echo 'export greeting' >> "$copy/$shellcheck_library"
+}
+
+run_case shellcheck_unchanged_script_on_a_branch pass "Ran shellcheck on 0 of the"
+run_case shellcheck_changed_script_on_a_branch fail "$shellcheck_fixture" "SC2086" "Ran shellcheck on 1 of the"
+run_case shellcheck_script_that_sources_a_changed_file_on_a_branch fail \
+  "$shellcheck_sourcing_fixture" "SC2086" "Ran shellcheck on 1 of the"
 
 # Case for the record of a pass, which run_case checks in every case.
 
