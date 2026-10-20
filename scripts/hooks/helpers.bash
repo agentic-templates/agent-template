@@ -612,6 +612,48 @@ has_true_flag() {
   return 1
 }
 
+# Succeeds if a word of command_words may expand, as $text and $(cat body.md) do.
+has_word_that_may_expand() {
+  local mark
+  for mark in ${command_word_may_expand[@]+"${command_word_may_expand[@]}"}; do
+    if [[ -n $mark ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Succeeds if gh stops reading the flags at the word that split_flag_word last split, and shows the command's help, so
+# that it posts nothing. gh has no flag -h of its own, so it stops at the h of a word of short flags, whatever follows
+# the h, as in -h, -dh and -h=false. read_help_flag reads --help.
+# It fails for a command with a word that may expand, as in -d${x}h or $x -h, because the shell can turn the letters or
+# the word before the h into a flag that takes the h as its value. It also fails when a character other than a letter
+# or a digit comes before the h, because ANSI-C quotes, as in -d$'\x74'h, a brace expansion or a glob can do the same,
+# and the hooks don't mark these as words that may expand. The hooks then check the command.
+stops_for_help() {
+  local letters=$flags_before${flag#-}
+  if [[ $flag == --* || $letters != *h* ]] || has_word_that_may_expand; then
+    return 1
+  fi
+  [[ ${letters%%h*} != *[![:alnum:]]* ]]
+}
+
+# Sets asks_for_help to yes or to empty when the word that split_flag_word last split is --help, from its value as
+# is_true_flag_value reads it, and leaves asks_for_help as it is for any other word: read_help_flag
+# gh keeps the last value that the command gives --help, so it shows the help only if asks_for_help is yes after the
+# last flag. It posts the text of --help --help=false. In a command with a word that may expand, as in --help $x, the
+# function leaves asks_for_help as it is, because the shell can turn that word into --help=false, or the word before
+# --help into a flag that takes --help as its value.
+read_help_flag() {
+  if [[ $flag != --help ]] || has_word_that_may_expand; then
+    return 0
+  fi
+  asks_for_help=""
+  if is_true_flag_value "$value"; then
+    asks_for_help=yes
+  fi
+}
+
 # Reads the flags of a gh pr command from command_words, from its fourth word on, and fails when the command shows its
 # help or does a dry run: read_pull_request_flags <flags that take a value>
 # It sets pr_base, pr_head and pr_title to the values of --base, --head and --title, or to empty when the command
@@ -619,16 +661,20 @@ has_true_flag() {
 # to yes when the command opens a draft. It also records expansion syntax in the title and body, and sets the body
 # source for read_body.
 read_pull_request_flags() {
-  local flags_with_value=$1 i word flag value value_is_next_word flags_before
+  local flags_with_value=$1 i word flag value value_is_next_word flags_before asks_for_help=""
   pr_base="" pr_head="" pr_title="" pr_has_title="" pr_title_may_expand="" pr_is_draft=""
   body_source="" body_word="" body_file="" body_may_expand=""
   for ((i = 3; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
     case $word in
-      -h | --help | --dry-run) return 1 ;;
+      --dry-run) return 1 ;;
       -*) split_flag_word "$word" "$flags_with_value" ;;
       *) continue ;;
     esac
+    if stops_for_help; then
+      return 1
+    fi
+    read_help_flag
     # A flag before the last in a word takes no value, so a -d there opens a draft.
     if [[ $flags_before == *d* ]]; then
       pr_is_draft=yes
@@ -652,6 +698,7 @@ read_pull_request_flags() {
         ;;
     esac
   done
+  [[ -z $asks_for_help ]]
 }
 
 # Sets head_commit to the latest commit of the pull request of opens_pull_request, in the repository of the current

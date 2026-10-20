@@ -82,16 +82,17 @@ read_issue_command() {
   for ((i = 3; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
     case $word in
-      -h | --help)
-        asks_for_help=yes
-        continue
-        ;;
       -*) split_flag_word "$word" "$flags_with_value" ;;
       *)
         issue_arguments+=("$word")
         continue
         ;;
     esac
+    if stops_for_help; then
+      asks_for_help=yes
+      break
+    fi
+    read_help_flag
     if [[ -n $value_is_next_word ]]; then
       i=$((i + 1))
       value=${command_words[i]:-}

@@ -20,15 +20,18 @@ source "${BASH_SOURCE[0]%/*}/../text-rules"
 # expansion syntax in each checked field. It fails when the command asks for help, because gh then posts nothing.
 # Only a flag that takes a value gives text, so the -c of gh pr review, which takes none, gives none.
 read_text() {
-  local flags_with_value=$1 i word flag value value_is_next_word flags_before
+  local flags_with_value=$1 i word flag value value_is_next_word flags_before asks_for_help=""
   title="" has_title="" title_may_expand="" body_source="" body_word="" body_file="" body_may_expand=""
   for ((i = 3; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
     case $word in
-      -h | --help) return 1 ;;
       -*) split_flag_word "$word" "$flags_with_value" ;;
       *) continue ;;
     esac
+    if stops_for_help; then
+      return 1
+    fi
+    read_help_flag
     if [[ $flags_with_value != *" $flag "* ]]; then
       continue
     fi
@@ -43,6 +46,7 @@ read_text() {
       -F | --body-file) body_source=file body_file=$value ;;
     esac
   done
+  [[ -z $asks_for_help ]]
 }
 
 # Blocks a gh command whose text has a problem, with a message that lists every problem: check_text <flags that take a value>
