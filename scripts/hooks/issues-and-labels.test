@@ -61,12 +61,12 @@ bug_form_body=$'### What happened\nThe total is wrong.\n\n### What you expected\
 
 type_label_rule="An issue has exactly one of the type labels bug, feature, maintenance and research, chosen by what changes for users, as \"Labels\" in AGENTS.md describes."
 heading_rule="An issue's body has the headings \"What should change\", \"Why\" and \"Done when\", and a research issue's body has \"Question\", \"What depends on the answer\" and \"Done when\" instead."
-give_the_body="Give the body with --body, or write it to a file and give the file with --body-file."
+body_advice="Give the body with --body, or write it to a file and give the file with --body-file."
 not_research="lacks the headings \"What should change\" and \"Why\". $heading_rule Write each heading on a line of its own, such as ## What should change."
 not_change="lacks the headings \"Question\" and \"What depends on the answer\". $heading_rule Write each heading on a line of its own, such as ## Question."
 no_type="would have no type label. $type_label_rule"
-no_body="Blocked: the command gives no body, so this hook can't check the issue's headings. $give_the_body"
-no_stdin="Blocked: this hook can't read a body from standard input, other than from a here-document, so it can't check the issue's headings. $give_the_body"
+no_body="Blocked: the command gives no body, so this hook can't check the issue's headings. $body_advice"
+no_stdin="Blocked: this hook can't read a body from standard input, other than from a here-document, so it can't check the issue's headings. $body_advice"
 not_yet_written="doesn't exist yet or the command writes it. Write the file in a command of its own first, and give its path without variables."
 label_commands="Blocked: scripts/configure-github creates the project's labels, the ones that \"Labels\" in AGENTS.md names. To add, change or remove a label, change both files in a pull request, as docs/rules.md describes, and the orchestrator runs the script after the merge."
 
