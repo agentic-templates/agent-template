@@ -160,8 +160,8 @@ when "Start a focused audit" says so.
 
 ### Record
 
-Bring `.loop/state.md` up to date after each launch, merge or decision, so that a compaction can come at any time.
-Besides the `session:` and `pid:` lines, it holds:
+Bring `.loop/state.md` up to date after each launch, merge or decision, so that a `/clear` or a compaction can come
+at any time. Besides the `session:` and `pid:` lines, it holds:
 
 - the goal
 - each running agent, with its issue or pull request, and its agent id or `scripts/loop/run-builder` task
@@ -242,18 +242,22 @@ If no account can take the issue that `scripts/take-next-issue` gave you, remove
 the script again, followed by the number of each issue that no account can take, such as
 `scripts/take-next-issue 12 15`, so that it skips them.
 
-## Compact your context
+## Clear your context
 
-Keep your shell in the main checkout, and run git in a worktree with `git -C <worktree>`. After a compaction, the
-session-start hook shows you your state file, this guide and `docs/writing.md` only when your shell is in the main
-checkout.
+Keep your shell in the main checkout, and run git in a worktree with `git -C <worktree>`. After a `/clear` or a
+compaction, the session-start hook shows you your state file, this guide and `docs/writing.md`, unless your shell is
+outside the main checkout.
 
-When `scripts/hooks/hand-off` tells you that your context has grown long enough to compact, ask for a compaction if the
-maintainer installed a compaction sender. That's a hook in the maintainer's own Claude Code settings that runs on both
-`Stop` and `StopFailure`, and types `/compact` when it finds `.loop/compact-request.txt`. Finish the step you're on,
-such as landing a pull request or starting a builder, and bring your state file up to date. Then write
-`.loop/compact-request.txt` with your session id on its first line and `Resume from .loop/state.md.` on its second, and
-end your turn. Without a sender, ask the maintainer to type `/compact`, and go on with the loop.
+When `scripts/hooks/hand-off` tells you that your context has grown long enough, clear it with `/clear`:
+
+1. Finish the step you're on, such as landing a pull request or starting a builder.
+2. Write into your state file what only this conversation holds, if the file lacks it: the maintainer's decisions that
+   no issue holds yet, the questions to the maintainer that are still open, and the agents that run inside this
+   session.
+3. If the maintainer installed a `/clear` sender, a hook in their own settings that types `/clear` and then the
+   request's second line, write the request: `.loop/compact-request.txt` with your session id on its first line and
+   `Resume the loop from .loop/state.md.` on its second. Then end your turn. Without a sender, ask the maintainer to
+   type `/clear` and then `Resume the loop from .loop/state.md.`, and go on with the loop.
 
 ## Ask the maintainer
 

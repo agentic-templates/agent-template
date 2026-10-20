@@ -12,10 +12,12 @@
 #   the orchestrator's process has ended. Any other session gets a line that names the orchestrator. After a
 #   compaction that Claude Code started on its own, the orchestrator also gets a line that says the file may be behind.
 #   The hook reads what started the compaction from the record that scripts/hooks/before-compact wrote, and deletes it.
-#   After a compaction of the orchestrator, it also deletes the orchestrator's request for one, .loop/compact-request.txt.
+#   After a /clear or a compaction of the orchestrator, it also deletes the orchestrator's request for a /clear,
+#   .loop/compact-request.txt.
 # .claude/settings.json also runs the hook with each number from 1 to part_hooks, and then it prints only that part of
-# the files that it shows: the state file, and after a compaction of the orchestrator, docs/loop.md and docs/writing.md,
-# because the orchestrator follows them in every step, and the compaction kept only a summary of them.
+# the files that it shows: the state file, and after a /clear or a compaction of the orchestrator, docs/loop.md and
+# docs/writing.md, because the orchestrator follows them in every step, and the /clear dropped them, and the compaction
+# kept only a summary of them.
 # In a Claude Code on the web session, it also installs the tools that scripts/check runs, as CI does.
 # Copilot CLI and Cursor also run the hooks in .claude/settings.json, so the hook does nothing outside Claude Code.
 # When it fails on its own error, it exits with code 0, so that a broken hook never stops work.
@@ -105,7 +107,7 @@ reads_both_files() {
 }
 
 # Claude Code sends the event as JSON on standard input, with the session's id, a subagent's agent_id, and a source
-# field that is compact after a compaction. Without jq, or with input that isn't JSON, the fields are empty. The
+# field that is clear after /clear and compact after a compaction. Without jq, or with input that isn't JSON, the fields are empty. The
 # subshells drop the trap, which would otherwise take a field from input that is only partly JSON.
 IFS= read -r -d '' input || true
 event_source=$(trap - ERR && jq -r '.source // empty' 2>/dev/null <<<"$input") || event_source=""
@@ -167,7 +169,8 @@ if [[ $state_reader == orchestrator || $state_reader == new-orchestrator || $sta
   shown_files=("$state_file")
 fi
 shows_guides=""
-if [[ $event_source == compact && ($state_reader == orchestrator || $state_reader == new-orchestrator) &&
+if [[ ($event_source == clear || $event_source == compact) &&
+  ($state_reader == orchestrator || $state_reader == new-orchestrator) &&
   -f $checkout/docs/loop.md && -f $checkout/docs/writing.md ]]; then
   shown_files+=("$checkout/docs/loop.md" "$checkout/docs/writing.md")
   shows_guides=yes
@@ -299,22 +302,28 @@ if [[ ${CLAUDE_CODE_REMOTE:-} == true ]]; then
 fi
 
 # 6. The state file. A compaction that Claude Code starts on its own can come in the middle of a step, such as after
-# the orchestrator started a builder and before it wrote the builder in its state file. A compaction that the
-# orchestrator asks for, or that the maintainer types, comes between turns. Only a session that can run the loop reads
-# and deletes its record and its compaction request, because a subagent's input can hold the orchestrator's session id.
-# This step comes last, so that no note after it reads as part of the notes on the state file.
-behind_note=""
-if [[ -n $can_run_loop && $event_source == compact ]]; then
-  # The maintainer's compaction sender types /compact when it finds the orchestrator's request. A compaction that
-  # came another way leaves the request in place, and the sender would then compact the context a second time.
+# the orchestrator started a builder and before it wrote the builder in its state file. A /clear or a compaction that
+# the orchestrator asks for, or that the maintainer types, comes between turns. Only a session that can run the loop
+# reads and deletes its record and its request for a /clear, because a subagent's input can hold the orchestrator's
+# session id. This step comes last, so that no note after it reads as part of the notes on the state file.
+# The maintainer's /clear sender types /clear when it finds the orchestrator's request. A /clear or a compaction that
+# came another way leaves the request in place, and the sender would then clear the context a second time. The request
+# names the session that wrote it. After a compaction, that's the session itself. After a /clear, which gives the
+# session a new id in the same process, it's the session that the state file names, until the orchestrator writes its
+# new id there.
+if [[ -n $can_run_loop && ($event_source == clear || $event_source == compact) ]]; then
   request=$loop/compact-request.txt
   requester=""
   if [[ -f $request ]]; then
     IFS= read -r requester 2>/dev/null <"$request" || true
   fi
-  if [[ $requester == "$session_id" ]]; then
+  if [[ $event_source == compact && $requester == "$session_id" ]] ||
+    [[ $event_source == clear && -n $requester && $requester == "$owner" && $owner_process == "$CLAUDE_PID" ]]; then
     rm -f "$request" || true
   fi
+fi
+behind_note=""
+if [[ -n $can_run_loop && $event_source == compact ]]; then
   if record=$(compaction_record "$loop" "$session_id") && [[ -f $record ]]; then
     trigger=""
     IFS= read -r trigger 2>/dev/null <"$record" || true
