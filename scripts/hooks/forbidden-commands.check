@@ -15,7 +15,10 @@
 #   A refspec that a variable gives, as in git push origin $tag, goes ahead, because the hook can't tell it before the
 #   command runs.
 # - pkill and killall, because they pick processes by their name or by a pattern in their command line, and each agent
-#   that scripts/loop/run-builder starts has its prompt in its command line, so a pattern can match other agents
+#   that scripts/loop/run-builder starts has its prompt in its command line, so a pattern can match other agents. A kill
+#   after pgrep in the same command counts too, because pgrep picks processes the same way, and the kill can stop the
+#   ones it picks, as in kill $(pgrep -f errors) and pgrep -f errors | xargs kill. The hook can't tell where a kill
+#   gets its process ids, so any kill after a pgrep counts.
 # It asks gh and git about the pull request, the issue or the branch, and allows the command when they fail, such as
 # without a network.
 # shellcheck source=scripts/hooks/helpers.bash
@@ -32,7 +35,7 @@ status_flags_with_value=" -h --hostname --jq --json --template "
 prints_token="Blocked: this command prints the token that gh uses, and AGENTS.md says never to read or print secrets. gh commands use the token without it."
 publishes_release="Blocked: only the orchestrator publishes a release or a version tag, because it releases a commit that it checked on main, as \"Publish a release\" in docs/releasing.md describes. Go on with the other work, and list the command in your report."
 # shellcheck disable=SC2016 # The message shows the agent the command kill $!, so $! stays as written.
-picks_processes='Blocked: pkill and killall pick processes by their name or by a pattern in their command line, so they can stop other agents, whose command lines hold their prompts. Stop your own processes by their process ids instead, such as with kill $! in the command that started one in the background.'
+picks_processes='Blocked: pkill, killall and pgrep pick processes by their name or by a pattern in their command line, so a command that stops the processes they pick can stop other agents, whose command lines hold their prompts. Stop your own processes by their process ids instead, such as with kill $! in the command that started one in the background.'
 
 # The endpoints of gh api that create, change or delete a release: a repository's releases, or one release by its id.
 release_endpoint='(^|/)repos/[^/]+/[^/]+/releases(/[0-9]+)?/?(\?|$)'
@@ -332,6 +335,12 @@ check_simple_command() {
   fi
   case ${command_words[0]##*/} in
     pkill | killall) block "$picks_processes" ;;
+    pgrep) has_run_pgrep=true ;;
+    kill)
+      if [[ $has_run_pgrep == true ]]; then
+        block "$picks_processes"
+      fi
+      ;;
   esac
   if [[ ${command_words[0]##*/} == git ]]; then
     read_git_options
@@ -358,6 +367,7 @@ check_simple_command() {
 
 read_input
 if [[ $tool_name == Bash ]]; then
+  has_run_pgrep=false
   # A here-document holds text, such as a commit message that names a command, and not commands.
   for_each_simple_command check_simple_command "$shell_command"
 fi
