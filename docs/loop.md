@@ -2,7 +2,7 @@
 
 ## Start the loop or take it over
 
-Find your case, from what the maintainer asks and what the session-start hook says:
+Find your case:
 
 - The maintainer asks you to start the loop. Do steps 1 to 5.
 - The hook says "The Claude Code process of this repository's orchestrator has ended", and the maintainer asks you to
@@ -51,7 +51,7 @@ describes:
 - On another account, write the message to a file in a folder of your own in `.loop/`. Then run the command that
   "Read the meter" gives for the account, with `--message <file>`. In place of its `<issue> <kind>`, give the `issue`
   and the `kind` of the old agent's start line in `.loop/agents.jsonl`, such as `12 left behind 34` for the issue 12
-  and the kind `left behind 34`. Give `<issue> other` instead for a builder that fixes a reviewer's errors, or when the
+  and the kind `left behind 34`. Give `<issue> other` instead when the message holds a reviewer's errors, or when the
   start line has no kind because the old builder started on a pull request. In these two cases, `<issue>` is the issue
   that the old builder's pull request closes.
 
@@ -62,14 +62,14 @@ line into `.loop/agents.jsonl`.
 
 ### Take in
 
-- **Messages and mistakes.** Read the maintainer's messages in this session. Then note the time on the `taken in:`
-  line of your state file, write `taken in: now` in its place, and read the issues and comments that the maintainer
-  wrote on GitHub since the time you noted. Open or rewrite issues for each goal and idea, and for the cause of each
-  correction, without stopping the builders that run. Treat each mistake that the loop could make again, whether
-  yours or an agent's, as a correction, even when you fixed the mistake itself. Write each correction, with the issue
-  for its cause, in `.loop/corrections.md`. Add the `priority` label to each issue for the cause of a correction, and
-  to each issue that the maintainer asks to have built first. If a correction changes the issue of a running builder,
-  give the builder the change.
+- **Messages and mistakes.** Read the maintainer's messages in this session. Then copy the time from the `taken in:`
+  line of your state file, and replace that line with `taken in: now`, for a hook to write the clock's time there. Read
+  the issues and comments that the maintainer wrote on GitHub since the time you copied. Open or rewrite issues for each
+  goal and idea, and for the cause of each correction, without stopping the builders that run. Treat each mistake that
+  the loop could make again, whether yours or an agent's, as a correction, even when you fixed the mistake itself. Write
+  each correction, with the issue for its cause, in `.loop/corrections.md`. Add the `priority` label to each issue for
+  the cause of a correction, and to each issue that the maintainer asks to have built first. If a correction changes the
+  issue of a running builder, give the builder the change.
 - **Answers.** For each issue with `needs-decision` that the maintainer answered in a comment, carry out the answer,
   as "Labels" in `docs/planning.md` describes.
 - **Other people's issues.** Triage them, as "Triage issues that others open" in `docs/planning.md` describes.
@@ -169,16 +169,16 @@ at any time. Besides the `session:` and `pid:` lines, it holds:
 - the maintainer's decisions that no issue holds yet
 - what you do next, and the open questions
 
-It holds nothing that a query of GitHub gives, such as the ready issues, their blockers or what merged, and no lasting
-rule, which belongs in a guide or a hook.
+It holds nothing that a query of GitHub gives, such as the ready issues or their blockers, and no lasting rule, which
+belongs in a guide or a hook.
 
 When an entry changes, rewrite it in place rather than add a new one. Delete an entry once it no longer tells you what
 to do next, such as a pull request that merged or an agent that ended.
 
-A hook writes the clock's time on the file's `updated:` line each time you write the file, on its `taken in:` line in
-place of `now`, and on its `heartbeat:` line each time you schedule the heartbeat. Keep these times as the hook wrote
-them. Once the `updated:` time is 6 days or more after the `heartbeat:` time, delete the heartbeat and schedule it
-again, because a recurring prompt ends 7 days after you schedule it.
+A hook writes the clock's time on the file's `updated:` line each time you write the file, and on its `heartbeat:` line
+each time you schedule the heartbeat. Keep these times as the hook wrote them. Once the `updated:` time is 6 days or
+more after the `heartbeat:` time, delete the heartbeat and schedule it again, because a recurring prompt ends 7 days
+after you schedule it.
 
 ## Read the meter
 
@@ -191,8 +191,7 @@ for a focused audit, and when a hook tells an agent to hand off its work. Start 
 it ends.
 
 Your own account is the Claude account in `.loop/accounts.json` whose `env` values match this session's
-environment, such as `CLAUDE_CONFIG_DIR`. Each account's advice says which agent types the account has room for, as
-`scripts/loop/meter --help` describes:
+environment, such as `CLAUDE_CONFIG_DIR`. Each account's advice says which agent types the account has room for:
 
 - **go:** start an agent of any type.
 - **a list of types,** such as `builder-small, researcher, reviewer`: start only agents of those types.
@@ -201,16 +200,20 @@ environment, such as `CLAUDE_CONFIG_DIR`. Each account's advice says which agent
   wakes you a minute after the reset instead. Schedule the heartbeat again then.
 - **no reading:** start nothing on the account, and fix what the account's line names.
 
-The line after the accounts starts with `start on`, and names the Claude account for each type, or `no account`.
-Choose the account of each builder and researcher, and of each reviewer of a pull request, with
-`scripts/loop/meter --start-on <type>`, and start the agent on the account that it prints. If it prints
-`no account`, start the agent on a Codex account if one can take it, and otherwise start none. Start the auditor, and each reviewer that reviews no pull request, such as the reviewer of a
-release, on your own account, as an agent of your session.
+A Codex account can take a builder or a researcher while its advice is `go`. It can't take a `builder-deep`, an agent
+that takes over a hand-off, or an agent that must open issues, such as the researcher of a focused audit.
 
-A Codex account can take an agent while its advice is `go`, unless the agent must open issues, as the researcher of a
-focused audit must. Start the agent there, in place of running `--start-on`, when the Codex account's `week` percentage of use
-is lower than that of the account that the `start on` line names for the agent's type. Each builder of the type
-`builder-deep`, and each builder or researcher that takes over a hand-off, can run only on a Claude account.
+The line after the accounts starts with `start on`, and names the Claude account for each type, or `no account`.
+Choose the account of each builder and researcher, and of each reviewer of a pull request, in this order:
+
+1. If a Codex account can take the agent, compare the Codex account's `week` percentage of use with that of the
+   Claude account that the `start on` line names for the agent's type. If the Codex account's is lower, start the
+   agent on it.
+2. Otherwise, run `scripts/loop/meter --start-on <type>`, and start the agent on the account that it prints.
+3. If it prints `no account`, start the agent on a Codex account if one can take it, and otherwise start none.
+
+Start the auditor, and each reviewer that reviews no pull request, such as the reviewer of a release, on your own
+account, as an agent of your session.
 
 To start an agent on another account, run one of these commands as a background task.
 
@@ -229,8 +232,8 @@ Keep your shell in the main checkout, and run git in a worktree with `git -C <wo
 hook shows you your state file and this guide after a `/clear` or a compaction only when your shell is in the main
 checkout.
 
-A `/clear` sender is a hook in the maintainer's own Claude Code settings that types `/clear`, and then the request's
-second line, into your session.
+`scripts/hooks/hand-off` may ask you to write a request for a `/clear` sender. A `/clear` sender is a hook in the
+maintainer's own Claude Code settings that types `/clear` into your session, and then the request's second line.
 
 ## Ask the maintainer
 
@@ -266,4 +269,3 @@ without waiting for the next retrospective:
    it, and assign it to yourself, so that `scripts/take-next-issue` doesn't give it to anyone.
 3. Start a `researcher` agent on it, as step 3 of "Launch" describes, with `<issue> research` as the line that names
    its work.
-4. Add the audit to the state file's list of focused audits.
