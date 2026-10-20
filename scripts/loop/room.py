@@ -38,8 +38,8 @@ class Command(NamedTuple):
     need: Use | None
     # When it started, or None while it waits
     started: float | None = None
-    # What its processes used at their last sample
-    using: Use = NOTHING
+    # What its processes used at their last sample, or None before the first
+    using: Use | None = None
 
 
 class Run(NamedTuple):
@@ -110,7 +110,8 @@ def room_alone(free: Use, running: list[Command]) -> Use:
     """The room that the machine would have with no heavy command running, from the room that the readings show, less
     the room that the scheduler keeps free."""
     keep_free = Use(KEEP_FREE_CORES, KEEP_FREE_MEMORY_GB, KEEP_FREE_GPU_PERCENT)
-    return subtract(free, [keep_free, *(negative(command.using) for command in running)])
+    sampled = [command.using for command in running if command.using is not None]
+    return subtract(free, [keep_free, *(negative(using) for using in sampled)])
 
 
 def commands_to_start(waiting: list[Command], running: list[Command], alone: Use) -> list[str]:
@@ -157,10 +158,11 @@ def room_behind(head: Command, running: list[Command], alone: Use) -> Use:
 
 
 def counted(command: Command) -> Use:
-    """The room that a running command takes: its need, or what it uses now where that is more. So a command that just
-    started counts at its need until the readings show its use."""
-    need = NOTHING if command.need is None else command.need
-    return Use(*(max(needed, used) for needed, used in zip(need, command.using, strict=True)))
+    """The room that a running command takes: what it used at its last sample, or its need before its first sample.
+    So a command in a light step, which uses less than it reserves, leaves the rest to the commands that wait."""
+    if command.using is not None:
+        return command.using
+    return NOTHING if command.need is None else command.need
 
 
 def taken(room: Use, need: Use | None) -> Use:

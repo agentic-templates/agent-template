@@ -116,7 +116,7 @@ class RunHeavyTest(unittest.TestCase):
         state_file = self.heavy / "state.json"
         state = json.loads(state_file.read_text()) if state_file.exists() else {"commands": []}
         entry = {"id": name, "command": name, "arrived": NOW + arrived, "need": need, "started": started}
-        state["commands"].append({**entry, "using": room.NOTHING._asdict()})
+        state["commands"].append({**entry, "using": None})
         state_file.write_text(json.dumps(state))
 
     def hold(self, name: str) -> IO[str]:

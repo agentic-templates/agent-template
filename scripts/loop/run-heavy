@@ -7,8 +7,9 @@ scripts/check, scripts/test-scripts and scripts/test-check run through it by the
 worktrees of a clone wait in one line. Each reserves the most that the same command used in its last runs on this
 machine: its cores, its memory, and on a Mac with Apple silicon its share of the GPU. A command that hasn't run yet
 reserves the most that the commands that share the most leading words with it used, the program at least, so that
-cargo test bar reserves what cargo test foo used. A command starts as soon as the machine's readings leave room for
-it, after the reservations of the commands that run and the room that the scheduler keeps free. A number that the
+cargo test bar reserves what cargo test foo used. A command starts as soon as the machine's readings show its
+reservation free, plus the room that the scheduler keeps free. A command that runs counts at its reservation until the
+script first measures its processes, and from then on at what they used when it last measured them. A number that the
 command doesn't use, such as the GPU for most commands, never keeps it waiting. The readings count the cores that were
 busy, not the load, which counts the processes that wait for the disk too. A first run, of a program that no command
 in the log ran, starts once the readings show some free cores and memory, and nothing else starts until it ends, so
@@ -183,7 +184,7 @@ def holding_turn(turn: Turn) -> Iterator[None]:
         need = reservation(turn.command, measured_runs(turn.log))
         entry = {"id": turn.id, "command": turn.command, "arrived": turn.arrived, "need": need, "started": None}
         with locked_state(turn.folder) as state:
-            state["commands"].append({**entry, "using": room.NOTHING._asdict()})
+            state["commands"].append({**entry, "using": None})
         try:
             yield
         finally:
@@ -403,7 +404,7 @@ def command_of(entry: dict[str, Any]) -> room.Command:
         arrived=entry["arrived"],
         need=need_in(entry),
         started=entry["started"],
-        using=use_of(entry["using"]),
+        using=None if entry["using"] is None else use_of(entry["using"]),
     )
 
 

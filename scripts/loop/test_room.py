@@ -124,15 +124,20 @@ class RoomAloneTest(RoomTest):
         command = running("train", 1.0)._replace(using=Use(3.0, 5.0, 20.0))
         self.assertEqual(room.room_alone(Use(4.0, 20.0, 70.0), [command]), Use(6.0, 23.0, 80.0))
 
-    def test_counts_a_command_that_just_started_at_its_reservation_until_the_readings_show_its_use(self) -> None:
+    def test_counts_a_running_command_with_no_sample_yet_at_its_reservation(self) -> None:
         just_started = running("check", 4.0, memory_gb=8.0)
-        # Later the readings show the 4 cores and 8 GB that the command uses, and 2 cores and 10 GB of other programs.
-        later = just_started._replace(using=Use(4.0, 8.0, 0.0))
-        for command, free in ((just_started, Use(8.0, 30.0, 100.0)), (later, Use(4.0, 22.0, 100.0))):
-            alone = room.room_alone(free, [command])
-            self.assertEqual(room.room_now(alone, [command]), Use(3.0, 20.0, 90.0))
-            self.assertEqual(room.commands_to_start([waiting("build", 4.0)], [command], alone), [])
-            self.assertEqual(room.commands_to_start([waiting("test", 3.0)], [command], alone), ["test"])
+        alone = room.room_alone(Use(8.0, 30.0, 100.0), [just_started])
+        self.assertEqual(room.room_now(alone, [just_started]), Use(3.0, 20.0, 90.0))
+        self.assertEqual(room.commands_to_start([waiting("build", 3.1)], [just_started], alone), [])
+        self.assertEqual(room.commands_to_start([waiting("test", 3.0)], [just_started], alone), ["test"])
+
+    def test_counts_a_running_command_that_uses_less_than_it_reserves_at_what_it_uses(self) -> None:
+        # check reserves 6 cores and 8 GB but uses 1 core and 2 GB in a light step. Other programs use 1 core.
+        command = running("check", 6.0, memory_gb=8.0)._replace(using=Use(1.0, 2.0, 0.0))
+        alone = room.room_alone(Use(8.0, 26.0, 100.0), [command])
+        self.assertEqual(room.room_now(alone, [command]), Use(7.0, 24.0, 90.0))
+        self.assertEqual(room.commands_to_start([waiting("build", 7.1)], [command], alone), [])
+        self.assertEqual(room.commands_to_start([waiting("test", 7.0)], [command], alone), ["test"])
 
     def test_counts_a_running_command_that_uses_more_than_it_reserves_at_what_it_uses(self) -> None:
         command = running("train", 1.0, memory_gb=8.0)._replace(using=Use(3.0, 12.0, 20.0))
