@@ -14,7 +14,7 @@ When a maintainer asks you to publish a release, or a goal is done:
 
    Open an issue for each problem that the reviewer reports but didn't record in an advisory. If the problem is a vulnerability that's public already, such as one in a dependency that a published advisory describes, fix it before the release: once its pull request merges, start again from step 2.
 
-   For each GHSA ID that the reviewer's report names, add the line `<GHSA ID> holds-release` to `.loop/advisory-marks` in the main checkout. Then run `scripts/holding-advisories`. It prints the GHSA ID of each advisory that isn't published, closed or withdrawn, and that has a `holds-release` line in the file and no `fix-merged` line. If the script stops with an error, do what the error says, and run the script again before you go on. If the reviewer's report or the script names any GHSA ID, stop here, and go on to "Fix a security vulnerability" for each of them.
+   Add the line `<GHSA ID> holds-release` to `.loop/advisory-marks` in the main checkout for each advisory that the reviewer's report gives for a vulnerability that isn't public yet. If you aren't the orchestrator, tell the maintainer these GHSA IDs instead, and ask them to have the orchestrator add the lines before any release. Then run `scripts/holding-advisories`. If it prints any GHSA ID, or you told the maintainer any, stop here, and go on to "Fix a security vulnerability" for each of them.
 4. Choose the version with `scripts/next-version <sha>`. If the script prints an error instead of a version, ask the maintainer about it, and publish the release once they answer. If the maintainer named a version that differs from the one the script printed, ask which one to publish.
 5. Publish the release with notes built from the merged pull requests:
    ```sh
@@ -72,7 +72,7 @@ As soon as you find a vulnerability that isn't public yet, read the advisories t
 gh api --paginate "repos/{owner}/{repo}/security-advisories" --jq '.[] | select(.state != "published" and .state != "closed" and .state != "withdrawn") | .ghsa_id + ": " + .summary'
 ```
 
-If one of them describes the same vulnerability, don't record it again, unless `.loop/advisory-marks` in the main checkout marks that advisory's fix as merged, with the line `<GHSA ID> fix-merged <SHA>`. In that case, the fix missed the vulnerability, and a release no longer waits for that advisory.
+If one of them describes the same vulnerability, don't record it again, unless `.loop/advisory-marks` in the main checkout marks that advisory's fix as merged, with the line `<GHSA ID> fix-merged <SHA>`.
 
 Otherwise, write the vulnerability's summary and its description to two files outside the repository with your tool for writing files, not with a shell command. Then run `scripts/record-vulnerability <summary file> <description file>`. It records the vulnerability in a security advisory, and prints the advisory's GHSA ID and URL.
 

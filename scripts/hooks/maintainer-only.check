@@ -7,7 +7,9 @@
 # - writing .loop/reviewed-fixes or .loop/advisory-marks in the main checkout in the same ways, unless the
 #   orchestrator's session writes it, because a release includes each fix in a private fork that the first marks as
 #   reviewed without asking the maintainer, and waits for the advisories that the second marks as holding it
-# - deleting with rm, find and the like outside the repository's worktrees and the temporary folders
+# - deleting with rm, find and the like outside the repository's worktrees and the temporary folders, and deleting or
+#   moving away .loop/advisory-marks in the main checkout, or a folder that holds it, unless the orchestrator's session
+#   does it, because without the file a release waits for no advisory
 # - making a gist public, and making a repository public or posting with gh to a repository other than this one, unless
 #   the list of allowed repositories names it. The list is .loop/allowed-repositories in the main checkout, with one
 #   owner/name to a line.
@@ -44,9 +46,10 @@ ask="Ask the maintainer, and go on with the other work."
 # AGENTS.md lets agents make public the repositories that they create from this template to test it.
 test_repositories="If it's a repository that agents created from this template to test it, add its owner/name to .loop/allowed-repositories in the main checkout first. Otherwise, ask the maintainer, and go on with the other work."
 security_change="Blocked: this changes the repository's rules or security settings, and only the maintainer may do that. $ask"
+marks_reason="a release waits for the fix of each advisory that it marks as holding the release"
 
 # The physical paths of the home folder and of the loop's folder, and the folders inside which an agent may delete,
-# which is_settings_file, is_orchestrator_file and may_delete find when they first need them.
+# which is_settings_file, find_physical_loop and may_delete find when they first need them.
 physical_home=""
 physical_loop=""
 deletable_folders=()
@@ -177,28 +180,32 @@ is_settings_file() {
   [[ $relative =~ ^(\.[^/]+|\.config/.+|\.ssh/.+|\.claude/settings[^/]*\.json|\.codex/config\.toml|Library/LaunchAgents/.+)$ ]]
 }
 
+# Sets physical_loop to the physical path of the loop's folder, unless it's set already, or fails when git can't tell
+# the folder.
+find_physical_loop() {
+  local loop
+  if [[ -z $physical_loop ]] && loop=$(hook_loop_folder); then
+    physical_loop=$(physical_path "$loop" /)
+  fi
+  [[ -n $physical_loop ]]
+}
+
 # Succeeds if a physical path is a file in the loop's folder that a release reads, and sets orchestrator_file_reason to
 # the reason why only the orchestrator's session writes it. Step 1 of "Publish a release" in docs/releasing.md reads
 # reviewed-fixes, and its step 3 reads advisory-marks. A name in another case counts too, because macOS finds a file by
 # its name in any case: is_orchestrator_file <physical path>
 is_orchestrator_file() {
-  local loop
   orchestrator_file_reason=""
   shopt -s nocasematch
   case ${1##*/} in
     reviewed-fixes)
       orchestrator_file_reason="a release includes each fix that it marks as reviewed without asking the maintainer"
       ;;
-    advisory-marks)
-      orchestrator_file_reason="a release waits for the fix of each advisory that it marks as holding the release"
-      ;;
+    advisory-marks) orchestrator_file_reason=$marks_reason ;;
   esac
   # Only a path with one of the files' names makes the hook ask git for the loop's folder, which takes about 5
   # milliseconds.
-  if [[ -n $orchestrator_file_reason && -z $physical_loop ]] && loop=$(hook_loop_folder); then
-    physical_loop=$(physical_path "$loop" /)
-  fi
-  if [[ -z $physical_loop || ${1%/*} != "$physical_loop" ]]; then
+  if [[ -n $orchestrator_file_reason ]] && { ! find_physical_loop || [[ ${1%/*} != "$physical_loop" ]]; }; then
     orchestrator_file_reason=""
   fi
   shopt -u nocasematch
@@ -220,47 +227,95 @@ block_if_protected_file() {
   fi
 }
 
-# Blocks cp, mv, install or ln when it writes a file that block_if_protected_file protects: the file that its last
-# word names, or a file in the folder that its last word or -t names.
-check_copy() {
-  local name=${command_words[0]##*/} with_value=" -S --suffix " i word folder="" destination path source
-  local -a operands=()
-  if [[ $name == install ]]; then
+# Succeeds if deleting or moving a physical path takes away the loop's file of advisory marks: if the path is the file
+# or a folder that holds it. A path with the shell's wildcards, as in .loop/*, counts when they match the file or the
+# folder, also with a * that matches a /. A name in another case counts too, as in is_orchestrator_file:
+# takes_away_marks <physical path>
+takes_away_marks() {
+  local held
+  find_physical_loop || return 1
+  held=$physical_loop/advisory-marks
+  shopt -s nocasematch
+  while [[ -n $held ]]; do
+    # shellcheck disable=SC2053 # The path's wildcards match, as the shell fills them in before the command runs.
+    if [[ $held == $1 ]]; then
+      shopt -u nocasematch
+      return 0
+    fi
+    held=${held%/*}
+  done
+  shopt -u nocasematch
+  return 1
+}
+
+# Blocks a command that deletes or moves away the loop's file of advisory marks, unless the orchestrator's session runs
+# it. Taking away reviewed-fixes goes ahead, because without it a release asks the maintainer about each fix:
+# block_if_takes_away_marks <path as the command names it> <what the command would do, as in "delete .loop">
+block_if_takes_away_marks() {
+  local path
+  path=$(resolved_path "$1" "$command_folder") || return 0
+  if takes_away_marks "$path" && ! is_orchestrator; then
+    block "Blocked: ${command_words[0]##*/} would $2, which takes away $physical_loop/advisory-marks. Only the orchestrator deletes or moves that file, because $marks_reason. Delete or move only other files, and list in your report any change that the file needs."
+  fi
+}
+
+# Sets copy_operands to the words of the cp, mv, install or ln command in command_words that aren't options or their
+# values, and copy_folder to the folder that its -t names, or to empty without -t.
+read_copy_operands() {
+  local with_value=" -S --suffix " i word
+  copy_operands=()
+  copy_folder=""
+  if [[ ${command_words[0]##*/} == install ]]; then
     with_value+="-m --mode -o --owner -g --group "
   fi
   for ((i = 1; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
     case $word in
       -t | --target-directory)
-        folder=${command_words[i + 1]:-}
+        copy_folder=${command_words[i + 1]:-}
         i=$((i + 1))
         ;;
-      --target-directory=*) folder=${word#*=} ;;
+      --target-directory=*) copy_folder=${word#*=} ;;
       -*)
         if [[ $with_value == *" $word "* ]]; then
           i=$((i + 1))
         fi
         ;;
-      *) operands+=("$word") ;;
+      *) copy_operands+=("$word") ;;
     esac
   done
-  if [[ -z $folder ]]; then
+}
+
+# Blocks cp, mv, install or ln when it writes a file that block_if_protected_file protects: the file that its last
+# word names, or a file in the folder that its last word or -t names. It also blocks mv when it moves away a file that
+# block_if_takes_away_marks protects.
+check_copy() {
+  local destination path source
+  read_copy_operands
+  if [[ -z $copy_folder ]]; then
     # With one word, ln makes the link in the folder that it runs in, and the other commands fail.
-    if ((${#operands[@]} < 2)); then
+    if ((${#copy_operands[@]} < 2)); then
       return 0
     fi
-    destination=${operands[${#operands[@]} - 1]}
-    unset 'operands[${#operands[@]} - 1]'
+    destination=${copy_operands[${#copy_operands[@]} - 1]}
+    unset 'copy_operands[${#copy_operands[@]} - 1]'
+  fi
+  if [[ ${command_words[0]##*/} == mv ]]; then
+    for source in ${copy_operands[@]+"${copy_operands[@]}"}; do
+      block_if_takes_away_marks "$source" "move $source"
+    done
+  fi
+  if [[ -z $copy_folder ]]; then
     path=$(resolved_path "$destination" "$command_folder") || return 0
     if [[ ! -d $path && $destination != */ ]]; then
       block_if_protected_file "$destination" "$command_folder"
       return 0
     fi
-    folder=$destination
+    copy_folder=$destination
   fi
-  for source in ${operands[@]+"${operands[@]}"}; do
+  for source in ${copy_operands[@]+"${copy_operands[@]}"}; do
     source=${source%/}
-    block_if_protected_file "${folder%/}/${source##*/}" "$command_folder"
+    block_if_protected_file "${copy_folder%/}/${source##*/}" "$command_folder"
   done
 }
 
@@ -415,20 +470,21 @@ read_delete_targets() {
   fi
 }
 
-# Blocks a command that deletes outside the repository's worktrees and the temporary folders.
+# Blocks a command that deletes outside the repository's worktrees and the temporary folders, or that deletes a file
+# that block_if_takes_away_marks protects.
 check_delete() {
   local name=${command_words[0]##*/} word path what
   read_delete_targets "$name"
   for word in ${delete_targets[@]+"${delete_targets[@]}"}; do
     path=$(resolved_path "$word" "$command_folder") || continue
-    if may_delete "$path" "$name"; then
-      continue
-    fi
     what=$word
     if [[ $name == find ]]; then
       what="files in $word"
     fi
-    block "Blocked: $name would delete $what, and only the maintainer may delete outside the repository, its worktrees and the temporary folders. Delete only inside them, or ask the maintainer."
+    if ! may_delete "$path" "$name"; then
+      block "Blocked: $name would delete $what, and only the maintainer may delete outside the repository, its worktrees and the temporary folders. Delete only inside them, or ask the maintainer."
+    fi
+    block_if_takes_away_marks "$word" "delete $what"
   done
 }
 

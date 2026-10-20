@@ -781,12 +781,17 @@ printf '%s\n' "session: $orchestrator" "goal: the release" >"$project/.loop/stat
 only_orchestrator() {
   echo "Blocked: only the orchestrator writes $1, because $reason. Go on with the other work, and list the change in your report."
 }
+# Checks that the hook blocks an action with a message, unless the orchestrator's session takes it:
+# expect_only_from_orchestrator <tool name> <command, patch or path> <message>
+expect_only_from_orchestrator() {
+  expect_action_from abc123 "" "$1" "$2" 2 "$3"
+  expect_action_from "$orchestrator" agent-7 "$1" "$2" 2 "$3"
+  expect_action_from "$orchestrator" "" "$1" "$2" 0 ""
+}
 # Checks that the hook blocks an action that writes the file, unless the orchestrator's session takes it:
 # expect_only_orchestrator <tool name> <command, patch or path> <the file's path as the message names it>
 expect_only_orchestrator() {
-  expect_action_from abc123 "" "$1" "$2" 2 "$(only_orchestrator "$3")"
-  expect_action_from "$orchestrator" agent-7 "$1" "$2" 2 "$(only_orchestrator "$3")"
-  expect_action_from "$orchestrator" "" "$1" "$2" 0 ""
+  expect_only_from_orchestrator "$1" "$2" "$(only_orchestrator "$3")"
 }
 for name in reviewed-fixes advisory-marks; do
   case $name in
@@ -826,6 +831,47 @@ for name in reviewed-fixes advisory-marks; do
   test_cwd=$project
 done
 expect_allow Write "$project/.loop/allowed-repositories"
+
+# Deleting or moving away the file of advisory marks, or a folder that holds it. Without the file, a release waits for
+# no advisory, so only the orchestrator's session may take it away. Without reviewed-fixes, a release asks the
+# maintainer about each fix, so any session may take that file away.
+# Checks that the hook blocks a command that takes away the file of advisory marks, unless the orchestrator's session
+# runs it: expect_takes_away <command> <the command's name> <what the command would do, as in "delete .loop">
+expect_takes_away() {
+  expect_only_from_orchestrator Bash "$1" "Blocked: $2 would $3, which takes away $project/.loop/advisory-marks. Only the orchestrator deletes or moves that file, because a release waits for the fix of each advisory that it marks as holding the release. Delete or move only other files, and list in your report any change that the file needs."
+}
+for name in rm unlink shred srm trash; do
+  expect_takes_away "$name .loop/advisory-marks" "$name" 'delete .loop/advisory-marks'
+done
+expect_takes_away "rm -f '$project/.loop/advisory-marks'" rm "delete $project/.loop/advisory-marks"
+expect_takes_away 'cd .loop && rm advisory-marks' rm 'delete advisory-marks'
+expect_takes_away 'rm .loop/Advisory-Marks' rm 'delete .loop/Advisory-Marks'
+expect_takes_away 'rm -rf .loop' rm 'delete .loop'
+expect_takes_away "rm -rf '$project/.loop/'" rm "delete $project/.loop/"
+# The shell fills in a wildcard before rm runs.
+expect_takes_away 'rm -rf .loop/*' rm 'delete .loop/*'
+expect_takes_away 'rm .loop/advisory-mark?' rm 'delete .loop/advisory-mark?'
+expect_takes_away 'find .loop -delete' find 'delete files in .loop'
+expect_takes_away 'find . -name advisory-marks -delete' find 'delete files in .'
+expect_takes_away "find .loop -name '*-marks' -exec rm {} +" find 'delete files in .loop'
+expect_takes_away 'mv .loop/advisory-marks /tmp/old-marks' mv 'move .loop/advisory-marks'
+expect_takes_away 'mv .loop/advisory-marks .loop/old-marks' mv 'move .loop/advisory-marks'
+expect_takes_away 'mv -t /tmp .loop/advisory-marks' mv 'move .loop/advisory-marks'
+expect_takes_away 'mv .loop .loop-old' mv 'move .loop'
+expect_allow Bash 'rm -rf .loop/runs/review-1 .loop/blocks.log'
+expect_allow Bash 'rm .loop/advisory-marks.bak'
+expect_allow Bash 'find .loop/runs -delete'
+expect_allow Bash 'mv .loop/runs/review-1 .loop/runs/review-2'
+expect_allow Bash 'cp .loop/advisory-marks /tmp/marks'
+for session in abc123 "$orchestrator"; do
+  expect_from "$session" agent-7 'rm .loop/reviewed-fixes' 0 ""
+  expect_from "$session" agent-7 'mv .loop/reviewed-fixes /tmp/old-fixes' 0 ""
+done
+# A worktree's own loop folder holds no file that a release reads.
+test_cwd=$worktree
+expect_takes_away "rm -rf '$project/.loop'" rm "delete $project/.loop"
+expect_allow Bash 'rm -rf .loop'
+test_cwd=$project
 
 # Without an origin, the hook can't tell which repository is this one.
 git -C "$project" remote remove origin
