@@ -104,8 +104,9 @@ done
 
 # Auto mode's classifier blocks a run of scripts/configure-github as a weakening of security, and the orchestrator runs
 # it after each change to it merges. Once a repository's settings were applied, the hooks allow the run only from the
-# orchestrator, in the main checkout, while its scripts folder is the same as on main on GitHub, as
-# maintainer-commands.test shows.
+# orchestrator, as a command of its own in the main checkout, while the checkout's scripts folder and .gitignore are
+# the same as on main on GitHub. The rule also matches the command behind a wrapper, such as timeout, or after a
+# variable that Claude Code takes as safe, and the hooks block the run there, as maintainer-commands.test shows.
 expect_allowed 'Bash(scripts/configure-github)' \
   "the orchestrator from running scripts/configure-github after a change to it merges"
 
