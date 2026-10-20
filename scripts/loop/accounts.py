@@ -2,6 +2,7 @@
 
 import json
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TypedDict
 
@@ -57,3 +58,15 @@ def claude_environment(account: Account) -> dict[str, str]:
     claude think that it runs inside that session."""
     environment = {key: value for key, value in os.environ.items() if not key.startswith(CLAUDE_VARIABLE_PREFIXES)}
     return environment | account["env"]
+
+
+def own_account(accounts: list[Account], environment: Mapping[str, str]) -> Account | None:
+    """The Claude account that a session with the environment runs on: the one whose variables all have their values in
+    the environment, or None if none has. An account without variables, which runs claude as this machine is signed
+    in, matches every environment, so of the accounts that match, the one with the most variables counts."""
+    matching = [
+        account
+        for account in accounts
+        if account["tool"] == "claude" and all(environment.get(name) == value for name, value in account["env"].items())
+    ]
+    return max(matching, key=lambda account: len(account["env"]), default=None)

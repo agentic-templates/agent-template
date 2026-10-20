@@ -134,6 +134,7 @@ class StartTest(AgentLogTest):
                 "kind": "other",
                 "test": False,
                 "pid": 4321,
+                "account": "claude",
             },
         )
         self.assertEqual(self.gh_calls(), ["issue view 12 --json labels --jq .labels[].name"])
@@ -147,6 +148,33 @@ class StartTest(AgentLogTest):
             del os.environ["CLAUDE_PID"]
             self.run_script("start", agent_call("12 other", subagent_type="builder"))
             self.assertIsNone(self.lines()[-1]["pid"])
+
+    def test_names_the_sessions_own_account_by_its_variables(self) -> None:
+        accounts = [
+            {"name": "signed-in", "tool": "claude"},
+            {"name": "codex", "tool": "codex", "env": {"CODEX_HOME": "/codex"}},
+            {"name": "second", "tool": "claude", "env": {"CLAUDE_CONFIG_DIR": "/second"}},
+            {"name": "third", "tool": "claude", "env": {"CLAUDE_CONFIG_DIR": "/third", "ANTHROPIC_MODEL": "opus"}},
+        ]
+        (self.loop / "accounts.json").write_text(json.dumps({"accounts": accounts}))
+        cases = [
+            ({"CLAUDE_CONFIG_DIR": "/second"}, "second"),
+            ({"CLAUDE_CONFIG_DIR": "/third", "ANTHROPIC_MODEL": "opus"}, "third"),
+            ({"CLAUDE_CONFIG_DIR": "/third"}, "signed-in"),
+            ({"CLAUDE_CONFIG_DIR": "/other", "CODEX_HOME": "/codex"}, "signed-in"),
+        ]
+        for variables, account in cases:
+            with self.subTest(variables=variables), mock.patch.dict(os.environ, variables):
+                self.run_script("start", agent_call("12 other", subagent_type="builder"))
+                self.assertEqual(self.lines()[-1]["account"], account)
+
+    def test_names_no_account_when_none_matches_the_session_or_the_accounts_file_cant_be_read(self) -> None:
+        unmatched = {"accounts": [{"name": "second", "tool": "claude", "env": {"CLAUDE_CONFIG_DIR": "/second"}}]}
+        for text in (json.dumps(unmatched), "{not json", '{"accounts": []}'):
+            with self.subTest(text=text), mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "/other"}):
+                (self.loop / "accounts.json").write_text(text)
+                self.assertEqual(self.run_script("start", agent_call("12 other", subagent_type="builder")), 0)
+                self.assertIsNone(self.lines()[-1]["account"])
 
     def test_takes_the_model_and_effort_that_the_call_gives(self) -> None:
         self.run_script("start", agent_call("12 left behind 31", subagent_type="builder", model="sonnet", effort="max"))

@@ -195,6 +195,7 @@ class EmptyPeriodTest(ReportTest):
                     "CI runs that passed: 0",
                     "Types: no agent started",
                     "Requests of the agents of a session that have no event: 0 of 0",
+                    "Accounts: no agent ended and the meter read no weekly meter",
                     "Orchestrator's share of the input tokens: none used",
                     "Hook blocks: 0",
                     "Safety classifier stops: 0 in the sessions in the main checkout, 0 in their agents",
