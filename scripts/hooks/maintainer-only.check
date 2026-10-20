@@ -93,10 +93,10 @@ changes_machine() {
     diskutil)
       # diskutil apfs takes a verb of its own, as in diskutil apfs list and diskutil apfs deleteVolume.
       if [[ $first == apfs ]]; then
-        ! is_one_of "${command_words[2]:-}" list listSnapshots listCryptoUsers listUsers listVolumeGroups
-      else
-        ! is_one_of "$first" list info activity
+        is_one_of "${command_words[2]:-}" list listSnapshots listCryptoUsers listUsers listVolumeGroups && return 1
+        return 0
       fi
+      ! is_one_of "$first" list info activity
       ;;
     defaults) ! is_one_of "$first" read read-type domains find help ;;
     launchctl) ! is_one_of "$first" list print print-disabled getenv help version blame ;;
