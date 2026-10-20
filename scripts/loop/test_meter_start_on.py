@@ -1,7 +1,7 @@
 import datetime as dt
 import json
 
-from test_meter import NOW, MeterTest, meters
+from test_meter import INTERRUPTION, NOW, MeterTest, meters
 
 
 class StartOnTest(MeterTest):
@@ -87,6 +87,21 @@ class StartOnTest(MeterTest):
             self.started("codex", NOW - dt.timedelta(minutes=minutes))
         named = [self.start_on(agent_type) for agent_type in ("builder", "builder-small", "builder-deep")]
         self.assertEqual(named, ["a", "a", "b"])
+
+    def test_leaves_out_an_agent_that_the_user_interrupted_whose_transcript_is_in_the_folder_of_another_account(
+        self,
+    ) -> None:
+        # Counted as running, the builder would still need 29 minutes, which leaves room for one more run.
+        subagents = self.orchestrator_on_another_account() / "abc123" / "subagents"
+        subagents.mkdir(parents=True)
+        transcript = subagents / "agent-c1.jsonl"
+        transcript.write_text(INTERRUPTION + "\n")
+        start = NOW - dt.timedelta(minutes=1)
+        meta = {"agentType": "builder", "toolUseId": f"run-{start:%H%M%S}"}
+        transcript.with_suffix(".meta.json").write_text(json.dumps(meta))
+        self.started("claude", start)
+        self.reading("claude", 20.0, 1.0)
+        self.assertEqual([self.start_on(), self.start_on()], ["claude", "claude"])
 
     def test_leaves_out_an_account_whose_newest_reading_is_older_than_30_minutes(self) -> None:
         self.clock.time = NOW + dt.timedelta(minutes=30)
