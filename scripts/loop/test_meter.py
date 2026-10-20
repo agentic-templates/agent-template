@@ -741,9 +741,21 @@ class WakeTest(MeterTest):
         self.assertEqual((status, self.readings), (1, [0, 1800]))
         self.assertTrue(lines[0].startswith("claude | no reading: "))
 
-    def test_ends_at_once_when_the_first_reading_fails(self) -> None:
-        self.answer("claude", [{"stdout": "Not logged in"}])
-        self.assertEqual((self.run_meter("--wake")[0], self.readings), (1, [0]))
+    def test_goes_on_while_an_account_has_no_reading_from_the_start_until_it_comes_back(self) -> None:
+        self.accounts({"name": "one", "tool": "claude"}, {"name": "two", "tool": "claude"})
+        failed, week_full = {"stdout": "Not logged in"}, usage_output(10, week=99)
+        self.answer("claude", [failed, week_full, failed, week_full, usage_output(8), week_full])
+        status, lines, _ = self.run_meter("--wake")
+        self.assertEqual((status, self.readings), (0, [0, 600, 1200]))
+        self.assertTrue(lines[0].startswith("one 03:28 | session 8% ") and lines[0].endswith(" | go"))
+
+    def test_ends_when_an_account_loses_its_reading_while_another_has_none_from_the_start(self) -> None:
+        self.accounts({"name": "one", "tool": "claude"}, {"name": "two", "tool": "claude"})
+        failed = {"stdout": "Not logged in"}
+        self.answer("claude", [failed, usage_output(8), failed, failed])
+        status, lines, _ = self.run_meter("--wake")
+        self.assertEqual((status, self.readings), (1, [0, 600]))
+        self.assertTrue(lines[1].startswith("two | no reading: "))
 
 
 # A reading of a Mac with Apple silicon
