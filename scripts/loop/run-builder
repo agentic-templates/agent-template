@@ -1,8 +1,9 @@
 #!/usr/bin/env -S uv run --script --quiet
 """Starts a builder for one issue with Claude Code or Codex, waits for it to end, and says where its report is.
 
-  scripts/loop/run-builder <issue> <kind> --tool claude --type TYPE [--account NAME] [--test PULL_REQUEST]
-  scripts/loop/run-builder <issue> <kind> --tool codex [--account NAME]
+  scripts/loop/run-builder <issue> <kind> --tool claude --type TYPE [--account NAME] [--message FILE]
+                           [--test PULL_REQUEST]
+  scripts/loop/run-builder <issue> <kind> --tool codex [--account NAME] [--message FILE]
 
 <issue> <kind> is the line that scripts/take-next-issue printed, such as 12 other. The builder runs on the account
 called NAME in .loop/accounts.json, which scripts/loop/meter --help describes, or on the tool's first account there.
@@ -15,6 +16,9 @@ the script pushes the branch. If the branch has a pull request, the script turns
 draft before the push. If scripts/clear-worktrees or a check refuses the changes, the script keeps them in the
 worktree or on the local branch, and the run fails and says where they are. The script doesn't start when that
 worktree exists already, or when the issue has needs-triage.
+
+The builder's prompt holds the issue's text. With --message, the text of the file FILE follows it there, as a message
+from the orchestrator, such as the errors that a reviewer found in the issue's pull request.
 
 A Claude builder builds the issue as "Build one issue" in docs/building.md describes. It sends the tokens of its
 requests to .loop/requests.jsonl, as scripts/loop/claude-with-events does.
@@ -117,6 +121,13 @@ REMOTE_URL = re.compile(
 SHARED_BRIEF = """You build this issue, of the kind `{kind}`, for the orchestrator of this repository's loop. Read only
 "Build one issue" in docs/building.md first. Nobody answers questions while you work, so decide what you can.
 """
+MESSAGE_BRIEF = """The orchestrator adds this message for you:
+
+{message}
+
+---
+
+"""
 CLAUDE_BRIEF = """You work in a worktree of your own, on the issue's branch. If you can't finish the issue, give it back
 as that section describes.
 """
@@ -173,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tool", required=True, choices=TOOLS)
     parser.add_argument("--type", help="the agent type of a Claude builder, such as builder")
     parser.add_argument("--account", help="the account's name in .loop/accounts.json")
+    parser.add_argument("--message", metavar="FILE", help="a file with a message for the builder")
     parser.add_argument("--test", type=int, metavar="PULL_REQUEST", help="build the issue again as a test")
     options = parser.parse_args(argv)
     kind = " ".join(options.kind)
@@ -182,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         check_kind(kind, options.tool)
         settings = type_settings(options.tool, options.type, options.test)
+        message = read_message(options.message)
         account = pick_account(load_accounts(paths.loop_dir() / "accounts.json"), options.tool, options.account)
         check_can_start(options.tool, worktree)
         repository = github_repository(checkout)
@@ -205,9 +218,9 @@ def main(argv: list[str] | None = None) -> int:
     begun = time.monotonic()
     try:
         if is_test:
-            outcome = test_build(settings, kind, account, issue, options.test, folders)
+            outcome = test_build(settings, kind, message, account, issue, options.test, folders)
         else:
-            outcome = build(options.tool, settings, kind, account, issue, folders)
+            outcome = build(options.tool, settings, kind, message, account, issue, folders)
     except Stop as stop:
         outcome = Outcome(f"failed: {stop}", is_ok=False)
     minutes = (time.monotonic() - begun) / 60
@@ -256,6 +269,7 @@ def build(
     tool: str,
     settings: agent_log.AgentSettings,
     kind: str,
+    message: str,
     account: Account,
     issue: dict[str, Any],
     folders: Folders,
@@ -266,10 +280,11 @@ def build(
     try:
         add_worktree(branch, folders)
         if tool == "claude":
-            run_claude(write_brief(issue, kind, CLAUDE_BRIEF, folders), account, settings, folders, can_hand_off=True)
+            brief = write_brief(issue, kind, message, CLAUDE_BRIEF, folders)
+            run_claude(brief, account, settings, folders, can_hand_off=True)
             outcome = Outcome("finished")
         else:
-            run_codex(write_brief(issue, kind, CODEX_BRIEF, folders), account, folders)
+            run_codex(write_brief(issue, kind, message, CODEX_BRIEF, folders), account, folders)
             outcome = finish_codex(issue, branch, folders)
     except Stop as stop:
         outcome = Outcome(f"failed: {stop}", is_ok=False)
@@ -288,6 +303,7 @@ def build(
 def test_build(
     settings: agent_log.AgentSettings,
     kind: str,
+    message: str,
     account: Account,
     issue: dict[str, Any],
     pull_request: int,
@@ -300,7 +316,8 @@ def test_build(
     git(["worktree", "add", "--quiet", "--detach", str(folders.worktree), base], folders.checkout, folders.hooks)
     try:
         # A hand-off posts a comment on the issue, and a test build changes nothing on GitHub.
-        run_claude(write_brief(issue, kind, TEST_BRIEF, folders), account, settings, folders, can_hand_off=False)
+        brief = write_brief(issue, kind, message, TEST_BRIEF, folders)
+        run_claude(brief, account, settings, folders, can_hand_off=False)
         outcome = Outcome(f"test finished, changes in {folders.run / CHANGES_FILE}")
     except Stop as stop:
         outcome = Outcome(f"failed: {stop}", is_ok=False)
@@ -543,11 +560,24 @@ def issue_branches(issue: int, checkout: Path) -> list[str]:
     return done.stdout.splitlines()
 
 
-def write_brief(issue: dict[str, Any], kind: str, run_brief: str, folders: Folders) -> str:
-    """Writes the builder's brief to the run folder, and returns it: the issue, and what the builder must know about
-    its kind of run."""
+def read_message(file: str | None) -> str:
+    """The text of the file with the orchestrator's message for the builder, or an empty string without one."""
+    if file is None:
+        return ""
+    try:
+        return Path(file).read_text().strip()
+    except OSError as error:
+        raise Stop(
+            f"can't read the message file {file}: {error.strerror}. Give the path of a file that holds the message."
+        ) from error
+
+
+def write_brief(issue: dict[str, Any], kind: str, message: str, run_brief: str, folders: Folders) -> str:
+    """Writes the builder's brief to the run folder, and returns it: the issue, the orchestrator's message if there is
+    one, and what the builder must know about its kind of run."""
     issue_text = f"Issue #{issue['number']}: {issue['title']}\n\n{issue['body']}\n\n---\n\n"
-    brief = issue_text + SHARED_BRIEF.format(kind=kind) + run_brief
+    message_text = MESSAGE_BRIEF.format(message=message) if message else ""
+    brief = issue_text + message_text + SHARED_BRIEF.format(kind=kind) + run_brief
     (folders.run / "brief.md").write_text(brief)
     return brief
 
