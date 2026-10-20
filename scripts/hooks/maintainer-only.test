@@ -532,6 +532,12 @@ for command in 'gh pr comment 5 -b $EMPTY -b -Rsomeone/else' 'gh issue close 5 -
   'gh pr comment 5 -b$X -b -Rsomeone/else' 'gh pr comment 5 -$X -b -Rsomeone/else'; do
   expect_block Bash "$command" "$(other_repository someone/else)"
 done
+# ANSI-C quoting, locale quoting, brace expansion and a pattern can become a flag that takes a value too, as each of
+# these becomes -b.
+for command in "gh pr comment 5 \$'-b' -b -Rsomeone/else" 'gh pr comment 5 $"-b" -b -Rsomeone/else' \
+  'gh pr comment 5 {-b,} -b -Rsomeone/else' 'gh pr comment 5 -[b] -b -Rsomeone/else'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
 expect_allow Bash 'gh run rerun 12 -dRjtmpl/listed'
 # gh repo edit, delete, archive and unarchive take no -R, so a -R there is part of the value of a flag before it, such
 # as the -d of gh repo edit, which takes a description.

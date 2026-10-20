@@ -747,10 +747,12 @@ add_guessed_repositories() {
 # become nothing, become a flag that takes a value, or end in a flag that takes no value or one whose value is the next
 # word, as -${letters}b and -b$text can. Then gh can read a word as a flag that the hook reads as a flag's value, as in
 # -b $text -b -Rowner/name. It sets the variables of read_arguments anew.
+# A word with an expansion is one that the splitter marks, or one that holds $, {, *, ? or [, because the splitter
+# doesn't mark ANSI-C quoting, locale quoting, brace expansion or a pattern, as in $'-b', $"-b", {-b,} and -[b].
 add_repositories_after_expansions() {
   local i
   for ((i = 2; i < ${#command_words[@]}; i++)); do
-    if [[ -n ${command_word_may_expand[i]:-} ]]; then
+    if [[ -n ${command_word_may_expand[i]:-} || ${command_words[i]} == *[\$\{\*\?\[]* ]]; then
       read_arguments $((i + 1)) " -R --repo "
       add_guessed_repositories
       return 0
