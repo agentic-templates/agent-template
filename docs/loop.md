@@ -40,17 +40,17 @@ from acting.
 
 To give a builder something, such as a correction or a reviewer's errors, send it a message. A builder that
 `scripts/loop/run-builder` started can't take messages. Wait until its run ends, and then start a new builder with
-the message, of the type `builder` unless a step below names another type. Choose its account as "Read the meter"
-describes:
+the message, of the type `builder` unless a step below names another type. Start that builder, and each reviewer
+that you give a message, in this way:
 
-- On your own account, start it on the old builder's pull request, or on its issue if it opened none, and put the
-  message in its prompt after the first line.
+- On your own account, start a builder on the old builder's pull request, or on its issue if it opened none, and a
+  reviewer on the pull request that it reviews. Put the message in the agent's prompt after the first line.
 - On another account, write the message to a file in a folder of your own in `.loop/`. Then run the command that
-  "Read the meter" gives for the account, with `--message <file>`. In place of its `<issue> <kind>`, give the `issue`
-  and the `kind` of the old agent's start line in `.loop/agents.jsonl`, such as `12 left behind 34` for the issue 12
-  and the kind `left behind 34`. Give `<issue> other` instead when the message holds a reviewer's errors, or when the
-  start line has no kind because the old builder started on a pull request. In these two cases, `<issue>` is the issue
-  that the old builder's pull request closes.
+  "Read the meter" gives for the account, with `--message <file>`. In place of a builder's `<issue> <kind>`, give
+  the `issue` and the `kind` of the old builder's start line in `.loop/agents.jsonl`, such as `12 left behind 34`
+  for the issue 12 and the kind `left behind 34`. Give `<issue> other` instead when the message holds a reviewer's
+  errors, or when the start line has no kind because the old builder started on a pull request. In these two cases,
+  `<issue>` is the issue that the old builder's pull request closes.
 
 Start the prompt of each agent of the types `builder`, `builder-small`, `builder-deep`, `researcher` and `reviewer`
 with a line that names its work: for an issue, the line that `scripts/take-next-issue` printed, and for a pull
@@ -130,12 +130,15 @@ when "Start a focused audit" says so.
 
 ### Land
 
-- **Drafts.** For each draft pull request that the loop opened, and that no reviewer has read yet, start a
-  `reviewer` agent with the pull request's number. Give each error that the reviewer reports to the builder that
-  opened the draft, and ask it to fix each one, with a test when the error is in code. If you opened the draft, fix
-  the errors yourself. If the draft changes code that the loop's safety depends on, which is the first kind in the
-  description of `builder-deep`, start a new reviewer on it after each round of fixes, until a reviewer reports no
-  error. When no error remains, run `gh pr ready <number>` and `gh pr merge <number>`.
+- **Drafts.** For each draft pull request that the loop opened, and that no reviewer has read yet, start a `reviewer`
+  agent with the pull request's number. Give each error that the reviewer reports to the builder that opened the draft,
+  and ask it to fix each one, with a test when the error is in code. Open an issue for each problem that the reviewer
+  lists apart from the errors, unless one is open already. If you opened the draft, fix the errors yourself. If the
+  draft changes code that the loop's safety depends on, which is the first kind in the description of `builder-deep`,
+  start a new reviewer on it after each round of fixes, until a reviewer reports no error. Give that reviewer a message
+  that names the round of fixes by its range of commits, `<old>..<new>`, and holds the errors that the last reviewer
+  reported. `<old>` is the head commit that the state file gives for the draft, and `<new>` is the draft's head. When no
+  error remains, run `gh pr ready <number>` and `gh pr merge <number>`.
   If it's the auditor's pull request, first add the label `retrospective` to it if it's missing, because the meter
   counts toward the next retrospective from the newest merged pull request with that label.
 - **Stuck pull requests.** Run `scripts/merge-dependabot-pull-requests`, which turns on auto-merge for Dependabot's
@@ -168,7 +171,7 @@ at any time. Besides the `session:` and `pid:` lines, it holds:
 
 - the goal
 - each running agent, with its issue or pull request, and its agent id or `scripts/loop/run-builder` task
-- the drafts that a reviewer has read
+- the drafts that a reviewer has read, each with the head commit that its last reviewer read
 - the issues whose builder stopped once
 - the focused audits since the last auditor's pull request merged, each with its finding, its issue and the time it
   started
