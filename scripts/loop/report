@@ -30,6 +30,17 @@ The lines are:
                             transcript, which leaves out most of them. Only a session started with
                             scripts/loop/claude-with-events sends events. A run of scripts/loop/run-builder counts its
                             own output tokens exactly.
+  Account                   A line for each account in .loop/accounts.json that the agents that started ran on, as
+                            their start lines in .loop/agents.jsonl name it, or that scripts/loop/meter read: the
+                            output tokens of those agents that ended, test builds included, because they use the
+                            account too. Then how many percentage points the account's weekly meter rose, from the
+                            readings in .loop/meter.jsonl, and the output tokens for each point. Plans differ in size,
+                            so the tokens for each point show how much work each account holds. A new week's meter
+                            counts from 0, and the rise of the old week after its last reading doesn't count. The
+                            points also count the orchestrator's own use and any other use of the account, so the
+                            tokens for each point of the orchestrator's own account come out low. A last line gives
+                            the output tokens of the agents whose start line names no account, such as those that
+                            started before start lines named one.
   Orchestrator's share      The share of the input tokens that the sessions in the main checkout used themselves, out
                             of all that they and their agents used.
   Hook blocks               How many actions the before-tool hook blocked, from .loop/blocks.log, and how many each
@@ -113,6 +124,7 @@ import context_growth
 import heavy_log
 import paths
 import request_events
+from account_usage import account_lines
 from agent_log import AgentRun, Period, agent_output_tokens, agent_transcripts, read_runs, started, working_periods
 from github import GitHubError, gh_api, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, hook_threshold, note_files
@@ -286,19 +298,21 @@ def main(argv: list[str] | None = None) -> int:
         if agent.role == ORCHESTRATOR
     ]
     ends = [run.end for run in recent if run.end]
+    meter_log = read_log("meter.jsonl")
     lines = [
         f"Since {since.isoformat()}",
         *before_lines(period_before),
         *ci_lines(ci_runs),
         *type_lines(recent, before, results, event_tokens),
         no_event_line(ends, event_tokens),
+        *account_lines(all_runs, event_tokens, meter_log, since),
         orchestrator_line(agents),
         block_line(count_blocks(read_log("blocks.log"), since)),
         safety_stop_line(transcripts, since),
         time_line(list(splits.values()), len(recent)),
         *context_lines(contexts_by_type(recent, contexts), orchestrator_contexts),
         *heavy_lines(heavy_log.read(paths.loop_dir() / heavy_log.NAME), since),
-        *machine_lines(read_machine_readings(read_log("meter.jsonl"), since), periods_of(all_runs, transcripts_by_id)),
+        *machine_lines(read_machine_readings(meter_log, since), periods_of(all_runs, transcripts_by_id)),
     ]
     if options.issues:
         lines += issue_lines(recent, results, event_tokens, splits, contexts)

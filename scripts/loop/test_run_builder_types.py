@@ -140,6 +140,7 @@ class AgentLinesTest(RunBuilderTest):
                 "kind": "other",
                 "test": False,
                 "pid": os.getpid(),
+                "account": "main",
             },
         )
         self.assert_run_usage(end)
@@ -158,6 +159,12 @@ class AgentLinesTest(RunBuilderTest):
                 "pull_request": 5,
             },
         )
+
+    def test_names_the_account_that_the_builder_ran_on(self) -> None:
+        status, _, _ = self.run_builder("--tool", "claude", "--account", "second")
+        self.assertEqual(status, 0)
+        start, _ = self.start_and_end()
+        self.assertEqual(start["account"], "second")
 
     def test_gives_a_claude_builder_without_a_transcript_no_calls(self) -> None:
         status, _, _ = self.run_builder("--tool", "claude", kind="left behind 31")
@@ -207,6 +214,7 @@ class AgentLinesTest(RunBuilderTest):
                 "kind": "other",
                 "test": False,
                 "pid": os.getpid(),
+                "account": "work",
             },
         )
         self.assert_run_usage(end)
