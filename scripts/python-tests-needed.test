@@ -30,7 +30,8 @@ with_paths() {
 
 expect_status "When the change touches only text" 1 with_paths README.md AGENTS.md docs/code.md LICENSE
 expect_status "When the change touches no file" 1 with_paths
-expect_status "When the change touches only a workflow and the Codex hooks" 1 with_paths .github/workflows/ci.yml .codex/hooks.json
+expect_status "When the change touches a workflow" 0 with_paths .github/workflows/ci.yml
+expect_status "When the change touches the Codex hooks" 0 with_paths .codex/hooks.json
 expect_status "When the change touches a Python script" 0 with_paths docs/code.md scripts/loop/meter
 expect_status "When the change touches a script that a Python test runs" 0 with_paths scripts/leak-scan
 expect_status "When the change touches an agent type" 0 with_paths .claude/agents/builder.md
