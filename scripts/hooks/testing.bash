@@ -56,6 +56,64 @@ test_home=/home-for-tests/someone
 # The folder the agent works in, which the sample inputs send. A test file can change it.
 test_cwd=$test_home/project
 
+# The seconds that a hook may run in a case of run_hook or run_check. watch_hooks stops a hook that runs longer, after
+# one to two limits, so within 4 minutes. A hook that never returns, such as one with a loop that never ends, would
+# otherwise keep its test file and scripts/check running until something stops them, as it did for 31 minutes in issue
+# #447. HOOK_TESTS_TIME_LIMIT sets another limit, as scripts/hooks/testing.test does to test it.
+hook_time_limit=${HOOK_TESTS_TIME_LIMIT:-120}
+if [[ ! $hook_time_limit =~ ^[1-9][0-9]*$ ]]; then
+  echo "error: HOOK_TESTS_TIME_LIMIT must be a whole number of seconds above 0, such as 120, and it's \"$hook_time_limit\"." >&2
+  exit 2
+fi
+# run_hook and run_check write running to hook_state_file before the hook runs, and returned after it. watch_hooks
+# creates stopped_hook_file when it stops a hook.
+hook_watch_folder=$(mktemp -d)
+hook_state_file=$hook_watch_folder/hook-state
+stopped_hook_file=$hook_watch_folder/stopped-hook
+printf 'returned\n' >"$hook_state_file"
+
+# Stops a process, the processes that it started, and theirs: stop_process_tree <process id>
+# It pauses each process before it looks for its children, so that the process can't start one that it misses.
+stop_process_tree() {
+  local child
+  kill -STOP "$1" 2>/dev/null || return 0
+  for child in $(pgrep -P "$1"); do
+    stop_process_tree "$child"
+  done
+  kill -KILL "$1" 2>/dev/null || true
+}
+
+# While the test process runs, stops each hook that has run for a whole round of hook_time_limit seconds:
+# watch_hooks <test process>
+# The hook runs in a subshell of the test, so the function stops every process that the test started, other than its
+# own. The test then gets the hook's result, with code 137, and goes on with its next case.
+watch_hooks() {
+  local test_process=$1 own_process sleep_process="" child hook_state round_start=$hook_watch_folder/round-start
+  # finish_tests stops the function. wait, unlike sleep, lets the trap run at once.
+  trap 'kill "$sleep_process" 2>/dev/null; exit 0' TERM
+  # $$ is the test's process in a subshell too, and bash 3.2 has no BASHPID.
+  own_process=$(exec sh -c 'echo "$PPID"')
+  while kill -0 "$test_process" 2>/dev/null; do
+    touch "$round_start"
+    sleep "$hook_time_limit" &
+    sleep_process=$!
+    wait "$sleep_process"
+    read -r hook_state <"$hook_state_file" || true
+    if [[ $hook_state == running && ! $hook_state_file -nt $round_start ]]; then
+      : >"$stopped_hook_file"
+      for child in $(pgrep -P "$test_process"); do
+        if [[ $child != "$own_process" ]]; then
+          stop_process_tree "$child"
+        fi
+      done
+    fi
+  done
+  rm -rf "$hook_watch_folder"
+}
+# Its output goes to /dev/null, so that a tool that reads the test's output doesn't wait for it to end.
+watch_hooks "$$" >/dev/null 2>&1 &
+hook_watcher=$!
+
 # The checks log each block here, in place of .loop/blocks.log, so that the tests' blocks stay out of the
 # repository's log.
 export HOOK_BLOCK_LOG=/dev/null
@@ -171,7 +229,8 @@ become_hook_shell() {
 # the check prints:
 # run_check <check, such as posted-text> <input>
 run_check() {
-  local fields
+  local fields status=0
+  printf 'running\n' >"$hook_state_file"
   fields=$(jq -r -f "$hooks_folder/input.jq" <<<"$2")
   (
     eval "$fields"
@@ -181,25 +240,33 @@ run_check() {
     set -e
     # shellcheck source=/dev/null # ShellCheck checks each check as a file of its own.
     source "$hooks_folder/$1.check"
-  )
+  ) || status=$?
+  printf 'returned\n' >"$hook_state_file"
+  return "$status"
 }
 
 # Runs the hook on an input, and sets hook_status and hook_message: run_hook <input>
 run_hook() {
   hook_status=0
+  printf 'running\n' >"$hook_state_file"
   hook_message=$(
     export HOME=$test_home
     become_hook_shell
     # shellcheck source=/dev/null # ShellCheck checks before-tool as a file of its own.
     source "$hooks_folder/before-tool" 2>&1 >/dev/null <<<"$1"
   ) || hook_status=$?
+  printf 'returned\n' >"$hook_state_file"
 }
 
 # Checks the hook's result for one case: expect_result <description> <exit code> <message>
 expect_result() {
   local description=$1 status=$2 message=$3
   case_count=$((case_count + 1))
-  if [[ $hook_status != "$status" || $hook_message != "$message" ]]; then
+  if [[ -e $stopped_hook_file ]]; then
+    rm "$stopped_hook_file"
+    echo "error: $description must exit with code $status and the message \"$message\", but the hook ran for more than $hook_time_limit seconds, so the test stopped it." >&2
+    failed_cases=$((failed_cases + 1))
+  elif [[ $hook_status != "$status" || $hook_message != "$message" ]]; then
     echo "error: $description must exit with code $status and the message \"$message\", but it exited with code $hook_status and the message \"$hook_message\"." >&2
     failed_cases=$((failed_cases + 1))
   fi
@@ -307,6 +374,16 @@ expect_before_and_after_subcommand() {
 }
 
 finish_tests() {
+  local is_hook_stopped=""
+  if [[ -e $stopped_hook_file ]]; then
+    is_hook_stopped=yes
+  fi
+  kill "$hook_watcher" 2>/dev/null || true
+  rm -rf "$hook_watch_folder"
+  if [[ -n $is_hook_stopped ]]; then
+    echo "error: a hook in $test_name ran for more than $hook_time_limit seconds, so the test stopped it." >&2
+    exit 1
+  fi
   # shellcheck disable=SC2086 # The names of the functions, one to a line, become a word each.
   if [[ $(declare -f $helper_functions && declare -p "${helper_variables[@]}") != "$helper_definitions" ]]; then
     echo "error: $test_name defines a function or a variable of helpers.bash again, so the hook in its cases used the test's instead. Rename the test's function or variable." >&2
