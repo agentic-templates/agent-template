@@ -742,34 +742,56 @@ add_guessed_repositories() {
   done
 }
 
+# Adds to guessed_repositories the repository of each -R and --repo that read_arguments takes as the value of a flag in
+# a word with an expansion, as in -${letters}b -Rowner/name. Once the shell expands that word, it can end in a flag that
+# takes no value, and gh then reads the -R as a flag: add_repositories_after_expansions <flags that take a value>
+add_repositories_after_expansions() {
+  local i flag value value_is_next_word flags_before
+  for ((i = 2; i + 1 < ${#command_words[@]}; i++)); do
+    if [[ ${command_words[i]} != -* || -z ${command_word_may_expand[i]:-} ]]; then
+      continue
+    fi
+    split_flag_word "${command_words[i]}" "$1"
+    if [[ -z $value_is_next_word ]]; then
+      continue
+    fi
+    split_flag_word "${command_words[i + 1]}" "$1"
+    if [[ -n $value_is_next_word ]]; then
+      value=${command_words[i + 2]:-}
+    fi
+    if [[ $flag == -R || $flag == --repo ]]; then
+      guessed_repositories+=("$value")
+    fi
+  done
+}
+
 # Sets destination to the repository that the words of a gh command other than gh api name, or to empty. It reads -R
 # and --repo as read_arguments in helpers.bash reads them, with the command's flags that take a value, and takes the
 # last of them, as gh does.
 # A later -R can be part of the value of a flag before it, and gh then takes an earlier -R. The hook can't tell this
 # when a word with an expansion becomes nothing, so that the -R after it becomes the value of the flag before it. So the
-# function adds the repository of each -R and --repo to guessed_repositories, which must all be allowed.
+# function adds the repository of each -R and --repo to guessed_repositories, which must all be allowed. It also adds
+# that of a -R that it reads as the value of a flag in a word with an expansion, as add_repositories_after_expansions
+# describes.
 # For a command whose flags the hooks don't list, it reads each flag other than -R and --repo as one that takes no
 # value, as in -dRowner/name, which it reads as -d -R owner/name. Then any -R can be part of the value of a flag before
 # it, in the same word or the word before, and without another -R, gh posts to the repository that the command names
 # without -R. So for such a command, the function goes on as if the command gave no -R.
 find_named_repository() {
-  local i word command_flags_with_value
+  local i word command_flags_with_value flags_with_value
   guessed_repositories=()
   read_repository_argument
   if [[ -n $destination ]]; then
     return 0
   fi
   read_command_flags_with_value
-  if [[ -n $command_flags_with_value ]]; then
-    read_arguments 2 "$command_flags_with_value"
-    add_guessed_repositories
-    if ((${#repository[@]} > 0)); then
-      destination=${repository[1]}
-      return 0
-    fi
-  else
-    read_arguments 2 " -R --repo "
-    add_guessed_repositories
+  flags_with_value=${command_flags_with_value:-" -R --repo "}
+  read_arguments 2 "$flags_with_value"
+  add_repositories_after_expansions "$flags_with_value"
+  add_guessed_repositories
+  if [[ -n $command_flags_with_value ]] && ((${#repository[@]} > 0)); then
+    destination=${repository[1]}
+    return 0
   fi
   if [[ ${command_words[1]:-} == repo ]]; then
     return 0
