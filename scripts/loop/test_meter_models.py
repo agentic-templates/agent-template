@@ -102,12 +102,30 @@ class ModelsTest(MeterTest):
     def test_names_each_alias_whose_request_failed_and_asks_again_only_the_next_day(self) -> None:
         answers = self.answers_after_opus({"stdout": "", "stderr": "Not logged in\n", "status": 1})
         failed = (
-            "model of opus unknown: claude -p --model opus --output-format json printed no modelUsage, and began with "
-            '"Not logged in". Run it in an empty folder to see why.'
+            "model of opus unknown: claude -p --model opus --output-format json printed no modelUsage. Its output "
+            'began with nothing, and its errors with "Not logged in". Run it in an empty folder to see why.'
         )
         self.assertEqual(self.parts_with_answers(answers), [failed])
         self.assertEqual(self.parts_with_answers(answers), [failed])
         self.assertEqual(len(self.model_calls()), len(TESTED))
+
+    def test_reads_the_model_from_the_output_when_the_errors_hold_a_warning(self) -> None:
+        warned = model_answer("claude-opus-9-9")
+        warned["stderr"] = "Warning: claude.ai MCP server blocked by enterprise policy: claude.ai Claude Docs\n"
+        self.assertEqual(
+            self.parts_with_answers(self.answers_after_opus(warned)),
+            ["retrospective due: opus names claude-opus-9-9, which no retrospective tested"],
+        )
+
+    def test_quotes_at_most_200_characters_of_the_output_and_of_the_errors_of_a_failed_request(self) -> None:
+        output = json.dumps({"type": "result", "result": "x" * 500})
+        answer = {"stdout": output, "stderr": "Warning:\n" + "y" * 500}
+        failed = (
+            "model of opus unknown: claude -p --model opus --output-format json printed no modelUsage. Its output "
+            f'began with "{output[:200]}", and its errors with "{("Warning: " + "y" * 500)[:200]}". Run it in an '
+            "empty folder to see why."
+        )
+        self.assertEqual(self.parts_with_answers(self.answers_after_opus(answer)), [failed])
 
     def test_names_an_alias_whose_request_did_not_end(self) -> None:
         with mock.patch.object(models, "TIMEOUT_SECONDS", 0.1):

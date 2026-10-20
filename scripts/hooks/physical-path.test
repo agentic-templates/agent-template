@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Tests physical_path in helpers.bash.
+set -euo pipefail
+# shellcheck source=scripts/hooks/testing.bash
+source "${BASH_SOURCE[0]%/*}/testing.bash"
+# shellcheck source=scripts/hooks/helpers.bash
+source "$hooks_folder/helpers.bash"
+
+cd "$hooks_folder"
+current_folder=$(pwd -P)
+
+# Checks what physical_path prints: expect_path <path> <folder that a relative path starts from> <printed path>
+expect_path() {
+  local printed status=0
+  case_count=$((case_count + 1))
+  # The limit on CPU time stops physical_path if it never returns, so that the case fails instead of hanging.
+  printed=$(
+    ulimit -t 1
+    physical_path "$1" "$2"
+  ) || status=$?
+  if [[ $status != 0 || $printed != "$3" ]]; then
+    echo "error: physical_path $1 $2 must print $3, but it exited with code $status and printed \"$printed\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# A relative folder starts from the current folder, also when it doesn't exist.
+expect_path README.md abc123 "$current_folder/abc123/README.md"
+
+finish_tests

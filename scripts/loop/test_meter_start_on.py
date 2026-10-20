@@ -1,8 +1,11 @@
 import datetime as dt
 import json
+import os
 from unittest import mock
 
-from test_meter import NOW, MeterTest, meter, meters
+import paths
+from test_meter import INTERRUPTION, NOW, MeterTest, meter, meters
+from test_transcripts import call_line, write_transcript
 
 
 class StartOnTest(MeterTest):
@@ -91,6 +94,18 @@ class StartOnTest(MeterTest):
             limit = "4 agents build, and the limit is 4: start no builder or test build\n"
             self.assertEqual(self.run_meter("--start-on", "builder-small"), (0, ["no account"], limit))
             self.assertEqual(self.start_on("reviewer"), "a")
+
+    def test_leaves_out_of_the_limit_a_builder_that_the_user_interrupted(self) -> None:
+        for minutes in (1, 2, 3):
+            self.started("codex", NOW - dt.timedelta(minutes=minutes))
+        line = {"at": NOW.isoformat(), "event": "start", "id": "toolu_01", "type": "builder", "pid": os.getpid()}
+        with (self.loop / "agents.jsonl").open("a") as log:
+            log.write(json.dumps(line) + "\n")
+        subagents = paths.claude_project_folder(paths.main_checkout()) / "abc123" / "subagents"
+        transcript = write_transcript(subagents / "agent-a1.jsonl", [call_line("a", 0), INTERRUPTION])
+        transcript.with_suffix(".meta.json").write_text(json.dumps({"agentType": "builder", "toolUseId": "toolu_01"}))
+        with mock.patch.object(meter, "MOST_BUILDING_AGENTS", 4):
+            self.assertEqual(self.start_on("builder-small"), "a")
 
     def test_leaves_out_an_account_whose_newest_reading_is_older_than_30_minutes(self) -> None:
         self.clock.time = NOW + dt.timedelta(minutes=30)

@@ -141,13 +141,17 @@ expand_home() {
 }
 
 # Prints a path with symlinks and .. resolved in its folders, also when the file or its folders don't exist yet,
-# so that two ways to write one path, such as /tmp and /private/tmp on macOS, give the same result:
-# physical_path <path> <folder that a relative path starts from>
+# so that two ways to write one path, such as /tmp and /private/tmp on macOS, give the same result. A relative folder
+# starts from the current folder: physical_path <path> <folder that a relative path starts from>
 physical_path() {
   local path=$1 folder rest="" part
   local -a parts=()
   if [[ $path != /* ]]; then
     path=$2/$path
+  fi
+  # The loop below cuts the path at each /, so a relative path without one would never get shorter.
+  if [[ $path != /* ]]; then
+    path=$PWD/$path
   fi
   # The deepest folder that exists can hold symlinks. The parts after it can't, so they're resolved as text.
   folder=$path

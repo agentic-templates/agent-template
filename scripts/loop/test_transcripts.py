@@ -164,6 +164,28 @@ def typed_line(minute: float, content: Any) -> dict[str, Any]:
     return prompt_line(minute, content) | {"origin": {"kind": "human"}}
 
 
+class InterruptedTest(TranscriptTest):
+    def test_says_that_the_user_interrupted_the_agent_when_the_last_message_says_so(self) -> None:
+        interruption = prompt_line(2, [{"type": "text", "text": "[Request interrupted by user for tool use]"}])
+        lines = [prompt_line(0), call_line("a", 1), interruption, '{"type": "last-prompt"}', '{"cut off']
+        self.assertTrue(transcripts.is_interrupted(self.write(*lines)))
+
+    def test_says_no_when_a_message_or_a_call_came_after_the_interruption_or_there_was_none(self) -> None:
+        interruption = prompt_line(2, "[Request interrupted by user]")
+        cases: dict[str, list[Any]] = {
+            "message": [prompt_line(0), interruption, prompt_line(3, "Go on.")],
+            "call": [prompt_line(0), interruption, call_line("b", 3)],
+            "no interruption": [prompt_line(0), call_line("a", 1)],
+            "no message": ['{"type": "last-prompt"}'],
+        }
+        for case, lines in cases.items():
+            with self.subTest(case=case):
+                self.assertFalse(transcripts.is_interrupted(self.write(*lines)))
+
+    def test_says_no_without_a_transcript(self) -> None:
+        self.assertFalse(transcripts.is_interrupted(self.file))
+
+
 def queued_line(minute: float, prompt: Any, kind: str = "human") -> dict[str, Any]:
     """A transcript's line for a message that arrived while a turn ran, such as one that a person typed then."""
     attachment = {"type": "queued_command", "prompt": prompt, "origin": {"kind": kind}, "timestamp": at(minute)}
