@@ -1,7 +1,7 @@
 ---
 name: auditor
 description: Runs a retrospective of this repository's loop when scripts/loop/meter says one is due, and opens a pull request with the label retrospective that changes the loop's rules, checks and agent types.
-model: opus
+model: claude-opus-5-5
 effort: max
 isolation: worktree
 background: true

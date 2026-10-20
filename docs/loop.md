@@ -233,3 +233,7 @@ issue where it wrote one, send the maintainer a push notification with the issue
 
 When the meter's `machine` line says `retrospective due`, start an `auditor` agent, unless one runs or its pull
 request is still open.
+
+Each agent file in `.claude/agents` names the full ID of its model, such as `claude-opus-5-5`, and not an alias such
+as `opus`, so that its type keeps its model when Anthropic points the alias at a newer one. A retrospective that tests
+a newer model moves a type to it by changing the ID in the type's file.

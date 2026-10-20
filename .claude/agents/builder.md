@@ -1,7 +1,7 @@
 ---
 name: builder
 description: Builds one issue into a pull request in its own worktree. Use it for each issue that the descriptions of builder-small and builder-deep don't name, which is most issues, such as a change with tests, a fix to a pull request, a change to what AGENTS.md or a guide asks, or any other change to them beyond a few reworded sentences.
-model: opus
+model: claude-opus-5-5
 effort: high
 isolation: worktree
 background: true
