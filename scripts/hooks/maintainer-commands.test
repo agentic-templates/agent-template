@@ -219,7 +219,7 @@ for command in "${runs_on_the_other[@]}"; do
   expect_block Bash "$command" "$second_run"
 done
 # Only a cd before the script, outside a subshell, changes the folder that the script runs in, and only one that the
-# shell runs itself, as after time and builtin, rather than another program, such as env or timeout.
+# shell runs itself, as after builtin, rather than another program, such as env or timeout.
 TEST_RULESETS=main TEST_OTHER_RULESETS=none
 expect_block Bash "scripts/configure-github; cd '$other_clone'" "$second_run"
 expect_block Bash "(cd '$other_clone') && scripts/configure-github" "$second_run"
@@ -227,9 +227,11 @@ expect_block Bash "folder=\$(cd '$other_clone' && pwd) && scripts/configure-gith
 for wrapper in env "timeout 10" "nice -n 5" nohup "stdbuf -oL" xargs /usr/bin/time "FOO=1 time"; do
   expect_block Bash "$wrapper cd '$other_clone' && scripts/configure-github" "$second_run"
 done
-for wrapper in time "time -p" builtin "FOO=1 builtin"; do
+for wrapper in builtin "FOO=1 builtin"; do
   expect_allow Bash "$wrapper cd '$other_clone' && scripts/configure-github"
 done
+# time -o names the file that time writes to, so GH_REPO=jtmpl/other sets no variable there.
+expect_block Bash "time -o GH_REPO=jtmpl/other scripts/configure-github" "$second_run"
 # gh can't name the repository of a folder that isn't a clone.
 expect_allow Bash "cd '$folders' && scripts/configure-github"
 
@@ -250,6 +252,11 @@ for rulesets in "main none" "none main"; do
   # noglob.
   expect_block Bash "command cd '$other_clone' && scripts/configure-github" "$cannot_tell"
   expect_block Bash "noglob cd '$other_clone' && scripts/configure-github" "$cannot_tell"
+  # The shell runs its own time only for the word time unquoted, and the program time for 'time', but the hook sees the
+  # word without its quotes.
+  for wrapper in time "time -p" "'time'"; do
+    expect_block Bash "$wrapper cd '$other_clone' && scripts/configure-github" "$cannot_tell"
+  done
 done
 
 # A run of scripts/configure-github by the orchestrator, the session that the state file names, once the settings were

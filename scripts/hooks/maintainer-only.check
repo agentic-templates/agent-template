@@ -467,7 +467,7 @@ block_unknown_hooks() {
 # --work-tree can move. So the hook asks git, with the push's options and variables as the command writes them, but
 # with HOME filled in, as run_git_as_command describes. It doesn't see the variables that an earlier part of the command
 # exports. env's -i and -u don't count either, because they only take variables away, and of these variables the
-# agent's environment usually holds only HOME: check_push_hooks <the words before the command's name>...
+# agent's environment usually holds only HOME: check_push_hooks <word that sets a variable for git>...
 check_push_hooks() {
   local word hooks worktrees physical_hooks line
   git_variables=()
@@ -494,7 +494,7 @@ check_push_hooks() {
   block "Blocked: this push would run the git hooks in $hooks, not the ones in scripts/git-hooks of the repository's main checkout or of one of its worktrees, so the pre-push hook wouldn't scan the push for leaks. If the repository's core.hooksPath names another folder, or none, run scripts/install-git-hooks. Push from the main checkout or a worktree, without setting core.hooksPath for the push."
 }
 
-# check_git_push <the words before the command's name>...
+# check_git_push <word that sets a variable for git>...
 check_git_push() {
   read_push_arguments
   if has_git_flag --no-verify; then
@@ -753,7 +753,7 @@ check_destination() {
   block "Blocked: this posts to $name_with_owner, which isn't this repository, and only the maintainer may post to another repository. $test_repositories"
 }
 
-# check_gh <the words before the command's name, such as GH_REPO=owner/name>...
+# check_gh <word that sets a variable for gh, such as GH_REPO=owner/name>...
 check_gh() {
   local word
   gh_repo=""
@@ -822,11 +822,11 @@ check_simple_command() {
     git)
       read_git_options
       case ${command_words[git_subcommand]:-} in
-        push) check_git_push "${@:1:prefix_count}" ;;
+        push) check_git_push ${assignment_words[@]+"${assignment_words[@]}"} ;;
         config) check_git_config ;;
       esac
       ;;
-    gh) check_gh "${@:1:prefix_count}" ;;
+    gh) check_gh ${assignment_words[@]+"${assignment_words[@]}"} ;;
   esac
   check_delete
   follow_cd

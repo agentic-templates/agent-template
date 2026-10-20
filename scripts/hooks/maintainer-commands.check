@@ -290,13 +290,14 @@ check_orchestrators_run() {
 
 # Blocks a run of scripts/configure-github on a repository whose settings were applied before, unless the orchestrator
 # runs it as check_orchestrators_run allows:
-# check_configure_github [<word that drop_command_prefixes dropped, such as GH_REPO=owner/name>]...
+# check_configure_github <number of the words before the command's name> [<word that sets a variable, such as
+# GH_REPO=owner/name>]...
 check_configure_github() {
-  local word repository sets_gh_repo=false gh_repo=""
+  local prefix_count=$1 word repository sets_gh_repo=false gh_repo=""
   if ! runs_configure_github; then
     return 0
   fi
-  for word in "$@"; do
+  for word in "${@:2}"; do
     if [[ $word == GH_REPO=* ]]; then
       sets_gh_repo=true
       gh_repo=${word#GH_REPO=}
@@ -316,7 +317,7 @@ check_configure_github() {
   if ! is_orchestrator; then
     block "Blocked: this repository's settings were applied before, so only the orchestrator or a maintainer with admin access runs scripts/configure-github again. Go on with the other work, and list the command in your report."
   fi
-  check_orchestrators_run "$repository" "$#"
+  check_orchestrators_run "$repository" "$prefix_count"
 }
 
 check_gh_pr() {
@@ -395,10 +396,10 @@ check_simple_command() {
   if ((${#command_words[@]} == 0)); then
     return 0
   fi
-  # The words that drop_command_prefixes dropped, such as GH_REPO=<repository>
+  # The number of words that drop_command_prefixes dropped, such as GH_REPO=<repository> or timeout 10
   prefix_count=$(($# - ${#command_words[@]}))
   follow_cd
-  check_configure_github "${@:1:prefix_count}"
+  check_configure_github "$prefix_count" ${assignment_words[@]+"${assignment_words[@]}"}
   check_gh_pr
   check_git_fetch
   check_gh_api

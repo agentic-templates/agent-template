@@ -141,14 +141,17 @@ block_wrapper_option() {
 
 # Changes shell_runs_command, as drop_command_prefixes describes it, for a wrapper that it drops:
 # set_shell_runs_command <the wrapper's word> <the word's index among the simple command's words>
-# The shell reads time as its own only as the first word, and runs a wrapper that a word names with its path, such as
-# /usr/bin/time, as a program.
+# The shell reads time as its own keyword only as the first word and unquoted, and otherwise runs the program time, as
+# for 'time' or \time. The hooks see each word after its quotes are removed, so they can't tell which of the two runs
+# the command. The shell runs a wrapper that a word names with its path, such as /usr/bin/time, as a program.
 set_shell_runs_command() {
   case $1 in
     builtin) ;;
     time)
       if (($2 > 0)); then
         shell_runs_command=no
+      else
+        shell_runs_command=maybe
       fi
       ;;
     command | noglob)
@@ -163,16 +166,20 @@ set_shell_runs_command() {
 # Sets the array command_words to a simple command's words from the command's name on, without the words before it:
 # sudo, env, env's options and their values, the words that set variables, and the wrappers that read_wrapper reads,
 # with their options. Sets these variables too:
+# - assignment_words: an array of the words before the command's name that set variables, the shell's and env's, but
+#   not a wrapper's option values, such as the file in time -o NAME=value.
 # - runs_through_env: true if env is among the words before the command's name, otherwise false.
-# - shell_runs_command: yes when the shell runs the command itself, as after time or builtin, no when another program
-#   runs it, as after sudo, env or timeout, and maybe after command or noglob. After command, bash runs a builtin such
-#   as cd itself, but zsh runs the program cd. zsh runs the command after noglob itself, but bash has no noglob.
+# - shell_runs_command: yes when the shell runs the command itself, as after builtin, no when another program runs it,
+#   as after sudo, env or timeout, and maybe after time, command or noglob. set_shell_runs_command says why for time.
+#   After command, bash runs a builtin such as cd itself, but zsh runs the program cd. zsh runs the command after
+#   noglob itself, but bash has no noglob.
 # drop_command_prefixes <word>...
 # The shell reads a word as setting a variable when it starts with a name and =, as in NAME=value, but env reads each
 # word with = that way.
 drop_command_prefixes() {
   local -a prefixed=("$@")
   local i=0 word is_after_env=false reads_env_options=false
+  assignment_words=()
   runs_through_env=false shell_runs_command=yes
   while ((i < ${#prefixed[@]})); do
     word=${prefixed[i]}
@@ -183,6 +190,7 @@ drop_command_prefixes() {
       i=$((i + env_option_words - 1))
     elif [[ $word =~ ^[A-Za-z_][A-Za-z0-9_]*= || ($is_after_env == true && $word == *=*) ]]; then
       reads_env_options=false
+      assignment_words+=("$word")
     elif [[ $word == sudo ]]; then
       is_after_env=false
       reads_env_options=false

@@ -222,9 +222,11 @@ expect_allow Bash 'folder=$(cd /usr && pwd); rm -rf build'
 expect_allow Bash 'echo "`cd /usr && pwd`" && rm -rf build'
 expect_allow Bash '(cd /usr) && rm -rf build'
 # A cd that the shell runs itself, as after builtin, changes its folder, and one that another program runs, as after
-# timeout, doesn't.
+# timeout, doesn't. After time, the hooks can't tell the folder, because the shell runs the program time for a quoted
+# 'time', as for \time, and the hooks see the word without its quotes.
 expect_block Bash 'builtin cd /usr && rm -rf share' "$(deleting rm share)"
-expect_block Bash 'time cd /usr && rm -rf share' "$(deleting rm share)"
+expect_allow Bash 'time cd /usr && rm -rf share'
+expect_allow Bash "'time' cd /usr && rm -rf share"
 expect_allow Bash 'timeout 10 cd /usr && rm -rf build'
 expect_allow Bash 'env cd /usr && rm -rf build'
 # env -C runs only the command after it in another folder.
@@ -347,6 +349,8 @@ expect_block Bash "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG
   "$(other_hooks "$hooks_elsewhere")"
 expect_block Bash "env GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='$hooks_elsewhere'\" git push" "$(other_hooks "$hooks_elsewhere")"
 expect_block Bash "GIT_DIR=$project/.git git -C $elsewhere push" "$(other_hooks "$elsewhere/scripts/git-hooks")"
+# The value of a wrapper's option sets no variable, as with time -o, which names the file that time writes to.
+expect_allow Bash "time -o GIT_DIR=$elsewhere/.git git push"
 expect_allow Bash 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=color.ui GIT_CONFIG_VALUE_0=never git push'
 printf '[core]\n\thooksPath = %s\n' "$hooks_elsewhere" >"$base/hooks.gitconfig"
 expect_block Bash "git -c include.path=$base/hooks.gitconfig push" "$(other_hooks "$hooks_elsewhere")"
@@ -544,6 +548,8 @@ expect_allow Bash 'gh issue comment 5 --body "The same bug: https://github.com/s
 expect_allow Bash 'gh issue comment 5 --body https://github.com/someone/else/issues/9'
 expect_allow Bash 'GH_REPO=jtmpl/project gh pr comment 5 --body Hello'
 expect_allow Bash 'GH_REPO=someone/else gh pr comment 5 -R jtmpl/project --body Hello'
+# time -o names the file that time writes to, so GH_REPO=someone/else sets no variable there.
+expect_allow Bash 'time -o GH_REPO=someone/else gh pr comment 5 --body Hello'
 expect_allow Bash 'gh api -X POST "repos/{owner}/{repo}/issues/5/comments" -f body=Thanks'
 expect_allow Bash 'gh pr list --repo someone/else'
 expect_allow Bash 'gh pr view 42 -R someone/else'
