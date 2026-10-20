@@ -256,6 +256,39 @@ class StartTest(RunHeavyTest):
         self.assertEqual(self.log()[2]["waited_seconds"], 2.0)
         self.assertEqual(self.state()["commands"][0]["started"], NOW)
 
+    def test_counts_a_running_command_of_an_older_copy_with_no_sample_yet_at_its_reservation(self) -> None:
+        # An older copy of the script writes zeros for the use of a command that it hasn't sampled yet.
+        self.add_entry("build", need(9.0), started=NOW - 1, arrived=-1)
+        lock = self.hold("build")
+        self.write_log(end_line([PYTHON, "-c", "pass"], need(2.0)))
+        # The first look has one reading of the CPU. The second shows all 10 cores idle, but the build counts at the 9
+        # it reserves, and it ends after the second.
+        self.clock.actions = [lambda: None, lock.close]
+        self.assertEqual(self.run_heavy(PYTHON, "-c", "pass"), (0, ""))
+        self.assertEqual(self.log()[2]["waited_seconds"], 4.0)
+
+    def test_writes_its_use_as_numbers_before_its_first_sample_and_marks_each_sample(self) -> None:
+        self.add_entry("build", need(9.0), started=NOW - 1, arrived=-1)
+        lock = self.hold("build")
+        before_sample: list[dict[str, Any]] = []
+
+        def end_build() -> None:
+            before_sample.extend(self.state()["commands"][1:])
+            lock.close()
+
+        self.clock.actions = [lambda: None, end_build]
+        self.write_log(end_line([PYTHON, "-c", "pass"], need(2.0)))
+        state, seen = str(self.heavy / "state.json"), self.root / "seen.json"
+        copy_state = f"import shutil, time; time.sleep(0.5); shutil.copy({state!r}, {str(seen)!r})"
+        with mock.patch.object(run_heavy, "SAMPLE_SECONDS", 0.05):
+            self.assertEqual(self.run_heavy(PYTHON, "-c", copy_state)[0], 0)
+        [waiting] = before_sample
+        # An older copy of the script reads the numbers.
+        self.assertEqual(room.Use(**waiting["using"]), room.NOTHING)
+        self.assertNotIn("sampled", waiting)
+        [sampled] = json.loads(seen.read_text())["commands"]
+        self.assertTrue(sampled["sampled"])
+
     def test_starts_a_retrospectives_command_after_another_agents_that_came_later(self) -> None:
         worktree = self.root / "test-build"
         subprocess.run(["git", "init", "--quiet", str(worktree)], check=True)

@@ -298,7 +298,7 @@ class TestBuildTest(RunBuilderTest):
         [call] = self.calls("claude")
         self.assertEqual((call["cwd"], call["head"], call["lock"]), (str(self.worktree), self.base, RUN_LOCK))
         self.assertIn(paths.RETROSPECTIVE_MARK, call["git_files"])
-        self.assertEqual(call["env"]["LOOP_RUN"], "1")
+        self.assertEqual(call["env"]["LOOP_RUN"], run.name)
         self.assertNotIn("LOOP_HAND_OFF", call["env"])
         self.assertIn("This build is a test", call["args"][-1])
         self.assertIn("+++ b/built.txt\n@@ -0,0 +1 @@\n+built\n", changes.read_text())
