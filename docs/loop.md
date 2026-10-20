@@ -123,14 +123,13 @@ when "Start a focused audit" says so.
 
 - **Drafts.** For each draft pull request that the loop opened, and that no reviewer has read yet, start a `reviewer`
   agent with the pull request's number. Give each error that the reviewer reports to the builder that opened the draft,
-  and ask it to fix each one, with a test when the error is in code. Ask it to fix the cause that the reviewer's case
-  shows, with tests of the other cases that have the same cause, because a fix of the reviewer's case alone leaves the
-  next reviewer another case of the same error. If you opened the draft, fix the errors yourself. If the draft changes
-  code that the loop's safety depends on, which is the first kind in the description of `builder-deep`, start a new
-  reviewer on it after each round of fixes, until a reviewer reports no error. When no error remains, run
-  `gh pr ready <number>` and `gh pr merge <number>`. If it's the auditor's pull request and it lacks the label
-  `retrospective`, add the label before you run those commands, because the meter counts the agents' output tokens
-  since the newest merged pull request with that label.
+  and ask it to fix the cause that the reviewer's case shows, with a test of each case that has that cause when the
+  error is in code, because a fix of the reviewer's case alone leaves the next reviewer another case of the same error.
+  If you opened the draft, fix the errors yourself. If the draft changes code that the loop's safety depends on, which
+  is the first kind in the description of `builder-deep`, start a new reviewer on it after each round of fixes, until a
+  reviewer reports no error. When no error remains, run `gh pr ready <number>` and `gh pr merge <number>`. If it's the
+  auditor's pull request and it lacks the label `retrospective`, add the label before you run those commands, because
+  the meter counts the agents' output tokens since the newest merged pull request with that label.
 - **Stuck pull requests.** Run `scripts/merge-dependabot-pull-requests`, which turns on auto-merge for Dependabot's
   pull requests. Then run `scripts/stuck-pull-requests`. For each pull request that it prints:
   - If it's Dependabot's, look for an issue about it with `gh issue list --state all --search "#<number>"`. If there's
@@ -236,16 +235,10 @@ Ask the maintainer each question that only they can answer, in an issue with `ne
 `docs/planning.md` describes, and keep working on the rest.
 
 When a hook or the permission classifier blocks something that the loop needs, don't work around it. Ask in the
-same way for the permission that lets the loop do it itself. Don't give the maintainer a command to run in the loop's
-place, unless only they may run it, such as a login or a payment.
-
-When the maintainer asks for one thing, such as a test of one model, do that thing, and ask before you add a similar
-one.
+same way for the permission that lets the loop do it itself.
 
 Before you recommend an option to the maintainer or pass one on, check it against each objection that you raised
-earlier in the same thread, and against each rule that it would change. When it rewords a rule, check that the new
-wording asks for the same actions in the same cases. When the maintainer answers with a word such as yes, tell them in
-one line the option that you understood them to choose and what it does, before you carry it out.
+earlier in the same thread, and against each rule that it would change.
 
 Each time you write a question for the maintainer in an issue with `needs-decision`, or an agent's report names an
 issue where it wrote one, send the maintainer a push notification with the issue's title and link, using the
