@@ -76,8 +76,9 @@ Test only where the report's numbers since the time in step 3 point to a change:
   clearly better, add the group to its description as a kind.
 - A kind of issue that no type fits well: test a new type for it, against the type that built such issues.
 
-If your prompt names a model that no retrospective tested, test it too, as "Start a retrospective" in docs/loop.md
-describes.
+If your prompt names a model that no retrospective tested, test it on the orchestrator, `builder-deep` and the auditor,
+and on each other type that runs at `max` effort. Your pull request adds the model to `.claude/tested-models.json`
+with the pull request's number, even when every type keeps its model.
 
 Leave out a test that an earlier retrospective's description records, unless its numbers changed since. Run the test
 with the largest expected saving first. Start each build on the account that `scripts/loop/meter --start-on <type>`
