@@ -514,6 +514,9 @@ session_input clear new-3
 run_parts CLAUDE_PID="$running_process"
 expect_parts "After a second /clear in the orchestrator's process, once it wrote both lines" \
   .loop/state.md docs/loop.md docs/writing.md
+session_input clear new-4
+run_parts CLAUDE_PID="$new_process"
+expect_no_parts "After /clear in another process in the main checkout, while the orchestrator's process runs"
 
 for source in startup resume; do
   new_state_file

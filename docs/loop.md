@@ -254,10 +254,11 @@ When `scripts/hooks/hand-off` tells you that your context has grown long enough,
 2. Write into your state file what only this conversation holds, if the file lacks it: the maintainer's decisions that
    no issue holds yet, the questions to the maintainer that are still open, and the agents that run inside this
    session.
-3. If the maintainer installed a `/clear` sender, a hook in their own settings that types `/clear` and then the
-   request's second line, write the request: `.loop/compact-request.txt` with your session id on its first line and
-   `Resume the loop from .loop/state.md.` on its second. Then end your turn. Without a sender, ask the maintainer to
-   type `/clear` and then `Resume the loop from .loop/state.md.`, and go on with the loop.
+3. A `/clear` sender is a hook in the maintainer's own settings that reads a request that you write, and types
+   `/clear` and then the request's second line. If the maintainer installed one, write the request:
+   `.loop/compact-request.txt` with your session id on its first line and `Resume the loop from .loop/state.md.` on
+   its second. Then end your turn. Without a sender, ask the maintainer to type `/clear` and then
+   `Resume the loop from .loop/state.md.`, and go on with the loop.
 
 ## Ask the maintainer
 
