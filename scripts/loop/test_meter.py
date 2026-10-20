@@ -374,6 +374,20 @@ class AccountLineTest(MeterTest):
         self.answer("claude", [usage_output(20)])
         self.assertIn(" | per agent-minute session 0.2%, week 0.02% | ", self.run_meter()[1][0])
 
+    def test_counts_the_minutes_of_an_agent_that_runs_on_the_account_and_not_of_one_whose_process_ended(self) -> None:
+        self.run_meter()
+        ended = subprocess.Popen([sys.executable, "-S", "-c", ""])
+        ended.wait()
+        starts = [
+            {"at": NOW.isoformat(), "event": "start", "id": agent_id, "type": "builder", "test": False}
+            | {"account": "claude", "pid": pid}
+            for agent_id, pid in (("a1", os.getpid()), ("a2", ended.pid))
+        ]
+        (self.loop / "agents.jsonl").write_text("".join(json.dumps(start) + "\n" for start in starts))
+        self.clock.time = NOW + dt.timedelta(minutes=30)
+        self.answer("claude", [usage_output(14)])
+        self.assertIn(" | per agent-minute session 0.2%, week 0.02% | ", self.run_meter()[1][0])
+
     def test_measures_nothing_from_a_reading_more_than_60_minutes_old(self) -> None:
         self.run_meter()
         self.log_agent("claude", NOW, NOW + dt.timedelta(minutes=61))

@@ -160,15 +160,6 @@ def fitting_types(room: Room, types: list[str], runs: dict[str, list[float]], re
     ]
 
 
-def full_meters(room: Room, types: list[str], runs: dict[str, list[float]], reading_time: dt.datetime) -> list[str]:
-    """The meters on which no type fits."""
-    return [
-        name
-        for name in room.meters
-        if not any(fits(agent_type, name, room, runs, reading_time) for agent_type in types)
-    ]
-
-
 def minutes_until_change(
     room: Room, fitting: list[str], runs: dict[str, list[float]], reading_time: dt.datetime
 ) -> float:

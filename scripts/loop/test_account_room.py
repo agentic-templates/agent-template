@@ -35,6 +35,11 @@ class AccountForTest(unittest.TestCase):
         ]
         self.assertEqual(account_room.account_for("builder", candidates), "two")
 
+    def test_names_an_account_whose_week_reset_is_known_before_one_whose_is_not(self) -> None:
+        unknown = candidate("unknown", 30.0)
+        unknown.meters["week"]["resets"] = None
+        self.assertEqual(account_room.account_for("builder", [unknown, candidate("known", 30.0)]), "known")
+
     def test_names_an_account_other_than_the_orchestrators_when_the_rest_is_equal(self) -> None:
         candidates = [candidate("own", 30.0, is_orchestrators=True), candidate("other", 30.0)]
         self.assertEqual(account_room.account_for("builder", candidates), "other")
@@ -109,7 +114,3 @@ class LongRunTest(unittest.TestCase):
 
     def test_is_the_first_run_until_any_run_ended(self) -> None:
         self.assertEqual(account_room.run_minutes("builder", {}), account_room.FIRST_RUN_MINUTES)
-
-
-if __name__ == "__main__":
-    unittest.main()
