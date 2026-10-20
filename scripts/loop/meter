@@ -27,10 +27,7 @@ script. The last retrospective is the newest merged pull request with the label 
 .loop/agents.jsonl before there is one. The meter counts the output tokens as scripts/loop/report counts them, and an
 agent of a session without an end line until the last line of its transcript. A request with no event in
 .loop/requests.jsonl counts the output tokens that the transcript gives, which leave out most of them, so the line
-says how many requests have none. Until a retrospective sets OUTPUT_TOKENS_PER_RETROSPECTIVE, one is due once the
-agents have worked {hours} hours since the last retrospective instead. The hours come from the periods on each agent's
-last end line in .loop/agents.jsonl, which scripts/loop/agent_log.py describes. An agent without an end line counts
-until the last line of its transcript. The test builds and the auditors don't count.
+says how many requests have none. The test builds and the auditors don't count.
 
 With --wake, the meter keeps reading, and prints and ends when an account's advice changes, when an account gives no
 reading, when scripts/hooks/hand-off tells an agent to hand off its work, and 50 minutes after it started while an
@@ -44,8 +41,9 @@ account's advice is stop. Run it in the background, so that its end wakes the or
 Without the file, the meter reads the Claude account that this machine is signed in to. It adds each reading of an
 account to .loop/meter.jsonl. Each time it reads the accounts, it first adds a line with no account and the
 machine's numbers under "machine", as scripts/loop/machine.py describes them. A number that the machine doesn't give
-is null. The meter exits with code 1 when an account gives no reading. It reads
-the orchestrator's context size from the transcript of the session that the session: line of .loop/state.md names.
+is null. The meter exits with code 1 when an account gives no reading. It reads the orchestrator's context size from
+the transcript of the session that the session: line of .loop/state.md names. It reads the transcripts that Claude
+Code keeps for the main checkout, for the account that the meter runs on and for each Claude account in the file.
 """
 
 import argparse
@@ -63,7 +61,7 @@ from typing import Any, NamedTuple
 import agent_log
 import paths
 import request_events
-from accounts import Account, AccountsError, claude_environment, load_accounts
+from accounts import Account, AccountsError, claude_environment, claude_project_folders, load_accounts
 from github import GitHubError, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, note_files
 from machine import Machine, read_machine
@@ -102,8 +100,7 @@ TRANSCRIPT_TAIL_BYTES = 400_000
 # How often meter --wake looks for a new note of scripts/hooks/hand-off between two readings
 HAND_OFF_CHECK_SECONDS = 60
 # .claude/agents/auditor.md says when a retrospective sets this.
-OUTPUT_TOKENS_PER_RETROSPECTIVE: int | None = None
-HOURS_PER_RETROSPECTIVE = 30.0
+OUTPUT_TOKENS_PER_RETROSPECTIVE = 2_690_562
 # A retrospective doesn't look back on the work of an earlier one.
 AUDITOR = "auditor"
 
@@ -140,7 +137,7 @@ class NoReading(Exception):
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="scripts/loop/meter", description=help_text(), formatter_class=argparse.RawDescriptionHelpFormatter
+        prog="scripts/loop/meter", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--wake", action="store_true", help="keep reading until the orchestrator needs to wake")
     options = parser.parse_args(argv)
@@ -155,20 +152,15 @@ def main(argv: list[str] | None = None) -> int:
     hand_offs = loop_folder / FOLDER_NAME
     readings = wait_for_wake(accounts, log, hand_offs) if options.wake else read_accounts(accounts, log)
     checkout = paths.main_checkout()
-    agents = agents_line(running_agents(loop_folder, checkout), hand_off_thresholds(note_files(hand_offs)))
+    project_folders = claude_project_folders(checkout, accounts)
+    agents = agents_line(running_agents(loop_folder, project_folders), hand_off_thresholds(note_files(hand_offs)))
     machine = machine_line(
         readings.machine,
-        context=orchestrator_context(loop_folder / "state.md", checkout),
-        retrospective=read_retrospective(checkout, loop_folder),
+        context=orchestrator_context(loop_folder / "state.md", project_folders),
+        retrospective=read_retrospective(checkout, loop_folder, project_folders),
     )
     print("\n".join([*readings.lines, agents, machine]))
     return 0 if readings.has_every_account else 1
-
-
-def help_text() -> str:
-    """The docstring, with HOURS_PER_RETROSPECTIVE in place of {hours}, so that a retrospective changes the number in
-    one place. The docstring's JSON example has braces of its own, so str.format can't fill it in."""
-    return str(__doc__).replace("{hours}", f"{HOURS_PER_RETROSPECTIVE:g}")
 
 
 def now() -> dt.datetime:
@@ -485,10 +477,11 @@ def gpu_part(machine: Machine) -> str:
     return f"{use}, {memory:.1f} GB {whose}"
 
 
-def running_agents(loop_folder: Path, checkout: Path) -> list[Agent]:
+def running_agents(loop_folder: Path, project_folders: list[Path]) -> list[Agent]:
     """The agents that run, as is_running tells from agents.jsonl in the loop folder. An agent of a session reads its
-    context from its transcript, and a run of scripts/loop/run-builder from its events in its run folder."""
-    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
+    context from its transcript in the Claude Code project folders, and a run of scripts/loop/run-builder from its
+    events in its run folder."""
+    transcripts = agent_log.agent_transcripts(project_folders)
     agents = []
     for run in agent_log.read_runs(loop_folder / "agents.jsonl"):
         if not is_running(run):
@@ -549,11 +542,17 @@ def agents_line(agents: list[Agent], thresholds: dict[str, int]) -> str:
     return " | ".join(parts)
 
 
-def orchestrator_context(state_file: Path, checkout: Path) -> int | None:
+def orchestrator_context(state_file: Path, project_folders: list[Path]) -> int | None:
+    """The context size of the session that the state file names, from its transcript in the first of the Claude Code
+    project folders that holds it, or None."""
     session = session_in_state_file(state_file)
     if session is None:
         return None
-    return context_tokens(paths.claude_project_folder(checkout) / f"{session}.jsonl")
+    for folder in project_folders:
+        transcript = folder / f"{session}.jsonl"
+        if transcript.exists():
+            return context_tokens(transcript)
+    return None
 
 
 def session_in_state_file(state_file: Path) -> str | None:
@@ -592,29 +591,19 @@ def context_tokens(transcript: Path) -> int | None:
     return None
 
 
-def read_retrospective(checkout: Path, loop_folder: Path) -> str:
+def read_retrospective(checkout: Path, loop_folder: Path, project_folders: list[Path]) -> str:
     try:
         last = max(retrospective_merges(checkout), default=None)
     except GitHubError as error:
         return f"retrospective unknown: {error}"
     runs = agent_log.read_runs(loop_folder / "agents.jsonl")
     counted = [run for run in runs if not run.start["test"] and run.start["type"] != AUDITOR]
-    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
-    if OUTPUT_TOKENS_PER_RETROSPECTIVE is not None:
-        requests = loop_folder / request_events.REQUESTS_FILE
-        event_tokens = request_events.output_tokens(requests.read_text() if requests.exists() else "")
-        recent = [run for run in counted if last is None or agent_log.started(run) >= last]
-        ends = [end for run in recent if (end := counted_end(run, transcripts))]
-        return tokens_note(last, ends, event_tokens, OUTPUT_TOKENS_PER_RETROSPECTIVE)
-    minutes = sum(
-        agent_log.minutes_after(agent_log.working_periods(run, transcripts, loop_folder / "runs"), last)
-        for run in counted
-    )
-    return hours_note(last, minutes / 60)
-
-
-def since_words(last: dt.datetime | None) -> str:
-    return "since the last one" if last else "with no retrospective yet"
+    recent = [run for run in counted if last is None or agent_log.started(run) >= last]
+    transcripts = agent_log.agent_transcripts(project_folders)
+    ends = [end for run in recent if (end := counted_end(run, transcripts))]
+    requests = loop_folder / request_events.REQUESTS_FILE
+    event_tokens = request_events.output_tokens(requests.read_text() if requests.exists() else "")
+    return tokens_note(last, ends, event_tokens, OUTPUT_TOKENS_PER_RETROSPECTIVE)
 
 
 def counted_end(run: agent_log.AgentRun, transcripts: dict[str, Path]) -> dict[str, Any] | None:
@@ -631,7 +620,7 @@ def counted_end(run: agent_log.AgentRun, transcripts: dict[str, Path]) -> dict[s
 def tokens_note(
     last: dt.datetime | None, ends: list[dict[str, Any]], event_tokens: dict[str, int], tokens_per_retrospective: int
 ) -> str:
-    since = since_words(last)
+    since = "since the last one" if last else "with no retrospective yet"
     counts = [agent_log.agent_output_tokens(end, event_tokens) for end in ends]
     tokens = sum(tokens for tokens, _ in counts)
     without_event = sum(without_event for _, without_event in counts)
@@ -643,15 +632,6 @@ def tokens_note(
         return note
     requests = sum(len(end.get("requests") or {}) for end in ends)
     return f"{note}, {without_event} of {requests} requests with no event"
-
-
-def hours_note(last: dt.datetime | None, hours: float) -> str:
-    since = since_words(last)
-    if hours >= HOURS_PER_RETROSPECTIVE:
-        return f"retrospective due: {hours:.1f} hours of agents' work {since}"
-    # Rounded down, so that 29.98 hours don't show as 30.0 of 30
-    shown = math.floor(hours * 10) / 10
-    return f"retrospective not due: {shown:.1f} of {HOURS_PER_RETROSPECTIVE:g} hours of agents' work {since}"
 
 
 if __name__ == "__main__":

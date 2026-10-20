@@ -71,7 +71,7 @@ on.
   maintainer. Ask about the rest as "Ask the maintainer" below describes.
 - **Hand-offs.** When a builder or the auditor reports that it handed off its work, because its context grew too
   long, run `scripts/clear-worktrees <issue>`, so that a new agent can check out the issue's branch. The auditor's
-  issue is the one that it opened for the retrospective. If the script exits with a code other than 0, it left the
+  issue is its retrospective's issue. If the script exits with a code other than 0, it left the
   worktree, and with it the issue's branch, in place. Then plan a builder's issue again, and for the auditor's issue,
   ask the maintainer about the worktree in an issue with `needs-decision`. If the script exits with 0, start a new
   agent of the same type, and give it the link to the hand-off comment as a message, as the start of "Work through
@@ -123,7 +123,7 @@ After each issue, go back to step 1. Start an auditor too when "Start a retrospe
   description of `builder-deep`, start a new reviewer on it after each round of fixes, until a reviewer reports no
   error. When no error remains, run `gh pr ready <number>` and `gh pr merge <number>`.
   If it's the auditor's pull request, first add the label `retrospective` to it if it's missing, because the meter
-  counts the hours that the agents worked since the newest merged pull request with that label.
+  counts the agents' output tokens since the newest merged pull request with that label.
 - **Stuck pull requests.** Run `scripts/merge-dependabot-pull-requests`, which turns on auto-merge for Dependabot's
   pull requests. Then run `scripts/stuck-pull-requests`. For each pull request that it prints:
   - If it's Dependabot's, look for an issue about it with `gh issue list --state all --search "#<number>"`. If there's
@@ -181,8 +181,8 @@ Your own account is the Claude account in `.loop/accounts.json` whose `env` valu
 environment, such as `CLAUDE_CONFIG_DIR`. For each builder and researcher, choose the account whose line has the
 lowest `week` percentage, among the accounts whose advice lets you start the agent. A Codex account builds only the
 kinds `research` and `other`. Start a builder of the type `builder-deep`, and each builder that takes over a hand-off,
-only on a Claude account. Start reviewers and the auditor on your own account, in your session. Each account's advice
-says what you can start on that account:
+only on a Claude account. Start reviewers on your own account, in your session, and the auditor as "Start a
+retrospective" describes. Each account's advice says what you can start on that account:
 
 - **go:** start any agent.
 - **watch:** keep the number of agents that run on the account from growing, and start no auditor.
@@ -223,7 +223,11 @@ Ask the maintainer each question that only they can answer, in an issue with `ne
 `docs/planning.md` describes, and keep working on the rest.
 
 When a hook or the permission classifier blocks something that the loop needs, don't work around it. Ask in the
-same way for the permission that lets the loop do it itself.
+same way for the permission that lets the loop do it itself. Don't give the maintainer a command to run in the loop's
+place, unless only they may run it, such as a login or a payment.
+
+When the maintainer asks for one thing, such as a test of one model, do that thing, and ask before you add a similar
+one.
 
 Each time you write a question for the maintainer in an issue with `needs-decision`, or an agent's report names an
 issue where it wrote one, send the maintainer a push notification with the issue's title and link, using the
@@ -232,7 +236,12 @@ issue where it wrote one, send the maintainer a push notification with the issue
 ## Start a retrospective
 
 When the meter's `machine` line says `retrospective due`, start an `auditor` agent, unless one runs or its pull
-request is still open.
+request is still open. Start it on the Claude account whose line has the lowest `week` percentage, among the accounts
+whose advice lets you start an auditor. On your own account, start it in your session. On another account, open an
+issue for the retrospective, and write a message to a file in a folder of your own in `.loop/`, which says that the
+auditor runs the retrospective of that issue as its agent file describes, rather than building the issue, and opens
+no other issue. Then run `scripts/loop/run-builder <issue> other --tool claude --type auditor --account <name>
+--message <file>` as a background task.
 
 Each agent file in `.claude/agents` names the full ID of its model, such as `claude-opus-5-5`, and not an alias such
 as `opus`, so that its type keeps its model when Anthropic points the alias at a newer one. A retrospective that tests

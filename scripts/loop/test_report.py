@@ -74,7 +74,9 @@ def job(name: str, minutes: float, conclusion: str = "SUCCESS") -> dict[str, str
 
 
 class ReportTest(unittest.TestCase):
-    """A test with a loop folder, a folder for Claude Code's transcripts, and a stand-in for gh first on PATH."""
+    """A test with a loop folder, a folder for Claude Code's transcripts, and a stand-in for gh first on PATH. The
+    accounts file lists one Claude account, whose config folder is that of CLAUDE_CONFIG_DIR, so that the report reads
+    no transcripts in ~/.claude."""
 
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory()
@@ -96,6 +98,7 @@ class ReportTest(unittest.TestCase):
         patched = mock.patch.dict(os.environ, environment)
         patched.start()
         self.addCleanup(patched.stop)
+        self.list_accounts("claude-config")
         self.project = paths.claude_project_folder(paths.main_checkout())
         self.project.mkdir(parents=True)
         self.runs: list[dict[str, str]] = []
@@ -103,6 +106,16 @@ class ReportTest(unittest.TestCase):
         self.pull_requests: dict[str, dict[str, Any]] = {}
         self.retrospectives: list[str] = []
         self.answer()
+
+    def list_accounts(self, *config_folders: str) -> Path:
+        """Lists a Claude account in the accounts file for each config folder, in the test's folder. Returns the
+        folder where Claude Code keeps the transcripts of the main checkout's sessions for the last account."""
+        accounts: list[dict[str, Any]] = [
+            {"name": folder, "tool": "claude", "env": {"CLAUDE_CONFIG_DIR": str(self.root / folder)}}
+            for folder in config_folders
+        ]
+        (self.loop / "accounts.json").write_text(json.dumps({"accounts": accounts}))
+        return paths.claude_project_folder(paths.main_checkout(), accounts[-1]["env"])
 
     def answer(self) -> None:
         answers = {
@@ -678,6 +691,22 @@ class MessageTest(ReportTest):
             self.messages(), ["Messages that a person typed: 1", "Message at 2026-10-11T14:01:00+00:00:", "  After."]
         )
 
+    def test_gives_the_messages_of_the_sessions_in_the_folder_of_each_claude_account(self) -> None:
+        other = self.list_accounts("claude-config", "other-config")
+        other.mkdir(parents=True)
+        (other / "other.jsonl").write_text(json.dumps(typed_line(2, "On the other account.")) + "\n")
+        self.transcript("session", [typed_line(1, "On this account.")])
+        self.assertEqual(
+            self.messages(),
+            [
+                "Messages that a person typed: 2",
+                "Message at 2026-10-11T14:01:00+00:00:",
+                "  On this account.",
+                "Message at 2026-10-11T14:02:00+00:00:",
+                "  On the other account.",
+            ],
+        )
+
     def test_gives_no_messages_without_the_messages_option(self) -> None:
         self.transcript("session", [typed_line(1, "Start the loop.")])
         status, lines, errors = self.run_report()
@@ -693,6 +722,21 @@ class TranscriptFolderTest(ReportTest):
         self.assertEqual(
             errors,
             f"error: Can't find {self.project}, where Claude Code keeps the transcripts of the sessions in "
+            f"{paths.main_checkout()}. If Claude Code keeps its files elsewhere, set CLAUDE_CONFIG_DIR to that "
+            "folder.\n",
+        )
+
+    def test_stops_only_when_the_folder_of_no_claude_account_exists(self) -> None:
+        other = self.list_accounts("claude-config", "other-config")
+        other.mkdir(parents=True)
+        self.project.rmdir()
+        self.assertEqual(self.run_report()[0], 0)
+        other.rmdir()
+        status, lines, errors = self.run_report()
+        self.assertEqual((status, lines), (1, []))
+        self.assertEqual(
+            errors,
+            f"error: Can't find {self.project} or {other}, where Claude Code keeps the transcripts of the sessions in "
             f"{paths.main_checkout()}. If Claude Code keeps its files elsewhere, set CLAUDE_CONFIG_DIR to that "
             "folder.\n",
         )
@@ -920,6 +964,22 @@ class MachineTest(ReportTest):
             (
                 "Median with 1 agent, 1 reading: free disk none, free memory 12.0, swap in use none, GPU use none, "
                 "GPU memory in use none, load none"
+            ),
+        )
+
+    def test_counts_a_run_without_an_end_line_until_the_last_line_of_its_events(self) -> None:
+        self.log_agents(start("issue-12-run", 0))
+        events = self.loop / "runs" / "issue-12-run" / "events.jsonl"
+        events.parent.mkdir(parents=True)
+        events.write_text('{"type": "turn.started"}\n')
+        last_line = (SINCE + dt.timedelta(minutes=10)).timestamp()
+        os.utime(events, (last_line, last_line))
+        self.log_readings(meter_reading(5, load=2.0), meter_reading(15, load=8.0))
+        self.assertEqual(
+            self.machine_lines()[-1],
+            (
+                "Median with 1 agent, 1 reading: free disk none, free memory none, swap in use none, GPU use none, "
+                "GPU memory in use none, load 2.0"
             ),
         )
 

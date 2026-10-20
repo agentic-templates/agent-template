@@ -290,11 +290,11 @@ def started(run: AgentRun) -> dt.datetime:
     return dt.datetime.fromisoformat(run.start["at"])
 
 
-def agent_transcripts(project_folder: Path) -> dict[str, Path]:
-    """The transcripts of the agents of the sessions in a Claude Code project folder, by the id of the Agent call that
+def agent_transcripts(project_folders: list[Path]) -> dict[str, Path]:
+    """The transcripts of the agents of the sessions in Claude Code project folders, by the id of the Agent call that
     started each. Claude Code writes the id in the .meta.json file next to the transcript when the agent starts."""
     found = {}
-    for meta in project_folder.glob("*/subagents/*.meta.json"):
+    for meta in (meta for folder in project_folders for meta in folder.glob("*/subagents/*.meta.json")):
         agent_id = json.loads(meta.read_text()).get("toolUseId")
         if agent_id:
             found[agent_id] = meta.with_name(meta.name.removesuffix(".meta.json") + ".jsonl")
@@ -317,12 +317,3 @@ def working_periods(run: AgentRun, transcripts_by_id: dict[str, Path], runs_fold
     if events.exists():
         return [(started(run), dt.datetime.fromtimestamp(events.stat().st_mtime, dt.UTC))]
     return []
-
-
-def minutes_after(periods: list[Period], moment: dt.datetime | None) -> float:
-    """The minutes of the periods after a moment, or all of them without one."""
-    minutes = 0.0
-    for start, end in periods:
-        start = max(start, moment) if moment else start
-        minutes += max(0.0, (end - start).total_seconds() / 60)
-    return minutes

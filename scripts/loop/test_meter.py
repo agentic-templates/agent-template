@@ -88,6 +88,12 @@ def meters(
     return found
 
 
+def project_folder(config: Path) -> Path:
+    """The folder where Claude Code keeps the transcripts of the main checkout's sessions for a config folder."""
+    name = "".join(character if character.isalnum() else "-" for character in str(paths.main_checkout()))
+    return config / "projects" / name
+
+
 def reading(at: dt.datetime, used: float, resets: str | None = "2026-10-18T04:30:00-04:00") -> dict[str, Any]:
     return {"at": at.isoformat(), "account": "claude", "meters": {"session": {"used": used, "resets": resets}}}
 
@@ -151,6 +157,16 @@ class MeterTest(unittest.TestCase):
 
     def accounts(self, *accounts: dict[str, Any]) -> None:
         (self.loop / "accounts.json").write_text(json.dumps({"accounts": list(accounts)}))
+
+    def orchestrator_on_another_account(self) -> Path:
+        """Lists two Claude accounts: the one that this machine is signed in to, which the orchestrator runs on, and
+        the one of CLAUDE_CONFIG_DIR, which the meter runs on, as an auditor's meter does. Returns the folder where
+        Claude Code keeps the transcripts of the main checkout's sessions for the orchestrator's account."""
+        self.accounts(
+            {"name": "claude", "tool": "claude"},
+            {"name": "claude-2", "tool": "claude", "env": {"CLAUDE_CONFIG_DIR": os.environ["CLAUDE_CONFIG_DIR"]}},
+        )
+        return project_folder(self.root / "person" / ".claude")
 
     def calls(self, tool: str) -> list[dict[str, Any]]:
         log = self.standins / "calls.jsonl"
@@ -586,10 +602,12 @@ MAC: Machine = {
 class MachineLineTest(MeterTest):
     def test_gives_the_disk_the_memory_the_swap_the_gpu_the_load_the_context_and_the_retrospective(self) -> None:
         self.assertEqual(
-            meter.machine_line(MAC, 210_500, "retrospective due: 31.5 hours of agents' work since the last one"),
+            meter.machine_line(
+                MAC, 210_500, "retrospective due: 2700000 output tokens of agents' work since the last one"
+            ),
             "machine | disk 94 GB free | memory 30 GB free | swap 1.9 GB used | GPU 23% busy, 6.6 GB of the main memory"
             " | load 3.2 on 10 cores | orchestrator context 210k | "
-            "retrospective due: 31.5 hours of agents' work since the last one",
+            "retrospective due: 2700000 output tokens of agents' work since the last one",
         )
 
     def test_gives_the_memory_of_a_gpu_with_its_own_memory(self) -> None:
@@ -605,13 +623,12 @@ class MachineLineTest(MeterTest):
         self.assertIn(" | GPU 23% busy, memory unknown | ", line)
 
     def test_is_the_last_line(self) -> None:
-        with mock.patch.object(meter, "OUTPUT_TOKENS_PER_RETROSPECTIVE", None):
-            last_line = self.run_meter()[1][-1]
         self.assertRegex(
-            last_line,
+            self.run_meter()[1][-1],
             r"^machine \| disk \d+ GB free \| memory .* \| load \d+\.\d on \d+ cores \| "
             r"orchestrator context unknown \| "
-            r"retrospective not due: 0\.0 of 30 hours of agents' work since the last one$",
+            rf"retrospective not due: 0 of {meter.OUTPUT_TOKENS_PER_RETROSPECTIVE} output tokens of agents' work since "
+            r"the last one$",
         )
 
 
@@ -625,8 +642,7 @@ def call(tokens: int, **fields: Any) -> str:
 class AgentsLineTest(MeterTest):
     def setUp(self) -> None:
         super().setUp()
-        project = "".join(character if character.isalnum() else "-" for character in str(paths.main_checkout()))
-        self.subagents = self.root / "claude-config" / "projects" / project / "abc123" / "subagents"
+        self.subagents = project_folder(self.root / "claude-config") / "abc123" / "subagents"
         self.subagents.mkdir(parents=True)
 
     def agents(self) -> str:
@@ -639,7 +655,7 @@ class AgentsLineTest(MeterTest):
         if event == "start":
             line |= {"type": agent_type, "issue": issue, "test": False, "pid": pid}
         else:
-            line |= {"minutes": 1.0}
+            line |= {"minutes": 1.0, "output_tokens": 1}
         with (self.loop / "agents.jsonl").open("a") as handle:
             handle.write(json.dumps(line) + "\n")
 
@@ -731,6 +747,13 @@ class AgentsLineTest(MeterTest):
     def test_says_when_no_agent_runs_without_a_log(self) -> None:
         self.assertEqual(self.agents(), "agents | none running")
 
+    def test_gives_the_context_of_an_agent_whose_transcript_is_in_the_folder_of_another_claude_account(self) -> None:
+        self.subagents = self.orchestrator_on_another_account() / "abc123" / "subagents"
+        self.subagents.mkdir(parents=True)
+        self.log("start", "toolu_01", issue=64)
+        self.subagent("a1", "toolu_01", [call(300_000)])
+        self.assertEqual(self.agents(), "agents | builder #64 300k")
+
     def test_leaves_out_an_agent_whose_process_ended_and_lists_one_whose_process_runs_or_is_unknown(self) -> None:
         self.log("start", "toolu_01", issue=64, pid=101)
         self.log("start", "toolu_02", issue=65, pid=102)
@@ -759,9 +782,9 @@ class ProcessTest(unittest.TestCase):
 
 
 class ContextTest(MeterTest):
-    def transcript(self, session: str) -> Path:
-        project = "".join(character if character.isalnum() else "-" for character in str(paths.main_checkout()))
-        transcript = self.root / "claude-config" / "projects" / project / f"{session}.jsonl"
+    def transcript(self, session: str, project: Path | None = None) -> Path:
+        """The path of a session's transcript in a project folder, by default the one of CLAUDE_CONFIG_DIR."""
+        transcript = (project or project_folder(self.root / "claude-config")) / f"{session}.jsonl"
         transcript.parent.mkdir(parents=True, exist_ok=True)
         return transcript
 
@@ -795,6 +818,11 @@ class ContextTest(MeterTest):
         self.transcript("long").write_text(f"{start}\n{call}\n")
         self.assertEqual(self.context(), "orchestrator context 99k")
 
+    def test_reads_the_transcript_of_the_orchestrator_in_the_folder_of_another_claude_account(self) -> None:
+        (self.loop / "state.md").write_text("session: abc123\n")
+        self.transcript("abc123", self.orchestrator_on_another_account()).write_text(call(150_000) + "\n")
+        self.assertEqual(self.context(), "orchestrator context 150k")
+
     def test_is_unknown_without_a_session_or_its_transcript(self) -> None:
         cases = {
             "no state file": None,
@@ -812,18 +840,8 @@ class ContextTest(MeterTest):
 
 
 class HelpTest(unittest.TestCase):
-    def test_gives_the_hours_of_work_that_make_a_retrospective_due(self) -> None:
-        printed = io.StringIO()
-        with (
-            mock.patch.object(meter, "HOURS_PER_RETROSPECTIVE", 12.5),
-            contextlib.redirect_stdout(printed),
-            self.assertRaises(SystemExit),
-        ):
-            meter.main(["--help"])
-        self.assertIn("once the agents have worked 12.5 hours since", " ".join(printed.getvalue().split()))
-
     def test_keeps_each_line_within_120_characters(self) -> None:
-        longer = [line for line in meter.help_text().splitlines() if len(line) > 120]
+        longer = [line for line in str(meter.__doc__).splitlines() if len(line) > 120]
         self.assertEqual(longer, [])
 
 

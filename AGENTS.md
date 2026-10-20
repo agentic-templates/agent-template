@@ -72,7 +72,7 @@ A status label says what an issue is waiting for. The status labels are:
 
 The loop builds the issues that have the `ready` label, which isn't a status label. An issue gets the label once it meets "Definition of ready" in `docs/planning.md`.
 
-The `retrospective` label marks the pull request of a retrospective. `scripts/loop/meter` says that the next retrospective is due once the agents have used a set number of output tokens since the newest such pull request merged. Until a retrospective sets that number, the meter counts the hours that the agents worked instead.
+The `retrospective` label marks the pull request of a retrospective. `scripts/loop/meter` says that the next retrospective is due once the agents have used a set number of output tokens since the newest such pull request merged.
 
 Dependabot adds `dependencies` to its own pull requests.
 
@@ -122,7 +122,7 @@ A change is done when all of these are true:
 
 Everything in the repository, and in its issues and pull requests, is public.
 
-- Don't commit plans, notes, session logs, TODO lists or review records. Keep working files in a folder of your own, such as one that `mktemp -d` makes, or one in `.loop/`. Then agents that run at the same time don't write over each other's files, and the hooks let you delete the folder.
+- Don't commit plans, notes, session logs, TODO lists or review records. Keep working files, including the files that a test or a measurement of yours writes, in a folder of your own, such as one that `mktemp -d` makes, or one in `.loop/`. Then agents that run at the same time don't write over each other's files, and the hooks let you delete the folder.
 - Never read, print or commit secrets. Keep them in `.env`, and list each variable in `.env.example` with a placeholder value.
 - Keep personal email addresses, local paths, private links and internal ticket numbers out of files, commit messages, issues and pull requests.
 - Don't create a `CLAUDE.md` or `CLAUDE.local.md` in any folder above the repository, including your home folder.

@@ -104,8 +104,8 @@ needed a fix after review when it got a commit after an agent of the type review
 builder when an agent of another type started on it or on its issue after the agent that opened it.
 
 The report counts the CI runs, the agents and the calls that started after the moment. It reads the transcripts that
-Claude Code keeps for the main checkout, and prints none of their text other than the messages that --messages asks
-for.
+Claude Code keeps for the main checkout, for the account that the report runs on and for each Claude account in
+.loop/accounts.json, and prints none of their text other than the messages that --messages asks for.
 """
 
 import argparse
@@ -125,6 +125,7 @@ import heavy_log
 import paths
 import request_events
 from account_usage import account_lines
+from accounts import AccountsError, claude_project_folders, load_accounts
 from agent_log import AgentRun, Period, agent_output_tokens, agent_transcripts, read_runs, started, working_periods
 from github import GitHubError, gh_api, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, hook_threshold, note_files
@@ -273,8 +274,9 @@ def main(argv: list[str] | None = None) -> int:
         before = [run for run in runs if period_before and period_before.start <= started(run) < since]
         compared = recent + before
         pull_requests = read_pull_requests(sorted({number for run in compared if (number := opened(run))}), checkout)
-        transcripts = read_transcripts(paths.claude_project_folder(checkout), checkout, since)
-    except (GitHubError, ReportError) as error:
+        project_folders = claude_project_folders(checkout, load_accounts(paths.loop_dir() / "accounts.json"))
+        transcripts = read_transcripts(project_folders, checkout, since)
+    except (GitHubError, ReportError, AccountsError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     # The last retrospective counted the period before as it stood at --since, so the period before stops there.
@@ -284,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         if (number := opened(run))
     }
     agents = count_once(transcripts, since)
-    transcripts_by_id = agent_transcripts(paths.claude_project_folder(checkout))
+    transcripts_by_id = agent_transcripts(project_folders)
     files = {
         run.start["id"]: file for run in recent if (file := transcripts_by_id.get(run.start["id"])) and file.exists()
     }
@@ -317,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
     if options.issues:
         lines += issue_lines(recent, results, event_tokens, splits, contexts)
     if options.messages:
-        lines += message_lines(read_messages(paths.claude_project_folder(checkout), since))
+        lines += message_lines(read_messages(project_folders, since))
     print("\n".join(lines))
     return 0
 
@@ -384,17 +386,19 @@ def minutes_between(start: str, end: str) -> float:
     return (dt.datetime.fromisoformat(end) - dt.datetime.fromisoformat(start)).total_seconds() / 60
 
 
-def read_transcripts(project_folder: Path, checkout: Path, since: dt.datetime) -> list[Transcript]:
-    """The transcripts that changed after the time: each session's, and those of its agents."""
-    if not project_folder.is_dir():
+def read_transcripts(project_folders: list[Path], checkout: Path, since: dt.datetime) -> list[Transcript]:
+    """The transcripts in the folders that changed after the time: each session's, and those of its agents."""
+    existing = [folder for folder in project_folders if folder.is_dir()]
+    if not existing:
         raise ReportError(
-            f"Can't find {project_folder}, where Claude Code keeps the transcripts of the sessions in {checkout}. "
-            "If Claude Code keeps its files elsewhere, set CLAUDE_CONFIG_DIR to that folder."
+            f"Can't find {' or '.join(map(str, project_folders))}, where Claude Code keeps the transcripts of the "
+            f"sessions in {checkout}. If Claude Code keeps its files elsewhere, set CLAUDE_CONFIG_DIR to that folder."
         )
     found: list[tuple[Path, str]] = []
-    for session in project_folder.glob("*.jsonl"):
-        found.append((session, ORCHESTRATOR))
-        found += [(agent, AGENT) for agent in (project_folder / session.stem / "subagents").glob("*.jsonl")]
+    for project_folder in existing:
+        for session in project_folder.glob("*.jsonl"):
+            found.append((session, ORCHESTRATOR))
+            found += [(agent, AGENT) for agent in (project_folder / session.stem / "subagents").glob("*.jsonl")]
     transcripts = []
     for file, role in found:
         modified = file.stat().st_mtime
@@ -420,11 +424,11 @@ def count_once(transcripts: list[Transcript], since: dt.datetime) -> list[Agent]
     return agents
 
 
-def read_messages(project_folder: Path, since: dt.datetime) -> list[Message]:
-    """The messages that a person typed in the sessions after the time, in order of time. A resumed session's
-    transcript starts with copies of the earlier transcript's messages, so each message counts once."""
+def read_messages(project_folders: list[Path], since: dt.datetime) -> list[Message]:
+    """The messages that a person typed in the sessions in the folders after the time, in order of time. A resumed
+    session's transcript starts with copies of the earlier transcript's messages, so each message counts once."""
     messages: set[Message] = set()
-    for session in project_folder.glob("*.jsonl"):
+    for session in (session for folder in project_folders for session in folder.glob("*.jsonl")):
         if session.stat().st_mtime >= since.timestamp():
             messages.update(message for message in person_messages(session) if message.at >= since)
     return sorted(messages)
