@@ -44,7 +44,8 @@ account's room: soon, to hand off its work at its next stopping point, now, to h
 ends, or none. ID is the id of the agent's start line in .loop/agents.jsonl. The meter takes the newest reading of the
 agent's account in .loop/meter.jsonl, unless it is more than {gap} minutes old, and counts the agents that run on the
 account as --start-on does. An agent that needs no more time to finish its work than a long hand-off takes gets
-none, because a hand-off would only take it longer. The other agents get these notes:
+none, because a hand-off would only take it longer. An agent that has run longer than every earlier run of its type
+isn't one of them, because its earlier runs don't show how much longer it runs. The other agents get these notes:
 
 - Each one gets now once a meter's room is down to what the agents need to hand off: the usage of each agent, and of
   the orchestrator at its share, for the time of a long hand-off. That time is the 90th percentile of the minutes from

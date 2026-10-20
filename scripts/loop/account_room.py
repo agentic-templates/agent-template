@@ -150,10 +150,15 @@ def run_minutes(agent_type: str, runs: dict[str, list[float]]) -> float:
 
 
 def minutes_left(agent: Running, runs: dict[str, list[float]]) -> float:
-    """How much longer a running agent will likely run, from how much longer the earlier runs of its type that ran as
-    long as it has went on. An agent that outran them all needs nothing more than the meter shows."""
-    longer = [minutes - agent.minutes for minutes in earlier_runs(agent.type, runs) if minutes >= agent.minutes]
+    """How much longer a running agent will likely run. An agent that outran every earlier run of its type needs nothing
+    more than the meter shows."""
+    longer = minutes_left_of_longer_runs(agent, runs)
     return long_run(longer) if longer else 0.0
+
+
+def minutes_left_of_longer_runs(agent: Running, runs: dict[str, list[float]]) -> list[float]:
+    """How much longer each earlier run of a running agent's type that ran as long as the agent has went on."""
+    return [minutes - agent.minutes for minutes in earlier_runs(agent.type, runs) if minutes >= agent.minutes]
 
 
 def minutes_to_reset(name: str, meter: Meter, reading_time: dt.datetime) -> float:
@@ -281,8 +286,10 @@ def agents_to_hand_off(
 
 def finishes_before_hand_off(agent: Running, runs: dict[str, list[float]], hand_off_minutes: float) -> bool:
     """Whether an agent needs no more time to finish its work than to hand it off, so that a hand-off would only take it
-    longer and leave its work for another agent."""
-    return minutes_left(agent, runs) <= hand_off_minutes
+    longer and leave its work for another agent. An agent that outran every earlier run of its type may need any time,
+    so it doesn't count as one."""
+    longer = minutes_left_of_longer_runs(agent, runs)
+    return bool(longer) and long_run(longer) <= hand_off_minutes
 
 
 def hand_off_minutes(notes: dict[str, dt.datetime], ends: dict[str, dt.datetime]) -> float:

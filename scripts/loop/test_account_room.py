@@ -198,6 +198,17 @@ class HandOffNoteTest(unittest.TestCase):
         # The hand-offs of the 2 agents and of the orchestrator at its share take 2.1 points.
         self.assertEqual(notes(hand_off_room(98.0, share=0.1, running=finishing)), {"a1": "now", "a2": None})
 
+    def test_tells_an_agent_that_has_run_longer_than_every_earlier_run_of_its_type_as_it_tells_the_others(
+        self,
+    ) -> None:
+        # The builder a2 has run 40 minutes, past the builder's 30, so it counts no more than the meter shows. Even with
+        # a1 handing off, the agents still need 1 point and the orchestrator 3, more than a room of 3 points.
+        running = [account_room.Running("builder", 0.0, "a1"), account_room.Running("builder", 40.0, "a2")]
+        self.assertEqual(notes(hand_off_room(97.0, share=0.1, running=running)), {"a1": "soon", "a2": "soon"})
+        # The hand-offs of the 2 agents take 2 points.
+        self.assertEqual(notes(hand_off_room(98.0, running=running)), {"a1": "now", "a2": "now"})
+        self.assertEqual(notes(hand_off_room(100.0, running=running)), {"a1": "now", "a2": "now"})
+
     def test_counts_only_the_usage_before_the_reset(self) -> None:
         room = hand_off_room(89.0)
         room.meters["session"]["resets"] = (NOW + dt.timedelta(minutes=20)).isoformat()
