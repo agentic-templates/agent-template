@@ -12,6 +12,8 @@ package = false
 # uv takes no version that is less than 7 days old, so that a bad or compromised release has time to be found and
 # pulled.
 exclude-newer = "7 days"
+# pyyaml has no wheel for Python 3.15, so uv builds it from source with these.
+build-constraint-dependencies = ["setuptools==84.0.0", "cython==3.3.0"]
 
 [tool.ruff]
 line-length = 120

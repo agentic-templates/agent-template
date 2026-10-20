@@ -6,6 +6,12 @@ requires-python = ">=3.15"
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P7D"
 
+[manifest]
+build-constraints = [
+    { name = "cython", specifier = "==3.3.0" },
+    { name = "setuptools", specifier = "==84.0.0" },
+]
+
 [[package]]
 name = "agent-template"
 version = "0"
