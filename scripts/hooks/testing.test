@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# Tests the functions of testing.bash that stand in for the tools: make_sample_input makes the input that jq made from
+# the same values, and run_hook runs the hook as a bash process of its own runs it.
+set -euo pipefail
+# shellcheck source=scripts/hooks/testing.bash
+source "${BASH_SOURCE[0]%/*}/testing.bash"
+
+copies=$(mktemp -d)
+trap 'rm -rf "$copies"' EXIT
+
+# Prints the sample input as jq made it before make_sample_input: sample_input_from_jq <tool> <tool name> <value>
+# shellcheck disable=SC2016 # The $ in the jq programs names jq's variables, such as $value.
+sample_input_from_jq() {
+  local tool=$1 tool_name=$2 value=$3 tool_input program
+  case $tool_name in
+    Bash | apply_patch) tool_input='{command: $value}' ;;
+    Read) tool_input='{file_path: $value}' ;;
+    Write) tool_input='{file_path: $value, content: "Rules"}' ;;
+    Edit) tool_input='{file_path: $value, old_string: "Rules", new_string: "More rules"}' ;;
+  esac
+  case $tool in
+    claude-code)
+      program='{session_id: "abc123", transcript_path: "\($home)/.claude/projects/p/abc123.jsonl",
+        cwd: $cwd, permission_mode: "default", hook_event_name: "PreToolUse",
+        tool_name: $tool_name, tool_input: TOOL_INPUT, tool_use_id: "toolu_01"}'
+      ;;
+    codex)
+      program='{session_id: "abc123", turn_id: "1", transcript_path: null, cwd: $cwd,
+        hook_event_name: "PreToolUse", model: "gpt-5", permission_mode: "default",
+        tool_name: $tool_name, tool_input: TOOL_INPUT, tool_use_id: "call_01"}'
+      ;;
+    copilot-cli)
+      program='{session_id: "abc123", timestamp: 1759536000000, cwd: $cwd,
+        hook_event_name: "PreToolUse", tool_name: $tool_name, tool_input: TOOL_INPUT}'
+      ;;
+    cursor)
+      if [[ $tool_name == Bash ]]; then
+        tool_name=Shell
+      fi
+      program='{conversation_id: "abc123", generation_id: "def456", model: "auto", hook_event_name: "PreToolUse",
+        cursor_version: "2.1.0", workspace_roots: [$cwd], transcript_path: null,
+        tool_name: $tool_name, tool_input: TOOL_INPUT}'
+      ;;
+  esac
+  jq -n --arg home "$test_home" --arg cwd "$test_cwd" --arg tool_name "$tool_name" --arg value "$value" \
+    "${program/TOOL_INPUT/$tool_input}"
+}
+
+# Checks that make_sample_input makes the input that jq makes: expect_same_input <tool> <tool name> <value>
+expect_same_input() {
+  local expected actual
+  case_count=$((case_count + 1))
+  expected=$(sample_input_from_jq "$@" | jq -S .)
+  make_sample_input "$@"
+  actual=$(jq -S . 2>&1 <<<"$sample_input_json") || true
+  if [[ $actual != "$expected" ]]; then
+    echo "error: for $1, $2 and [$3], make_sample_input must make the input $expected, but it made $sample_input_json" >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Each tool's input for each tool name that it sends
+for tool_name in Bash Read Write Edit apply_patch; do
+  find_tools "$tool_name"
+  for tool in $tools; do
+    expect_same_input "$tool" "$tool_name" "README.md"
+  done
+done
+
+# Values with the characters that JSON escapes, and others that it doesn't
+# shellcheck disable=SC2016 # The values are text, so their $ stays as written.
+values=('' 'say "hi" \ there' '\n is two characters' $'two\nlines\twith a tab and a return\r'
+  $'\001 \037 \177 \033' 'é ü 漢字 😀' '$HOME `pwd` $(id)')
+for value in "${values[@]}"; do
+  expect_same_input claude-code Bash "$value"
+done
+test_cwd='/tmp/a "folder" with \ in it'
+expect_same_input codex Bash ls
+test_cwd=$test_home/project
+
+# run_hook gives the result that the hook gives in a bash process of its own.
+for command in ls 'cat .env' 'sudo ls' 'git push --force origin main' 'gh pr merge 5 --admin'; do
+  make_sample_input claude-code Bash "$command"
+  expected_status=0
+  expected_message=$(HOME=$test_home bash "$hooks_folder/before-tool" 2>&1 >/dev/null <<<"$sample_input_json") ||
+    expected_status=$?
+  run_hook "$sample_input_json"
+  expect_result "Run by run_hook, the hook for Bash \"$command\"" "$expected_status" "$expected_message"
+done
+
+# The hook in run_hook sees the test's environment, but not the test's own variables. This check in a copy of the
+# scripts blocks every command when it sees either.
+cp -R "${hooks_folder%/*}" "$copies/scripts"
+hooks_folder=$copies/scripts/hooks
+# shellcheck disable=SC2016 # The lines are the check's code, so their $ stays as written.
+printf '%s\n' '#!/usr/bin/env bash' 'source "${BASH_SOURCE[0]%/*}/helpers.bash"' \
+  'if [[ -n ${test_variable+set} ]]; then block "Blocked: the hook sees test_variable."; fi' \
+  'if [[ -n ${TEST_ENVIRONMENT+set} ]]; then block "Blocked: the hook sees TEST_ENVIRONMENT."; fi' \
+  >"$hooks_folder/variables.check"
+chmod +x "$hooks_folder/variables.check"
+expect_allow Bash ls
+test_variable=global
+expect_allow Bash ls
+# A local variable of a test function hides the global one.
+run_in_function() {
+  # shellcheck disable=SC2034 # The check in the copy looks for it.
+  local test_variable=local
+  expect_allow Bash ls
+}
+run_in_function
+unset test_variable
+export TEST_ENVIRONMENT=yes
+expect_block Bash ls "Blocked: the hook sees TEST_ENVIRONMENT."
+unset TEST_ENVIRONMENT
+
+# finish_tests fails a test that defines a function of helpers.bash again, because the hook would call the test's.
+printf '%s\n' "source '$hooks_folder/testing.bash'" 'block() { :; }' finish_tests >"$copies/redefines.test"
+case_count=$((case_count + 1))
+status=0
+message=$(bash "$copies/redefines.test" 2>&1) || status=$?
+expected="error: $copies/redefines.test defines a function or a variable of helpers.bash again, so the hook in its cases used the test's instead. Rename the test's function or variable."
+if [[ $status != 1 || $message != "$expected" ]]; then
+  echo "error: finish_tests must exit with code 1 and the message \"$expected\" for a test that defines block again, but it exited with code $status and the message \"$message\"." >&2
+  failed_cases=$((failed_cases + 1))
+fi
+
+finish_tests
