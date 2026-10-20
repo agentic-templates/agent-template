@@ -128,9 +128,38 @@ read_shell_flag_letters() {
   done
 }
 
-# Succeeds if a word names scripts/configure-github: is_configure_github <word>
+# Prints the physical path of the file that a word of the command names, with each symbolic link followed, also one
+# at the file itself. A relative path starts from command_folder. Fails when the hook can't tell the file, such as when
+# a variable decides the path or the file doesn't exist. On macOS before 12.3, readlink has no -f, so the hook can't
+# tell the file there: followed_file <word>
+followed_file() {
+  local path
+  if ! expand_home "$1"; then
+    return 1
+  fi
+  path=$expanded_path
+  if [[ $path != /* ]]; then
+    if [[ -z $command_folder ]]; then
+      return 1
+    fi
+    path=$command_folder/$path
+  fi
+  path=$(readlink -f "$path" 2>/dev/null) || return 1
+  if [[ ! -f $path ]]; then
+    return 1
+  fi
+  echo "$path"
+}
+
+# Succeeds if a word names scripts/configure-github: by its name, or by a path to the file in a scripts folder, as
+# followed_file finds the file: is_configure_github <word>
 is_configure_github() {
-  [[ $1 == scripts/configure-github || $1 == */scripts/configure-github ]]
+  local file
+  if [[ $1 == scripts/configure-github || $1 == */scripts/configure-github ]]; then
+    return 0
+  fi
+  file=$(followed_file "$1") || return 1
+  [[ $file == */scripts/configure-github ]]
 }
 
 # Succeeds if the command in command_words runs scripts/configure-github, and sets script_word to the word that names
@@ -149,6 +178,9 @@ runs_configure_github() {
       return 1
     fi
     script_word=$shell_operand
+  elif [[ $script_word != */* ]]; then
+    # The shell looks for a command's name without a / in the folders of PATH, which the hook can't tell.
+    return 1
   fi
   is_configure_github "$script_word"
 }
@@ -171,8 +203,9 @@ other_command_count() {
 # Succeeds if the command in command_words runs the scripts/configure-github of the folder that it runs in, and nothing
 # else in the shell command can change what the run reads after this hook compares the scripts folder with GitHub's: no
 # word before the script, such as a variable, env or bash, no redirection, and no simple command other than a cd without
-# redirections. A variable such as BASH_ENV or PATH can run other code, and a redirection can write a file:
-# runs_alone_in_checkout <number of the words before the command's name>
+# redirections. A variable such as BASH_ENV or PATH can run other code, and a redirection can write a file. A run
+# through a symbolic link to the script doesn't count either, because the script reads admin-access from the folder of
+# the link: runs_alone_in_checkout <number of the words before the command's name>
 # other_command_count runs in a subshell, because its for_each_simple_command changes command_folder after a command
 # that runs through env -C.
 runs_alone_in_checkout() {

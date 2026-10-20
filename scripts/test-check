@@ -23,6 +23,8 @@ copy=""
 case_count=0
 # A case sets this to make the copy's scripts/check skip the tests of the scripts and hooks, with SKIP_SCRIPT_TESTS.
 skip_script_tests=""
+# A case sets this to make the copy's scripts/check skip the Python tests, with SKIP_PYTHON_TESTS.
+skip_python_tests=""
 # A case sets this to leave its files unstaged, so that the copy's untracked files stay untracked.
 leave_unstaged=""
 # A case sets this to 1 to run the copy's scripts/check as in Codex's sandbox, with CODEX_SANDBOX_NETWORK_DISABLED. The
@@ -80,6 +82,8 @@ check_record() {
     reason="failed"
   elif [[ -n $skip_script_tests ]]; then
     reason="skipped the tests of the scripts and hooks"
+  elif [[ -n $skip_python_tests ]]; then
+    reason="skipped the Python tests"
   elif [[ -n $codex_sandbox ]]; then
     reason="ran as in Codex's sandbox"
   fi
@@ -137,7 +141,8 @@ check_case() (
   fi
   # CHECK_UNDER_TEST stops the copy's scripts/check from running this script again.
   if ! output=$(cd "$copy" && CHECK_UNDER_TEST=$check_under_test SKIP_SCRIPT_TESTS=$skip_script_tests \
-    CODEX_SANDBOX_NETWORK_DISABLED=$codex_sandbox PATH=$stand_ins:$PATH scripts/check 2>&1); then
+    SKIP_PYTHON_TESTS=$skip_python_tests CODEX_SANDBOX_NETWORK_DISABLED=$codex_sandbox PATH=$stand_ins:$PATH \
+    scripts/check 2>&1); then
     actual=fail
   fi
 
@@ -236,6 +241,14 @@ claude_md_with_the_script_tests_skipped() {
 
 run_case script_tests_skipped pass "Skipped the tests of the scripts and hooks because SKIP_SCRIPT_TESTS is set."
 run_case claude_md_with_the_script_tests_skipped fail "error: CLAUDE.md makes a tool skip AGENTS.md."
+
+# Case for SKIP_PYTHON_TESTS, with which scripts/check records no pass, which run_case checks.
+
+tests_skipped_by_skip_python_tests() {
+  skip_python_tests=1
+}
+
+run_case tests_skipped_by_skip_python_tests pass "SKIP_PYTHON_TESTS is set, so scripts/check records no pass."
 
 # Case for Codex's sandbox, where scripts/check records no pass, which run_case checks.
 # The copies run no Python tests, so the case can't check that scripts/check skips the coverage report there.

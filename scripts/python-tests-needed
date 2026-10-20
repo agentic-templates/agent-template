@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Succeeds if a change needs the Python tests and their coverage report, and fails with code 1 if it doesn't:
+# scripts/python-tests-needed [--branch]
+# Without an argument, it reads the paths of the changed files from standard input, one to a line. The changes job in
+# .github/workflows/ci.yml runs it this way. With --branch, it takes the files that the branch changes since it leaves
+# origin/main, with the changes that aren't committed and the new files. scripts/check runs it this way. When it can't
+# list them, it succeeds, so that the tests run.
+# The tests read the files in scripts/, .claude/, .codex/ and .github/, and the files that set up Python and its packages, so a change to
+# other files, such as the docs, doesn't need them.
+set -euo pipefail
+
+if (($# > 1)) || { (($# == 1)) && [[ $1 != --branch ]]; }; then
+  echo "error: scripts/python-tests-needed takes no argument or --branch, and it got: $*" >&2
+  exit 2
+fi
+
+if (($# == 1)); then
+  base=$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null) || exit 0
+  # -z keeps git from quoting a path. A path with a line break splits in two, which can only make the tests run.
+  paths=$(git diff -z --name-only --no-renames "$base" -- | tr '\0' '\n') || exit 0
+  new_paths=$(git ls-files -z --others --exclude-standard | tr '\0' '\n') || exit 0
+  paths+=$'\n'$new_paths
+else
+  paths=$(cat)
+fi
+
+while IFS= read -r path; do
+  case $path in
+    scripts/* | .claude/* | .codex/* | .github/* | .python-version | pyproject.toml | uv.lock) exit 0 ;;
+  esac
+done <<<"$paths"
+exit 1
