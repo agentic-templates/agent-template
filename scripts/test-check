@@ -244,11 +244,11 @@ run_case claude_md_with_the_script_tests_skipped fail "error: CLAUDE.md makes a 
 
 # Case for SKIP_PYTHON_TESTS, with which scripts/check records no pass, which run_case checks.
 
-python_tests_skipped() {
+tests_skipped_by_skip_python_tests() {
   skip_python_tests=1
 }
 
-run_case python_tests_skipped pass "SKIP_PYTHON_TESTS is set, so scripts/check records no pass."
+run_case tests_skipped_by_skip_python_tests pass "SKIP_PYTHON_TESTS is set, so scripts/check records no pass."
 
 # Case for Codex's sandbox, where scripts/check records no pass, which run_case checks.
 # The copies run no Python tests, so the case can't check that scripts/check skips the coverage report there.
