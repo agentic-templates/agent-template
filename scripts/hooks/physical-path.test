@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests physical_path in helpers.bash.
+# Tests physical_path in physical-path.bash.
 set -euo pipefail
 # shellcheck source=scripts/hooks/testing.bash
 source "${BASH_SOURCE[0]%/*}/testing.bash"
@@ -26,5 +26,16 @@ expect_path() {
 
 # A relative folder starts from the current folder, also when it doesn't exist.
 expect_path README.md abc123 "$current_folder/abc123/README.md"
+
+# A .. after a symlink to a folder leads to the parent of the link's target, as it does when the system opens the path,
+# for a file that exists and for one that doesn't. The folder a/scripts makes a cd that cancels link/.. as text end
+# in a/scripts instead.
+links=$(CDPATH='' cd -- "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$links"' EXIT
+mkdir -p "$links/a/scripts" "$links/real/scripts"
+touch "$links/real/scripts/f"
+ln -s "$links/real/scripts" "$links/a/link"
+expect_path "$links/a/link/../scripts/f" / "$links/real/scripts/f"
+expect_path "$links/a/link/../scripts/g" / "$links/real/scripts/g"
 
 finish_tests

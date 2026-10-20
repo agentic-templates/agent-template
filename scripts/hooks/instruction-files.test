@@ -51,4 +51,14 @@ expect_allow Write "$test_home/CLAUDE.md"
 expect_allow apply_patch "$(patch_adding "$test_home/CLAUDE.md")"
 expect_allow apply_patch $'*** Begin Patch\n*** Delete File: CLAUDE.md\n*** End Patch\n'
 
+# Claude Code's Write resolves a .. after a symlink as text, so it leads to the folder that holds the link, also when
+# the link leads out of the repository. The case runs a copy of the scripts, so that the link is in the copy's
+# repository, and comes last, because the copy's hook runs every case after it.
+copy=$link_folder/copy
+mkdir -p "$copy/docs" "$link_folder/outside"
+cp -R "${hooks_folder%/*}" "$copy/scripts"
+ln -s "$link_folder/outside" "$copy/docs/link"
+hooks_folder=$copy/scripts/hooks
+expect_block Write "$copy/docs/link/../CLAUDE.md" "Blocked: docs/CLAUDE.md $reason"
+
 finish_tests
