@@ -28,7 +28,7 @@ You need:
    <summary>The setup list, for your agent</summary>
 
    - Run `scripts/install-git-hooks`, and ask the person which folders outside the repository are private, such as notes or other projects. List them in `.loop/leak-scan.paths`, so that the leak scan blocks any push that would publish their paths or contents.
-   - Run `gh api "repos/{owner}/{repo}/rulesets?includes_parents=false"` as written, because gh fills in the owner and the repository. If it lists no ruleset named `main`, run `scripts/configure-github` before you open the setup's pull request. If the script fails, stop the setup and pass its error on. When it finishes, ask the person to turn on Dependabot malware alerts at the link it prints.
+   - Run `gh api "repos/{owner}/{repo}/rulesets?includes_parents=false"` as written, because gh fills in the owner and the repository. If it lists no ruleset named `main`, run `scripts/configure-github` now, on its own, before you change any file in `scripts` or `.gitignore`. If the script fails, stop the setup and pass its error on. When it finishes, ask the person to turn on Dependabot malware alerts at the link it prints.
    - In `AGENTS.md`, rewrite "What this project is": what the project is for, and which changes belong in it. Under "Commands", add the commands that aren't tied to one language, such as one that starts the project's database.
    - For each language the project uses, follow `docs/languages.md`.
    - If the project's output is visual, such as a web page, add a command that saves a picture of it outside the repository, and that runs without anyone at the screen. List it under "Commands".

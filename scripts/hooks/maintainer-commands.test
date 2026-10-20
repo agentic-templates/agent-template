@@ -16,8 +16,9 @@ mkdir -p "$test_cwd" "$other_clone"
 
 # The agent's checkout is the main checkout of a repository that holds a copy of the scripts and of .gitignore, whose
 # hooks the cases run, so that the hook finds the main checkout and its state file. A builder's worktree is inside the
-# main checkout, as in .claude/worktrees. git looks for no repository above the temporary folder, reads none of the
-# person's settings, and commits as a stand-in person.
+# main checkout, as in .claude/worktrees. The clone of jtmpl/other holds the same files, as a repository made from the
+# same template does. git looks for no repository above the temporary folder, reads none of the person's settings, and
+# commits as a stand-in person.
 export GIT_CEILING_DIRECTORIES=$folders GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
 unset LOOP_DIR
@@ -30,6 +31,7 @@ git -C "$main_checkout" add .gitignore scripts
 git -C "$main_checkout" commit --quiet -m "chore: start the project"
 git -C "$main_checkout" remote add origin git@github.com:jtmpl/project.git
 git -C "$main_checkout" worktree add --quiet --detach "$worktree"
+git clone --quiet "$main_checkout" "$other_clone"
 hooks_folder=$main_checkout/scripts/hooks
 
 # A stand-in for gh, first on the PATH, so that the cases ask nothing of GitHub.
@@ -40,7 +42,8 @@ hooks_folder=$main_checkout/scripts/hooks
 # TEST_OTHER_RULESETS says the same for jtmpl/other. It fails for the rulesets of any other repository.
 # TEST_MAIN_RULES lists the checks that the rules for main require, separated by spaces, or says fail.
 # For the repository jtmpl/other in GH_REPO, TEST_OTHER_MAIN_RULES lists them instead.
-# TEST_SCRIPTS_TREE is the tree of the scripts folder that it reports on main of jtmpl/project, or says fail.
+# TEST_SCRIPTS_TREE is the tree of the scripts folder that it reports on main of jtmpl/project and of jtmpl/other, or
+# says fail.
 # TEST_GITIGNORE is the blob of .gitignore that it reports there, or is empty for a main without a .gitignore.
 # TEST_PULL_REQUEST says what it reports for pull request 7, or the current branch's: fork, same or fail.
 # It fails for any other pull request, as gh does for one that doesn't exist, and records each call in TEST_GH_CALLS.
@@ -71,7 +74,7 @@ elif [[ $1 == api && $2 == "repos/{owner}/{repo}/rules/branches/main" ]]; then
     echo "$check"
   done
   printf '%s\n' "$TEST_PROJECT_CHECKS"
-elif [[ $1 == api && $2 == repos/jtmpl/project/git/trees/main ]]; then
+elif [[ $1 == api && ($2 == repos/jtmpl/project/git/trees/main || $2 == repos/jtmpl/other/git/trees/main) ]]; then
   if [[ $TEST_SCRIPTS_TREE == fail ]]; then
     exit 1
   fi
@@ -164,6 +167,12 @@ test_main_rules() {
 second_run="Blocked: this repository's settings were applied before, so only the orchestrator or a maintainer with admin access runs scripts/configure-github again. Go on with the other work, and list the command in your report."
 merge_reason="comes from a fork, so a maintainer merges it. Go on with the other work, and list the command in your report for the maintainer, who runs it."
 checkout_reason="Read it with gh pr diff 7 instead, because a checkout brings in its hook scripts and its AGENTS.md."
+# The messages that block a run of scripts/configure-github by any session, before the settings were applied too
+not_alone="Blocked: scripts/configure-github runs only in the checkout that holds it, as a command of its own, without a word before it, such as a variable, env, timeout or bash, and without a redirection: cd <checkout> && scripts/configure-github."
+unlike_main="Blocked: scripts/configure-github runs only while the checkout's scripts folder, with its untracked files, and its .gitignore are the same as on main on GitHub, because a reviewer read each change to them before it merged. Bring the checkout up to date with git fetch origin && git merge --ff-only origin/main, undo any other change to its .gitignore and its scripts folder, remove any new file in the folder, also a .gitignore that ignores itself, and run the script again."
+cannot_compare="Blocked: this hook can't compare the checkout's scripts folder and .gitignore with the ones on main on GitHub, because gh or git failed, or the folder holds a repository of its own. Check that gh can reach GitHub, remove any repository inside the folder, and try again."
+cannot_name="Blocked: gh can't name the repository of $folders, which scripts/configure-github would change. Run the script in a clone of the repository, and check that gh can reach GitHub."
+cannot_read_rulesets="Blocked: gh can't read the rulesets of jtmpl/project, so this hook can't tell whether the repository's settings were applied before. Check that gh can reach GitHub, and try again."
 
 runs_of_the_script=(scripts/configure-github ./scripts/configure-github "bash scripts/configure-github" "env GH_DEBUG=1 scripts/configure-github")
 
@@ -173,15 +182,61 @@ for command in "${runs_of_the_script[@]}"; do
   expect_block Bash "$command" "$second_run"
 done
 expect_block_behind_wrappers scripts/configure-github "$second_run"
-for TEST_RULESETS in another none fail; do
-  for command in "${runs_of_the_script[@]}"; do
-    expect_allow Bash "$command"
-  done
-done
 for TEST_RULESETS in main none fail; do
   expect_allow Bash 'cat scripts/configure-github'
   expect_allow Bash 'shellcheck scripts/configure-github'
 done
+
+# A first run, before the settings were applied, in a checkout whose scripts folder and .gitignore are the same as on
+# main on GitHub, as in a new clone during the setup in README.md, also in a builder's worktree
+for TEST_RULESETS in another none; do
+  for command in scripts/configure-github ./scripts/configure-github "'$main_checkout/scripts/configure-github'"; do
+    expect_allow Bash "$command"
+  done
+  test_cwd=$worktree expect_allow Bash scripts/configure-github
+done
+
+# A run of another checkout's script, or with words, redirections or other commands that could run other code or
+# change the files that the run reads after the hook compared them, such as BASH_ENV, which bash runs first, and PATH,
+# which can swap gh, jq or git. The hook blocks it from any session, also before the settings were applied.
+runs_not_alone=(
+  "'$worktree/scripts/configure-github'" "GH_REPO=jtmpl/project scripts/configure-github"
+  "GH_REPO=jtmpl/other scripts/configure-github" "bash scripts/configure-github" "env GH_DEBUG=1 scripts/configure-github"
+  "bash --rcfile scripts/configure-github -i" "BASH_ENV=/tmp/x.sh scripts/configure-github"
+  "env BASH_ENV=/tmp/x.sh scripts/configure-github" "PATH=/tmp/dir:\$PATH scripts/configure-github"
+  "scripts/configure-github 2>scripts/admin-access" "scripts/configure-github >configure.log 2>&1"
+  "cd . >scripts/admin-access && scripts/configure-github"
+  "cp '$worktree/scripts/configure-github' scripts/ && scripts/configure-github"
+  "scripts/configure-github | tail -n 5" "scripts/configure-github & git switch --quiet work"
+  "timeout 10m scripts/configure-github"
+)
+TEST_RULESETS=none TEST_OTHER_RULESETS=none
+for command in "${runs_not_alone[@]}" "env -C '$worktree' scripts/configure-github" \
+  "cd '$other_clone' && '$main_checkout/scripts/configure-github'"; do
+  expect_block Bash "$command" "$not_alone"
+done
+expect_block_behind_wrappers scripts/configure-github "$not_alone"
+
+# A first run while the checkout's scripts folder or .gitignore differs from the one on main on GitHub, or while the
+# hook can't compare them: gh fails, the folder holds a repository of its own, or git finds no checkout in the folder,
+# as in a copy of the scripts folder elsewhere in a clone
+echo "# A change that hasn't merged" >>"$main_checkout/scripts/admin-access"
+expect_block Bash scripts/configure-github "$unlike_main"
+git -C "$main_checkout" checkout --quiet -- scripts/admin-access
+echo "scripts/hooks/notes.txt" >>"$main_checkout/.gitignore"
+expect_block Bash scripts/configure-github "$unlike_main"
+git -C "$main_checkout" checkout --quiet -- .gitignore
+echo "Notes" >"$other_clone/scripts/hooks/notes.txt"
+expect_block Bash "cd '$other_clone' && scripts/configure-github" "$unlike_main"
+rm "$other_clone/scripts/hooks/notes.txt"
+TEST_SCRIPTS_TREE=fail expect_block Bash scripts/configure-github "$cannot_compare"
+git init --quiet "$other_clone/scripts/vendor"
+expect_block Bash "cd '$other_clone' && scripts/configure-github" "$cannot_compare"
+rm -rf "$other_clone/scripts/vendor"
+mkdir "$other_clone/copy"
+cp -R "$other_clone/scripts" "$other_clone/copy/"
+expect_block Bash "cd '$other_clone/copy' && scripts/configure-github" "$cannot_compare"
+rm -rf "$other_clone/copy"
 
 # A check of the script's syntax runs nothing, unless a later flag turns -n off again.
 TEST_RULESETS=main
@@ -199,23 +254,29 @@ for command in 'bash --rcfile scripts/configure-github -i' 'bash --init-file scr
 done
 
 # A run of scripts/configure-github on another repository, whose settings count instead of those of the repository
-# that the hook runs in
-runs_on_the_other=(
+# that the hook runs in. Before the settings of the other were applied, a run of its clone's script as a command of its
+# own goes through, and a run with a word before the script is blocked, as in any checkout.
+runs_in_the_other_clone=(
   "cd '$other_clone' && scripts/configure-github"
   "cd '${other_clone%/*}' && cd ${other_clone##*/} && scripts/configure-github"
   "cd ~/test-repositories/other && scripts/configure-github"
   "cd ~ && cd test-repositories/other && scripts/configure-github"
   "cd \"\$HOME/test-repositories/other\" && scripts/configure-github"
+)
+runs_with_words_on_the_other=(
   "cd ../home/test-repositories/other && bash scripts/configure-github"
   "GH_REPO=jtmpl/other scripts/configure-github"
   "env GH_REPO=jtmpl/other scripts/configure-github"
 )
 TEST_RULESETS=main TEST_OTHER_RULESETS=none
-for command in "${runs_on_the_other[@]}"; do
+for command in "${runs_in_the_other_clone[@]}"; do
   expect_allow Bash "$command"
 done
+for command in "${runs_with_words_on_the_other[@]}"; do
+  expect_block Bash "$command" "$not_alone"
+done
 TEST_RULESETS=none TEST_OTHER_RULESETS=main
-for command in "${runs_on_the_other[@]}"; do
+for command in "${runs_in_the_other_clone[@]}" "${runs_with_words_on_the_other[@]}"; do
   expect_block Bash "$command" "$second_run"
 done
 # Only a cd before the script, outside a subshell, changes the folder that the script runs in, and only one that the
@@ -227,13 +288,22 @@ expect_block Bash "folder=\$(cd '$other_clone' && pwd) && scripts/configure-gith
 for wrapper in env "timeout 10" "nice -n 5" nohup "stdbuf -oL" xargs /usr/bin/time "FOO=1 time"; do
   expect_block Bash "$wrapper cd '$other_clone' && scripts/configure-github" "$second_run"
 done
+TEST_RULESETS=none TEST_OTHER_RULESETS=main
 for wrapper in builtin "FOO=1 builtin"; do
-  expect_allow Bash "$wrapper cd '$other_clone' && scripts/configure-github"
+  expect_block Bash "$wrapper cd '$other_clone' && scripts/configure-github" "$second_run"
 done
 # time -o names the file that time writes to, so GH_REPO=jtmpl/other sets no variable there.
+TEST_RULESETS=main TEST_OTHER_RULESETS=none
 expect_block Bash "time -o GH_REPO=jtmpl/other scripts/configure-github" "$second_run"
-# gh can't name the repository of a folder that isn't a clone.
-expect_allow Bash "cd '$folders' && scripts/configure-github"
+
+# A run while gh can't name the repository, as in a folder that isn't a clone, or can't read its rulesets
+expect_block Bash "cd '$folders' && scripts/configure-github" "$cannot_name"
+test_cwd=$folders expect_block_behind_wrappers scripts/configure-github "$cannot_name"
+TEST_RULESETS=fail
+for command in "${runs_of_the_script[@]}"; do
+  expect_block Bash "$command" "$cannot_read_rulesets"
+done
+expect_block_behind_wrappers scripts/configure-github "$cannot_read_rulesets"
 
 # A run of scripts/configure-github in a folder that the hook can't tell
 cannot_tell="Blocked: can't tell which repository scripts/configure-github would change. Clone the repository first. Then run cd <folder> && scripts/configure-github as a command of its own, with the folder written out."
@@ -261,9 +331,7 @@ done
 # applied. It runs the main checkout's script in the main checkout, while the checkout's scripts folder is the same as
 # on main on GitHub.
 orchestrator=11111111-aaaa-4bbb-8ccc-000000000001
-not_alone="Blocked: the orchestrator runs scripts/configure-github again only in the main checkout, as a command of its own, without a word before it, such as a variable, env, timeout or bash, and without a redirection: cd $main_checkout && scripts/configure-github."
-unlike_main="Blocked: the orchestrator runs scripts/configure-github again only while the main checkout's scripts folder, with its untracked files, and its .gitignore are the same as on main on GitHub, because a reviewer read each change to them before it merged. Bring the main checkout up to date with git fetch origin && git merge --ff-only origin/main, undo any other change to its .gitignore and its scripts folder, remove any new file in the folder, also a .gitignore that ignores itself, and run the script again."
-cannot_compare="Blocked: this hook can't compare the main checkout's scripts folder and .gitignore with the ones on main on GitHub, because gh or git failed, or the folder holds a repository of its own. Check that gh can reach GitHub, remove any repository inside the folder, and try again."
+outside_main_checkout="Blocked: the orchestrator runs scripts/configure-github again only in the main checkout, as a command of its own, without a word before it, such as a variable, env, timeout or bash, and without a redirection: cd $main_checkout && scripts/configure-github."
 TEST_RULESETS=main TEST_OTHER_RULESETS=main
 # Without a state file, or with one that names no session, no session is the orchestrator's.
 expect_from "$orchestrator" "" scripts/configure-github 2 "$second_run"
@@ -290,20 +358,14 @@ for wrapper in "${wrappers[@]}"; do
   test_cwd=$worktree expect_from builder-1 "" "$wrapper scripts/configure-github" 2 "$second_run"
 done
 
-# The orchestrator's run of another checkout's script, in another folder or on another repository, or with words,
-# redirections or other commands that could run other code or change the files that the run reads after the hook
-# compared them, such as BASH_ENV, which bash runs first, and PATH, which can swap gh, jq or git
-test_cwd=$worktree expect_from "$orchestrator" "" scripts/configure-github 2 "$not_alone"
-for command in "cd '$worktree' && scripts/configure-github" "'$worktree/scripts/configure-github'" \
-  "env -C '$worktree' scripts/configure-github" "GH_REPO=jtmpl/project scripts/configure-github" \
-  "GH_REPO=jtmpl/other scripts/configure-github" "cd '$other_clone' && scripts/configure-github" \
-  "bash scripts/configure-github" "env GH_DEBUG=1 scripts/configure-github" "bash --rcfile scripts/configure-github -i" \
-  "BASH_ENV=/tmp/x.sh scripts/configure-github" "env BASH_ENV=/tmp/x.sh scripts/configure-github" \
-  "PATH=/tmp/dir:\$PATH scripts/configure-github" "scripts/configure-github 2>scripts/admin-access" \
-  "scripts/configure-github >configure.log 2>&1" "cd . >scripts/admin-access && scripts/configure-github" \
-  "cp '$worktree/scripts/configure-github' scripts/ && scripts/configure-github" \
-  "scripts/configure-github | tail -n 5" "scripts/configure-github & git switch --quiet work" \
-  "timeout 10m scripts/configure-github"; do
+# The orchestrator's run in another folder, also on another repository, and a run that the hook blocks from any
+# session, as runs_not_alone lists them
+test_cwd=$worktree expect_from "$orchestrator" "" scripts/configure-github 2 "$outside_main_checkout"
+for command in "cd '$worktree' && scripts/configure-github" "env -C '$worktree' scripts/configure-github" \
+  "cd '$other_clone' && scripts/configure-github"; do
+  expect_from "$orchestrator" "" "$command" 2 "$outside_main_checkout"
+done
+for command in "${runs_not_alone[@]}"; do
   expect_from "$orchestrator" "" "$command" 2 "$not_alone"
 done
 for wrapper in "${wrappers[@]}"; do
