@@ -418,14 +418,14 @@ if command -v uv >/dev/null; then
       >>"$repository/.loop/meter.jsonl"
   }
   # An earlier builder ran 30 minutes, so a builder's long run takes 30 minutes. At the reading, the subagent r1 had run
-  # 1 minute, so it still needs 29, or 7.25 points, and the builder r2 of scripts/loop/run-builder had run 20, so it
-  # still needs 2.5 points. Until an agent with a note ends, a hand-off takes 10 minutes, or 2.5 points.
+  # 1 minute, so it still needs 29, or 7.25 points, and the builder r2 of scripts/loop/run-builder had run 15, so it
+  # still needs 15, or 3.75 points. Until an agent with a note ends, a hand-off takes 10 minutes, or 2.5 points.
   run_builder=88888888-aaaa-4bbb-8ccc-000000000008
   {
     jq -c -n --arg at "$(at -180)" '{at: $at, event: "start", id: "toolu_09", type: "builder", account: "claude"}'
     jq -c -n --arg at "$(at -150)" '{at: $at, event: "end", id: "toolu_09", minutes: 30}'
     jq -c -n --arg at "$(at -2)" '{at: $at, event: "start", id: "toolu_r1", type: "builder", account: "claude"}'
-    jq -c -n --arg at "$(at -21)" '{at: $at, event: "start", id: "r2-20261020", type: "builder", account: "claude"}'
+    jq -c -n --arg at "$(at -16)" '{at: $at, event: "start", id: "r2-20261020", type: "builder", account: "claude"}'
   } >"$repository/.loop/agents.jsonl"
   mkdir -p "$projects/$orchestrator/subagents"
   echo '{"agentType": "builder", "toolUseId": "toolu_r1", "spawnDepth": 1}' \
@@ -435,12 +435,12 @@ if command -v uv >/dev/null; then
   room_soon="Your account's usage limit leaves too little room for all its agents to finish, and you're among those with the most work left. Hand off your work at your next stopping point, so that a fresh agent continues it."
   room_now="Your account's usage limit leaves its agents only the room to hand off. Hand off your work as soon as the step you're on ends, so that a fresh agent continues it."
 
-  add_reading 90.25
+  add_reading 89
   run_hook "$orchestrator" r1
   expect_note "While the room covers what every agent still needs" ""
   run_hook "$run_builder" "" LOOP_HAND_OFF=builder LOOP_RUN=r2-20261020
   expect_note "For a builder of scripts/loop/run-builder, while the room covers what every agent still needs" ""
-  add_reading 90.5
+  add_reading 89.25
   run_hook "$run_builder" "" LOOP_HAND_OFF=builder LOOP_RUN=r2-20261020
   expect_note "For the agent that needs less, once the room doesn't cover what every agent still needs" ""
   run_hook "$orchestrator" r1
@@ -452,7 +452,7 @@ if command -v uv >/dev/null; then
   add_reply "$orchestrator" r1 410000
   run_hook "$orchestrator" r1
   expect_note "Past 400k tokens, after the note about the room" ""
-  add_reading 94.75
+  add_reading 93.75
   run_hook "$run_builder" "" LOOP_HAND_OFF=builder LOOP_RUN=r2-20261020
   expect_note "For the agent that needs less, while the room covers its need and the other's hand-off" ""
   add_reading 95
@@ -473,12 +473,12 @@ if command -v uv >/dev/null; then
   mkdir "$notes"
   touch "$notes/r1.400000"
   add_reply "$orchestrator" r1 100000
-  add_reading 90.5
+  add_reading 89.25
   run_hook "$orchestrator" r1
   expect_note "After the note to hand off at the next stopping point about the context" ""
   add_reply "$orchestrator" r1 410000
   rm "$notes/r1.400000"
-  add_reading 90.25
+  add_reading 89
   run_hook "$orchestrator" r1
   expect_note "Past 400k tokens, while the room covers what every agent needs" "$soon $how"
   expect_note_text "For a note about the context" r1.400000 toolu_r1

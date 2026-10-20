@@ -86,6 +86,8 @@ on.
   - after the step it's on: once its context passes 500k tokens, or once its account's room is down to what the
     account's agents need to hand off
 
+  An agent that would finish before a hand-off would end gets no note about its account's room.
+
   When an agent reports that it handed off its work, start a new agent of the same type to take over, and give it a
   message, as the start of "Work through the cycle" describes:
   - For a builder, the auditor or a researcher, give the new agent the link to the hand-off comment. For a builder or

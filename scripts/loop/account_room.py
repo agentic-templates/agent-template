@@ -234,9 +234,12 @@ def hand_off_note(
     reading_time: dt.datetime,
     hand_offs: HandOffs,
 ) -> str | None:
-    """The note to hand off its work that an agent of the account gets, if any. Every agent gets HAND_OFF_NOW once the
-    room is down to what the agents need to hand off. Before then, an agent gets HAND_OFF_SOON when it is among those
-    that agents_to_hand_off picks."""
+    """The note to hand off its work that an agent of the account gets, if any. An agent that would finish no later than
+    a hand-off would end gets none. Every other agent gets HAND_OFF_NOW once the room is down to what the agents need to
+    hand off. Before then, an agent gets HAND_OFF_SOON when it is among those that agents_to_hand_off picks."""
+    finishing = {agent.id for agent in room.running if finishes_before_hand_off(agent, runs, hand_offs.minutes)}
+    if agent_id in finishing:
+        return None
     if is_down_to_hand_offs(room, reading_time, hand_offs.minutes):
         return HAND_OFF_NOW
     if agent_id in agents_to_hand_off(room, runs, reading_time, hand_offs):
@@ -259,7 +262,8 @@ def agents_to_hand_off(
     """The agents that hand off at their next stopping point, so that the room covers what the rest still need. They
     are those that still run, picked one at a time, the one that still needs the most minutes first, until the room
     covers the rest. Of two that need the same, the one that has run for less time goes first, because it loses less
-    work. An agent that hands off needs only the time that a hand-off takes, and one that was told to already does."""
+    work. An agent that would finish no later than a hand-off would end isn't picked. An agent that hands off needs only
+    the time that a hand-off takes, and one that was told to already does."""
     handing_off = frozenset(hand_offs.told)
     picked: list[str] = []
     for agent in sorted(room.running, key=lambda agent: (-minutes_left(agent, runs), agent.minutes)):
@@ -267,9 +271,17 @@ def agents_to_hand_off(
             break
         if agent.id is None or agent.id not in hand_offs.running or agent.id in handing_off:
             continue
+        if finishes_before_hand_off(agent, runs, hand_offs.minutes):
+            continue
         picked.append(agent.id)
         handing_off |= {agent.id}
     return picked
+
+
+def finishes_before_hand_off(agent: Running, runs: dict[str, list[float]], hand_off_minutes: float) -> bool:
+    """Whether an agent would finish no later than a hand-off would end, so that a hand-off would only take it longer and
+    leave its work for another agent."""
+    return minutes_left(agent, runs) <= hand_off_minutes
 
 
 def hand_off_minutes(notes: dict[str, dt.datetime], ends: dict[str, dt.datetime]) -> float:

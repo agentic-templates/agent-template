@@ -8,8 +8,9 @@ from test_meter import NOW, MeterTest, meters
 
 class HandOffTest(MeterTest):
     """At the reading, the builder a has run 1 minute of a builder's 30, so it still needs 29, or 7.25 points at 0.25
-    points a minute, and the builder b has run 20, so it still needs 2.5 points. Until an agent with a note of
-    scripts/hooks/hand-off ends, a hand-off takes 10 minutes, or 2.5 points."""
+    points a minute, and the builder b has run 20, so it still needs 10, or 2.5 points. Until an agent with a note of
+    scripts/hooks/hand-off ends, a hand-off takes 10 minutes, or 2.5 points, so b would finish no later than its
+    hand-off would end, and gets no note."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -59,7 +60,7 @@ class HandOffTest(MeterTest):
         self.reading(90.5)
         self.assertEqual(self.notes(), ["soon", "none"])
         self.reading(95.0)
-        self.assertEqual(self.notes(), ["now", "now"])
+        self.assertEqual(self.notes(), ["now", "none"])
         self.assertFalse((self.standins / "calls.jsonl").exists())
 
     def test_gives_no_note_from_a_reading_more_than_60_minutes_old(self) -> None:
@@ -99,6 +100,6 @@ class HandOffTest(MeterTest):
         self.note("agent-earlier.400000", "earlier", NOW - dt.timedelta(hours=3))
         self.note("agent-earlier.500000", "earlier", NOW - dt.timedelta(hours=2, minutes=50))
         self.reading(90.0)
-        self.assertEqual(self.notes(), ["now", "now"])
+        self.assertEqual(self.notes(), ["now", "none"])
         self.reading(89.75)
         self.assertEqual(self.notes(), ["none", "none"])

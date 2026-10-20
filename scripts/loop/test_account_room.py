@@ -187,6 +187,17 @@ class HandOffNoteTest(unittest.TestCase):
         running = [account_room.Running("builder", 25.0, "a1"), account_room.Running("reviewer", 5.0, "a2")]
         self.assertEqual(notes(hand_off_room(97.75, running=running)), {"a1": None, "a2": "soon"})
 
+    def test_gives_no_note_to_an_agent_that_would_finish_no_later_than_a_hand_off_would_end(self) -> None:
+        # At 0.1 of its time, the orchestrator needs 3 points, so a room of 4 points can't cover the agents even when a1
+        # hands off. A builder that has run 26 minutes needs 4 more, as long as a hand-off, and one that has run 25
+        # needs 5.
+        finishing = [account_room.Running("builder", 0.0, "a1"), account_room.Running("builder", 26.0, "a2")]
+        self.assertEqual(notes(hand_off_room(96.0, share=0.1, running=finishing)), {"a1": "soon", "a2": None})
+        not_finishing = [account_room.Running("builder", 0.0, "a1"), account_room.Running("builder", 25.0, "a2")]
+        self.assertEqual(notes(hand_off_room(96.0, share=0.1, running=not_finishing)), {"a1": "soon", "a2": "soon"})
+        # The hand-offs of the 2 agents and of the orchestrator at its share take 2.1 points.
+        self.assertEqual(notes(hand_off_room(98.0, share=0.1, running=finishing)), {"a1": "now", "a2": None})
+
     def test_counts_only_the_usage_before_the_reset(self) -> None:
         room = hand_off_room(89.0)
         room.meters["session"]["resets"] = (NOW + dt.timedelta(minutes=20)).isoformat()
