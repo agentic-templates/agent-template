@@ -447,6 +447,25 @@ read_arguments() {
   target+=(${repository[@]+"${repository[@]}"})
 }
 
+# Sets name_with_owner to owner/name of a repository as gh or git names it: owner/name, host/owner/name, a URL such as
+# https://github.com/owner/name/issues/5, or an address such as git@github.com:owner/name.git:
+# read_name_with_owner <repository>
+read_name_with_owner() {
+  local name=$1 owner
+  if [[ $name =~ ^[A-Za-z][A-Za-z0-9+.-]*://[^/]+/([^/]+/[^/]+) ]]; then
+    name=${BASH_REMATCH[1]}
+  elif [[ $name =~ ^[^/]+:(.+)$ ]]; then
+    name=${BASH_REMATCH[1]}
+  fi
+  name=${name%/}
+  name=${name%.git}
+  if [[ $name == */*/* ]]; then
+    owner=${name%/*}
+    name=${owner##*/}/${name##*/}
+  fi
+  name_with_owner=$name
+}
+
 # Succeeds if the gh command in command_words gives --help a true value last, so that it only prints its help. gh reads
 # the value as is_true_flag_value does. -h doesn't count, because gh repo create and gh repo edit read it as --homepage.
 # gh reads the word after a flag that takes a value as that value, as in --description --help. The hook doesn't know
@@ -671,6 +690,42 @@ read_help_flag() {
   fi
 }
 
+# Reads the text that a gh command gives from command_words, from its fourth word on: read_text <flags that take a value>
+# It sets title to the value of --title, or of the --subject of gh pr merge, and has_title to yes when the command gives
+# one, whose value can be empty. It sets body_source, body_word and body_file for read_body, from --body, --body-file,
+# --comment, or the --notes and --notes-file of gh release, and records expansion syntax in each checked field. It fails
+# when the command asks for help, because gh then posts nothing. Only a flag that takes a value gives text, so the -c of
+# gh pr review, which takes none, gives none.
+read_text() {
+  local flags_with_value=$1 i word flag value value_is_next_word flags_before asks_for_help=""
+  title="" has_title="" title_may_expand="" body_source="" body_word="" body_file="" body_may_expand=""
+  for ((i = 3; i < ${#command_words[@]}; i++)); do
+    word=${command_words[i]}
+    case $word in
+      -*) split_flag_word "$word" "$flags_with_value" ;;
+      *) continue ;;
+    esac
+    if stops_for_help; then
+      return 1
+    fi
+    read_help_flag
+    if [[ $flags_with_value != *" $flag "* ]]; then
+      continue
+    fi
+    if [[ -n $value_is_next_word ]]; then
+      i=$((i + 1))
+      value=${command_words[i]:-}
+    fi
+    case $flag in
+      -t | --title | --subject) title=$value has_title=yes title_may_expand=${command_word_may_expand[i]:-} ;;
+      -b | --body | -n | --notes) body_source=text body_word=$value body_may_expand=${command_word_may_expand[i]:-} ;;
+      -c | --comment) body_source=comment body_word=$value body_may_expand=${command_word_may_expand[i]:-} ;;
+      -F | --body-file | --notes-file) body_source=file body_file=$value ;;
+    esac
+  done
+  [[ -z $asks_for_help ]]
+}
+
 # Reads the flags of a gh pr command from command_words, from its fourth word on, and fails when the command shows its
 # help or does a dry run: read_pull_request_flags <flags that take a value>
 # gh issue create and gh issue edit give a body with the same flags, so unread-bodies.check reads theirs with it too.
@@ -813,27 +868,29 @@ read_body_file() {
   body=$(<"$path")
 }
 
-give_the_body="Give the body with --body, or write it to a file and give the file with --body-file."
-
-# Sets body to the text that a gh command gives, and body_may_expand to yes for active expansion syntax in it.
-# Blocks when the hook can't read the body: read_body <what the hook checks, such as: the issue's headings>
-# It reads the body as the command writes it, without running $( ) or filling in variables: from --body or --comment,
-# from the file that --body-file names, or from a here-document. It blocks a body that a command in $( ) or backticks
-# prints, unless the command is cat alone, reading a here-document, because the hook would check the command's text in
-# place of the body. It reads what the check found in the command's words: body_source (empty, text, comment or file),
-# body_word, body_file and body_may_expand, as the array words_may_expand of visit_simple_commands holds it. Run it
-# from a function that for_each_simple_command calls.
+# Sets body to the text that a command gives, such as gh issue create or git commit, and body_may_expand to yes for
+# active expansion syntax in it. Blocks when the hook can't read the body:
+# read_body <what the hook checks, such as: the issue's headings> [<flag that gives the body> <flag that gives its file>]
+# The messages name the flags, --body and --body-file unless the command has others, such as -m and -F of git commit.
+# It reads the body as the command writes it, without running $( ) or filling in variables: from a flag such as --body
+# or --comment, from the file that a flag such as --body-file names, or from a here-document. It blocks a body that a
+# command in $( ) or backticks prints, unless the command is cat alone, reading a here-document, because the hook would
+# check the command's text in place of the body. It reads what the check found in the command's words: body_source
+# (empty, text, comment or file), body_word, body_file and body_may_expand, as the array words_may_expand of
+# visit_simple_commands holds it. Run it from a function that for_each_simple_command calls.
 read_body() {
+  local file_flag=${3:---body-file}
+  local give_the_body="Give the body with ${2:---body}, or write it to a file and give the file with $file_flag."
   body=""
   case $body_source in
     "")
       block "Blocked: the command gives no body, so this hook can't check $1. $give_the_body"
       ;;
-    text | comment) read_body_word "$1" ;;
+    text | comment) read_body_word "$1" "$file_flag" ;;
     file)
       body_may_expand=""
       if [[ $body_file == - ]]; then
-        read_body_input "$1"
+        read_body_input "$1" "$give_the_body"
       else
         read_body_file "$body_file"
       fi
@@ -841,8 +898,8 @@ read_body() {
   esac
 }
 
-# Sets body to the text of --body or --comment, or blocks when a command in $( ) or backticks prints the text:
-# read_body_word <what the hook checks>
+# Sets body to the text of a flag such as --body or --comment, or blocks when a command in $( ) or backticks prints the
+# text: read_body_word <what the hook checks> <flag that gives the body's file>
 # A here-document in the word, as in "$(cat <<'EOF' ... EOF)", gives its text in place of the substitution.
 read_body_word() {
   local rest=$body_word number
@@ -851,7 +908,7 @@ read_body_word() {
     if [[ $body_source == comment ]]; then
       block "Blocked: this hook can't run the command in \$( ) or backticks that prints the comment, so it can't check the comment. Give the comment in quotes, or from a here-document, as in --comment \"\$(cat <<'EOF' ... EOF)\"."
     fi
-    block "Blocked: this hook can't run the command in \$( ) or backticks that prints the body, so it can't check $1. Write the body to a file in a command of its own first, and give the file with --body-file."
+    block "Blocked: this hook can't run the command in \$( ) or backticks that prints the body, so it can't check $1. Write the body to a file in a command of its own first, and give the file with $2."
   fi
   if [[ ! $body_word =~ $heredoc_reference ]]; then
     body=$body_word
@@ -865,8 +922,8 @@ read_body_word() {
   done
 }
 
-# Sets body to the text that a gh command reads from standard input, from a here-document or from a file, or blocks
-# when the hook can't read it: read_body_input <what the hook checks>
+# Sets body to the text that a command reads from standard input, from a here-document or from a file, or blocks when
+# the hook can't read it: read_body_input <what the hook checks> <how to give the body instead>
 read_body_input() {
   local i
   for ((i = 0; i < ${#redirections[@]}; i += 2)); do
@@ -879,7 +936,7 @@ read_body_input() {
       return 0
     fi
   done
-  block "Blocked: this hook can't read a body from standard input, other than from a here-document, so it can't check $1. $give_the_body"
+  block "Blocked: this hook can't read a body from standard input, other than from a here-document, so it can't check $1. $2"
 }
 
 add_heredoc_to_body() {

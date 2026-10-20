@@ -534,25 +534,6 @@ check_git_push() {
   fi
 }
 
-# Sets name_with_owner to owner/name of a repository as gh or git names it: owner/name, host/owner/name, a URL such as
-# https://github.com/owner/name/issues/5, or an address such as git@github.com:owner/name.git:
-# read_name_with_owner <repository>
-read_name_with_owner() {
-  local name=$1 owner
-  if [[ $name =~ ^[A-Za-z][A-Za-z0-9+.-]*://[^/]+/([^/]+/[^/]+) ]]; then
-    name=${BASH_REMATCH[1]}
-  elif [[ $name =~ ^[^/]+:(.+)$ ]]; then
-    name=${BASH_REMATCH[1]}
-  fi
-  name=${name%/}
-  name=${name%.git}
-  if [[ $name == */*/* ]]; then
-    owner=${name%/*}
-    name=${owner##*/}/${name##*/}
-  fi
-  name_with_owner=$name
-}
-
 # Succeeds if the list of allowed repositories names a repository, in any case. HOOK_ALLOWED_REPOSITORIES names another
 # list, as in the hooks' tests: is_allowed <repository>
 is_allowed() {

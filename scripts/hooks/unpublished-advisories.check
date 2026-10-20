@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# Blocks the commands that would post the GHSA ID of one of this repository's security advisories that isn't published,
+# closed or withdrawn, such as GHSA-2c5x-3m4v-7q8r, because the ID stays private until the advisory is published, and
+# GitHub keeps the text of an issue or a comment in its edit history after an edit takes the ID out. The commands and
+# their text are:
+# - the title and body of gh issue create, its alias gh issue new, gh issue edit, gh pr create, its alias gh pr new,
+#   and gh pr edit
+# - the body of gh issue comment, gh pr comment and gh pr review
+# - the comment that -c or --comment gives to gh issue close, gh issue reopen, gh pr close and gh pr reopen
+# - the subject and body of the commit that gh pr merge makes
+# - the title and notes of gh release create, its alias gh release new, and gh release edit
+# - each message and trailer that -m, --message, -F, --file and --trailer give git commit
+# It reads the text as read_text and read_body in helpers.bash read it, as the command writes it, without running $( )
+# or filling in variables. It finds an ID in any case, because the name of an advisory's private fork holds the ID in
+# lower case. It asks GitHub about each ID that it finds, so a command without one asks nothing. When GitHub answers that
+# the repository has no advisory of that ID, the hook allows the ID. GitHub answers so for an advisory of another
+# repository, such as one that Dependabot names, and also for one that gh's account may not see. When gh fails in
+# another way, such as without a network, the hook blocks the command, because it can't tell whether the ID is private.
+# It allows a gh command whose -R or --repo names the advisory's private fork, because the fork is private too. A commit
+# message counts in any repository, because step 3 of "Fix a security vulnerability" in docs/releasing.md pushes the
+# fork's commits to origin before the advisory is published. A command that posts to the advisory itself, such as gh api
+# with the advisory's endpoint, goes ahead, because the hook reads no gh api command.
+# shellcheck source=scripts/hooks/helpers.bash
+source "${BASH_SOURCE[0]%/*}/helpers.bash"
+
+# The flags that take a value, as gh release create --help, gh release edit --help and git commit -h list them. git
+# reads the value of -S and -u only from the same word, as in -Skey, so the list of git commit leaves them out.
+release_create_flags_with_value=" --discussion-category -n --notes -F --notes-file --notes-start-tag --target -t --title -R --repo "
+release_edit_flags_with_value=" --discussion-category -n --notes -F --notes-file --tag --target -t --title -R --repo "
+commit_flags_with_value=" -F --file --author --date -m --message -c --reedit-message -C --reuse-message --fixup --squash --trailer -t --template --cleanup -U --unified --inter-hunk-context --pathspec-from-file "
+
+# A GHSA ID in any case. GitHub writes GHSA in capitals and the rest in lower case.
+ghsa_id='[Gg][Hh][Ss][Aa]-[0-9A-Za-z]{4}-[0-9A-Za-z]{4}-[0-9A-Za-z]{4}'
+
+what_is_checked="the text for the IDs of security advisories that aren't published"
+
+# Adds the title and body that a gh command gives to posted_text, and sets destination to the repository that its -R or
+# --repo names, or to empty: read_gh_text <flags that take a value> [<flag that gives the body> <flag that gives its file>]
+read_gh_text() {
+  if ! read_text "$1"; then
+    return 0
+  fi
+  if [[ -n $has_title ]]; then
+    posted_text+=$title$'\n'
+  fi
+  if [[ -n $body_source ]]; then
+    read_body "$what_is_checked" "${@:2}"
+    posted_text+=$body$'\n'
+  fi
+  read_arguments 3 "$1"
+  destination=${repository[1]:-}
+}
+
+# Adds the text that the gh command in command_words posts to posted_text, as read_gh_text reads it.
+read_gh_command_text() {
+  case "${command_words[1]:-} ${command_words[2]:-}" in
+    "issue create" | "issue new") read_gh_text "$issue_create_flags_with_value" ;;
+    "issue edit") read_gh_text "$issue_edit_flags_with_value" ;;
+    "issue comment" | "pr comment") read_gh_text "$comment_flags_with_value" ;;
+    "pr review") read_gh_text "$review_flags_with_value" ;;
+    "issue close") read_gh_text "$issue_close_flags_with_value" ;;
+    "pr close") read_gh_text "$pr_close_flags_with_value" ;;
+    "issue reopen" | "pr reopen") read_gh_text "$reopen_flags_with_value" ;;
+    "pr create" | "pr new") read_gh_text "$pr_create_flags_with_value" ;;
+    "pr edit") read_gh_text "$pr_edit_flags_with_value" ;;
+    "pr merge") read_gh_text "$merge_flags_with_value" ;;
+    "release create" | "release new") read_gh_text "$release_create_flags_with_value" --notes --notes-file ;;
+    "release edit") read_gh_text "$release_edit_flags_with_value" --notes --notes-file ;;
+  esac
+}
+
+# Adds each message and trailer that a git commit command in command_words gives to posted_text.
+read_commit_message() {
+  local i word flag value value_is_next_word flags_before
+  read_git_options
+  if [[ ${command_words[git_subcommand]:-} != commit ]]; then
+    return 0
+  fi
+  for ((i = git_subcommand + 1; i < ${#command_words[@]}; i++)); do
+    word=${command_words[i]}
+    case $word in
+      --) return 0 ;;
+      -*) split_flag_word "$word" "$commit_flags_with_value" ;;
+      *) continue ;;
+    esac
+    if [[ -n $value_is_next_word ]]; then
+      i=$((i + 1))
+      value=${command_words[i]:-}
+    fi
+    case $flag in
+      -m | --message | --trailer) body_source=text body_word=$value body_may_expand=${command_word_may_expand[i]:-} ;;
+      -F | --file) body_source=file body_file=$value ;;
+      *) continue ;;
+    esac
+    read_body "$what_is_checked" -m -F
+    posted_text+=$body$'\n'
+  done
+}
+
+# Sets advisory_state to the state of the advisory of an ID in this repository, and advisory_fork to the full name of
+# its private fork, or to empty when it has none. Fails when GitHub has no such advisory, and blocks the command when gh
+# fails in another way: read_advisory <ID as the text writes it> <ID as GitHub writes it>
+read_advisory() {
+  local answer
+  # gh finds the repository from the folder it runs in, as scripts/record-vulnerability does when it opens an advisory.
+  if answer=$(cd -- "$hooks_folder" && gh api "repos/{owner}/{repo}/security-advisories/$2" \
+    --jq '[.state, (.private_fork.full_name // "")] | @tsv' 2>&1); then
+    # The fork comes last, because it can be empty, and read joins the tabs around an empty field.
+    IFS=$'\t' read -r advisory_state advisory_fork <<<"$answer"
+    return 0
+  fi
+  if [[ $answer == *"(HTTP 404)"* ]]; then
+    return 1
+  fi
+  block "Blocked: this hook can't tell whether $1 is the ID of a security advisory of this repository that isn't published yet. Write the text without the ID, or run the command again once gh works. gh failed: $answer"
+}
+
+# Succeeds if the gh command's -R or --repo names a repository, in any case: posts_to <owner/name>
+posts_to() {
+  local result=1
+  read_name_with_owner "$destination"
+  shopt -s nocasematch
+  if [[ -n $destination && $name_with_owner == "$1" ]]; then
+    result=0
+  fi
+  shopt -u nocasematch
+  return "$result"
+}
+
+# Blocks the command when posted_text holds the ID of an advisory of this repository that isn't published, closed or
+# withdrawn, unless the command posts to the advisory's private fork.
+check_advisory_ids() {
+  local rest=$posted_text found id
+  while [[ $rest =~ $ghsa_id ]]; do
+    found=${BASH_REMATCH[0]}
+    rest=${rest#*"$found"}
+    id=GHSA-$(tr '[:upper:]' '[:lower:]' <<<"${found:5}")
+    if ! read_advisory "$found" "$id"; then
+      continue
+    fi
+    case $advisory_state in
+      published | closed | withdrawn) continue ;;
+    esac
+    if posts_to "$advisory_fork"; then
+      continue
+    fi
+    block "Blocked: this command would post $found, the ID of a security advisory of this repository that isn't published yet. Write the text without the ID, and run the command again."
+  done
+}
+
+# Blocks the gh or git command in command_words when it would post the ID of an advisory that isn't published. A
+# relative path to a body file starts from the folder that the command runs in, as follow_cd in helpers.bash finds it,
+# so the hook allows the command after a cd to a folder that it can't tell.
+check_posted_text() {
+  if [[ -z $command_folder ]] || ! cd -- "$command_folder" 2>/dev/null; then
+    return 0
+  fi
+  posted_text="" destination=""
+  case ${command_words[0]##*/} in
+    gh) read_gh_command_text ;;
+    git) read_commit_message ;;
+  esac
+  check_advisory_ids
+}
+
+check_simple_command() {
+  record_written_files
+  drop_command_prefixes "$@"
+  move_flags_after_gh_subcommand
+  if ((${#command_words[@]} == 0)); then
+    return 0
+  fi
+  check_posted_text
+  follow_cd
+}
+
+read_input
+if [[ $tool_name == Bash ]]; then
+  # The folder the agent works in. Cursor doesn't send it, so for Cursor the hook's own folder counts.
+  command_folder=${cwd:-$PWD}
+  written_files=()
+  for_each_simple_command check_simple_command "$shell_command"
+fi
