@@ -3,7 +3,7 @@
 ## Review a pull request
 
 - Compare the change with its issue's "Done when" list and the definition of done in AGENTS.md.
-- Report only errors: wrong behavior, a missing test, a security problem, or text or code that breaks AGENTS.md or a guide in `docs/`. Don't ask for changes that a formatter would make, or for work outside the issue.
+- Report only errors: wrong behavior, a missing test, a security problem, or text or code that breaks AGENTS.md or a guide in `docs/`. Such text includes each sentence that the pull request adds to AGENTS.md, the README, a guide, an agent type in `.claude/agents` or the pull request's description, and that breaks `docs/writing.md`, `docs/pages.md` or `docs/rules.md`. Don't ask for changes that a formatter would make, or for work outside the issue.
 - Give each error a case that shows it, such as an input and the wrong result it gives, or a sentence and the rule it breaks. Then say what to change and why. For a security problem, leave out the case, and describe the problem as AGENTS.md says.
 - For each security problem that you report and that main has too, say whether it's a vulnerability, as "Record a vulnerability privately" in `docs/releasing.md` defines one. Record each vulnerability that isn't public yet as that section describes, and give its GHSA ID in your report.
 - If a maintainer opened the pull request and you need to run its code, such as to check a case, check it out in the worktree that you start in, never in the main checkout:
