@@ -64,7 +64,8 @@ KIND = re.compile(r"research|parent|other|left behind [1-9][0-9]*")
 # The line that scripts/take-next-issue printed, such as 12 other, or a pull request's number alone.
 SUBJECT = re.compile(rf"([1-9][0-9]*)(?: ({KIND.pattern}))?")
 BYTES_IN_A_MEGABYTE = 1_000_000
-# The environment variable that scripts/loop/run-builder sets for the builders that it runs
+# The environment variable that scripts/loop/run-builder sets for the builders that it runs, to the name of the run's
+# folder
 RUN_VARIABLE = "LOOP_RUN"
 
 

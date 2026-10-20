@@ -70,12 +70,16 @@ class AgentsLineTest(MeterTest):
         self.log("start", "71-20261018-021000", issue=71)
         self.builder_run("71-20261018-021000", ["not an event", call(200_000, session_id="s71")])
         self.log("start", "72-20261018-021000", issue=72)
-        self.hand_offs("a1.400000", "s64.400000", "s64.500000", "a9.400000", "t1.400000", "s71.400000", "notes.txt")
+        self.hand_offs(
+            *("a1.400000", "s64.400000", "s64.500000", "a9.400000", "t1.400000", "s71.400000", "notes.txt"),
+            *("a1.room-now", "s64.room-soon", "a9.room-soon", "s71.room-soon"),
+        )
         self.assertEqual(
             self.agents(),
-            "agents | builder #64 412k, told at 400k to hand off | Explore context unknown | "
-            "builder #64 520k, told at 500k to hand off | codex #70 context unknown | builder #71 200k | "
-            "builder #72 context unknown",
+            "agents | builder #64 412k, told at 400k to hand off, told to hand off for its account's room | "
+            "Explore context unknown | "
+            "builder #64 520k, told at 500k to hand off, told to hand off for its account's room | "
+            "codex #70 context unknown | builder #71 200k | builder #72 context unknown",
         )
 
     def test_leaves_out_the_agents_with_an_end_line(self) -> None:

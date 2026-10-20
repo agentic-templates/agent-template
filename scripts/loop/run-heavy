@@ -7,8 +7,9 @@ scripts/check, scripts/test-scripts and scripts/test-check run through it by the
 worktrees of a clone wait in one line. Each reserves the most that the same command used in its last runs on this
 machine: its cores, its memory, and on a Mac with Apple silicon its share of the GPU. A command that hasn't run yet
 reserves the most that the commands that share the most leading words with it used, the program at least, so that
-cargo test bar reserves what cargo test foo used. A command starts as soon as the machine's readings leave room for
-it, after the reservations of the commands that run and the room that the scheduler keeps free. A number that the
+cargo test bar reserves what cargo test foo used. A command starts as soon as the machine's readings show its
+reservation free, plus the room that the scheduler keeps free. A command that runs counts at its reservation until the
+script first measures its processes, and from then on at what they used when it last measured them. A number that the
 command doesn't use, such as the GPU for most commands, never keeps it waiting. The readings count the cores that were
 busy, not the load, which counts the processes that wait for the disk too. A first run, of a program that no command
 in the log ran, starts once the readings show some free cores and memory, and nothing else starts until it ends, so
@@ -363,7 +364,7 @@ def wait_measuring(
         using = sampler.sample(time.monotonic())
         with locked_state(turn.folder) as state:
             machine = reading(state, turn.folder, time.time()).machine
-            own_entry(state, turn)["using"] = using._asdict()
+            own_entry(state, turn).update(using=using._asdict(), sampled=True)
         swap = highest(swap, machine["swap_used_gb"])
     _, status, usage = ended[0]
     return status, usage, swap
@@ -415,6 +416,8 @@ def command_of(entry: dict[str, Any]) -> room.Command:
         need=need_in(entry),
         started=entry["started"],
         using=using_in(entry),
+        # The copies of this script in the worktrees of older branches write their samples without this field.
+        sampled=entry.get("sampled", False),
         # The copy of this script in a worktree of an older branch puts its commands in line without this field.
         is_retrospective=entry.get("is_retrospective", False),
     )

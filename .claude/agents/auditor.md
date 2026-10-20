@@ -53,8 +53,9 @@ docs/rules.md for a change to a rule or to an agent type's instructions.
    - what this retrospective cost in hours, and their share of all the agents' hours since the time in step 3
    - the output tokens in `OUTPUT_TOKENS_PER_RETROSPECTIVE`, and if you changed them, why, with the numbers of both
      retrospectives
-10. End with a short report to the orchestrator: the number of your pull request, what you changed, and each question
-    that only the maintainer can answer.
+10. Run `scripts/remove-ended-worktrees`, so that the worktrees of the agents that you started don't stay once they
+    end. Then end with a short report to the orchestrator: the number of your pull request, what you changed, and each
+    question that only the maintainer can answer.
 
 ## Test the agent types
 

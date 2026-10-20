@@ -40,6 +40,9 @@ class Command(NamedTuple):
     started: float | None = None
     # What its processes used at their last sample
     using: Use = NOTHING
+    # Whether using is a sample that run-heavy marked as one. An older copy of run-heavy writes zeros before its first
+    # sample, and doesn't mark its samples.
+    sampled: bool = False
     # Whether a retrospective's test build or auditor runs it
     is_retrospective: bool = False
 
@@ -172,8 +175,11 @@ def room_behind(head: Command, running: list[Command], alone: Use) -> Use:
 
 
 def counted(command: Command) -> Use:
-    """The room that a running command takes: its need, or what it uses now where that is more. So a command that just
-    started counts at its need until the readings show its use."""
+    """The room that a running command takes: what it used at its last sample, so that a command in a light step, which
+    uses less than it reserves, leaves the rest to the commands that wait. Without a marked sample, it takes its need,
+    or what it uses where that is more, so that a command that just started counts at its need."""
+    if command.sampled:
+        return command.using
     need = NOTHING if command.need is None else command.need
     return Use(*(max(needed, used) for needed, used in zip(need, command.using, strict=True)))
 

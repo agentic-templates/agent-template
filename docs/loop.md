@@ -78,8 +78,19 @@ on.
 - **Reports.** When an agent ends, read its report, and act on what it asks of you. Of the items that it lists for the
   maintainer, decide each one that "Decide or ask" in AGENTS.md lets you decide and that no hook leaves to the
   maintainer. Ask about the rest as "Ask the maintainer" below describes.
-- **Hand-offs.** When an agent reports that it handed off its work, because its context grew too long, start a new
-  agent of the same type to take over, and give it a message, as the start of "Work through the cycle" describes:
+- **Hand-offs.** `scripts/hooks/hand-off` tells a builder, the auditor, a reviewer or a researcher to hand off its
+  work:
+  - at its next stopping point: once its context passes 400k tokens, or once its account's room at the meter's latest
+    reading no longer covers what the account's running agents still need. For this note, the meter picks one agent at
+    a time, the one with the most work left first, until the room covers what the rest need.
+  - after the step it's on: once its context passes 500k tokens, or once its account's room is down to what all the
+    account's running agents need to hand off.
+
+  An agent that needs no more time to finish its work than to hand it off gets neither note about its account's room,
+  only the notes about its context.
+
+  When an agent reports that it handed off its work, start a new agent of the same type to take over, and give it a
+  message, as the start of "Work through the cycle" describes:
   - For a builder, the auditor or a researcher, give the new agent the link to the hand-off comment. For a builder or
     the auditor, first run `scripts/clear-worktrees <issue>`, so that the new agent can check out the issue's branch.
     The auditor's issue is the issue of its retrospective, whether the auditor opened it or you did. If the script exits
@@ -156,6 +167,8 @@ when "Start a focused audit" says so.
   and start it again each time it ends. When a pull request merges, the script fast-forwards `main` in the main
   checkout to `origin/main`, so that you and the agents you start get the hooks, scripts and agent types that merged.
   If the script says it can't fast-forward, fix what it names, such as by switching the main checkout back to `main`.
+  After each merge, run `scripts/remove-ended-worktrees`, which removes the worktree of each ended agent whose work is
+  on GitHub.
 - **Settings.** Once a pull request that changes `scripts/configure-github` merges, and the fast-forward is done, run
   `scripts/configure-github` in the main checkout, so that GitHub's settings match main.
 - **Releases.** Once a goal is done, publish a release as "Publish a release" in `docs/releasing.md` describes, and

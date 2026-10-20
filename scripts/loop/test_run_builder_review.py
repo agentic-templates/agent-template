@@ -6,7 +6,7 @@ import json
 import os
 from unittest import mock
 
-from test_run_builder import INIT, RunBuilderTest, lines, run_builder
+from test_run_builder import INIT, RUN_LOCK, RunBuilderTest, lines, run_builder
 from test_run_builder_message import MESSAGE
 
 REVIEWER_FILE = "---\nname: reviewer\nmodel: opus\neffort: high\n---\n\nReview it.\n"
@@ -63,13 +63,13 @@ class ReviewTest(RunBuilderTest):
         self.assertRegex(printed, rf"^pull request 7 \| claude second \| finished \| [0-9.]+ min \| report {report}\n$")
         self.assertEqual(report.read_text(), "No errors.")
         [call] = self.calls("claude")
-        self.assertEqual((call["cwd"], call["head"]), (str(self.worktree), self.head))
+        self.assertEqual((call["cwd"], call["head"], call["lock"]), (str(self.worktree), self.head, RUN_LOCK))
         brief = (run / "brief.md").read_text()
         settings = ["--model", "opus", "--effort", "high", "--append-system-prompt", "Review it."]
         self.assertEqual(call["args"], [*run_builder.CLAUDE_COMMAND[1:], *settings, "--", brief])
         self.assertTrue(brief.startswith("7\n\nYou review pull request #7 for the orchestrator"))
         self.assertNotIn("CLAUDE_CONFIG_DIR", call["env"])
-        self.assertEqual(call["env"]["LOOP_RUN"], "1")
+        self.assertEqual(call["env"]["LOOP_RUN"], run.name)
         self.assertEqual(call["env"]["LOOP_HAND_OFF"], "reviewer")
         self.assertFalse(self.worktree.exists())
         self.assertEqual(self.git("worktree", "list", "--porcelain").count("worktree "), 1)
