@@ -64,7 +64,8 @@ KIND = re.compile(r"research|parent|other|left behind [1-9][0-9]*")
 # The line that scripts/take-next-issue printed, such as 12 other, or a pull request's number alone.
 SUBJECT = re.compile(rf"([1-9][0-9]*)(?: ({KIND.pattern}))?")
 BYTES_IN_A_MEGABYTE = 1_000_000
-# The environment variable that scripts/loop/run-builder sets for the builders that it runs
+# The environment variable that scripts/loop/run-builder sets for the builders that it runs, to the name of the run's
+# folder
 RUN_VARIABLE = "LOOP_RUN"
 
 
@@ -290,11 +291,11 @@ def started(run: AgentRun) -> dt.datetime:
     return dt.datetime.fromisoformat(run.start["at"])
 
 
-def agent_transcripts(project_folder: Path) -> dict[str, Path]:
-    """The transcripts of the agents of the sessions in a Claude Code project folder, by the id of the Agent call that
+def agent_transcripts(project_folders: list[Path]) -> dict[str, Path]:
+    """The transcripts of the agents of the sessions in Claude Code project folders, by the id of the Agent call that
     started each. Claude Code writes the id in the .meta.json file next to the transcript when the agent starts."""
     found = {}
-    for meta in project_folder.glob("*/subagents/*.meta.json"):
+    for meta in (meta for folder in project_folders for meta in folder.glob("*/subagents/*.meta.json")):
         agent_id = json.loads(meta.read_text()).get("toolUseId")
         if agent_id:
             found[agent_id] = meta.with_name(meta.name.removesuffix(".meta.json") + ".jsonl")
@@ -320,11 +321,8 @@ def working_periods(run: AgentRun, transcripts_by_id: dict[str, Path], runs_fold
 
 
 def session_periods(transcript: Path) -> list[Period]:
-    """The periods when a session worked, from its transcript, or none if the transcript doesn't exist. It reads the
-    transcript a line at a time, because an orchestrator's transcript grows past 150 MB, and keeping its entries would
-    take about 0.5 GB of memory."""
-    if not transcript.exists():
-        return []
+    """The periods when a session worked, from its transcript. It reads the transcript a line at a time, because an
+    orchestrator's transcript grows past 150 MB, and keeping its entries would take about 0.5 GB of memory."""
     with transcript.open(errors="replace") as handle:
         timed = (transcripts.timed_entry(line) for line in handle)
         entries = (entry for entry in timed if entry is not None and transcripts.has_message(entry))

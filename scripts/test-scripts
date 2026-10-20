@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Runs the tests of the scripts and hooks, each test file in a process of its own, all at the same time:
-# scripts/test-scripts [--part <part>/<parts>]
+# scripts/test-scripts [--part <part>/<parts> | --branch]
 # The test files are each scripts/hooks/*.test, the cases of scripts/test-check and each scripts/*.test. The script
 # prints the outputs of the files in that order, so that they don't mix. A failure in any file fails the script.
 # With --part, as in --part 2/3, it runs only every third file of that list, starting with the second. The jobs of
 # .github/workflows/ci.yml that run the tests each run one part, because on one runner the tests took two minutes.
-# scripts/check runs every file.
+# With --branch, it runs only the files that this branch's changes can affect, as scripts/affected-tests decides, or
+# every file without uv, which runs scripts/affected-tests. scripts/check runs it this way.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -17,9 +18,12 @@ fi
 
 part=1
 parts=1
-if (($# > 0)); then
+runs_affected_only=""
+if [[ $# == 1 && $1 == --branch ]]; then
+  runs_affected_only=yes
+elif (($# > 0)); then
   if [[ $# != 2 || $1 != --part || ! $2 =~ ^[1-9][0-9]*/[1-9][0-9]*$ ]]; then
-    echo "error: scripts/test-scripts takes no argument, or --part and a part such as 2/3, and it got: $*" >&2
+    echo "error: scripts/test-scripts takes no argument, --branch, or --part and a part such as 2/3, and it got: $*" >&2
     exit 2
   fi
   part=${2%/*}
@@ -49,40 +53,61 @@ stop_tests() {
 }
 trap stop_tests EXIT
 
-# The place of the next test file in the list of all test files.
-place=0
-# The process of each test file in the part, which writes its output and errors to files named for its place in the
-# part.
-process_ids=()
-
-# Starts a test file in the background if it's in the part: start_test <test file> [<argument>]
-start_test() {
-  if ((place % parts == part - 1)); then
-    bash "$@" >"$outputs/${#process_ids[@]}.out" 2>"$outputs/${#process_ids[@]}.err" &
-    process_ids+=("$!")
-  fi
-  place=$((place + 1))
+# Each test file, in the order that the script prints their outputs, and the argument that it runs with, if any.
+test_files=()
+test_arguments=()
+# Adds a test file to the list: add_test <test file> [<argument>]
+add_test() {
+  test_files+=("$1")
+  test_arguments+=("${2:-}")
 }
 
 # -f skips the pattern itself, which a loop gets when no file matches it.
 if [[ -n $runs_hooks_tests ]]; then
   for hook_test in scripts/hooks/*.test; do
     if [[ -f $hook_test ]]; then
-      start_test "$hook_test"
+      add_test "$hook_test"
     fi
   done
 fi
 # The ShellCheck cases run shellcheck, which the bash-3-2 and macos jobs don't install, so they run only where shellcheck
 # is installed, in CI too.
 if command -v shellcheck >/dev/null; then
-  start_test scripts/test-check --shellcheck-only
+  add_test scripts/test-check --shellcheck-only
 fi
-start_test scripts/test-check
+add_test scripts/test-check
 for script_test in scripts/*.test; do
   if [[ -f $script_test ]]; then
-    start_test "$script_test"
+    add_test "$script_test"
   fi
 done
+
+# The test files that this branch's changes can affect, one to a line, when the script runs only those.
+affected_tests=""
+is_selecting=""
+if [[ -n $runs_affected_only ]] && command -v uv >/dev/null; then
+  affected_tests=$(scripts/affected-tests "${test_files[@]}")
+  is_selecting=yes
+fi
+
+# Succeeds if the script runs a test file: runs_test <test file>
+runs_test() {
+  [[ -z $is_selecting || $'\n'$affected_tests$'\n' == *$'\n'"$1"$'\n'* ]]
+}
+
+# The process of each test file that the script runs, which writes its output and errors to files named for its place
+# in this list.
+process_ids=()
+for ((place = 0; place < ${#test_files[@]}; place++)); do
+  if ((place % parts == part - 1)) && runs_test "${test_files[place]}"; then
+    bash "${test_files[place]}" ${test_arguments[place]:+"${test_arguments[place]}"} \
+      >"$outputs/${#process_ids[@]}.out" 2>"$outputs/${#process_ids[@]}.err" &
+    process_ids+=("$!")
+  fi
+done
+if [[ -n $is_selecting ]] && ((${#process_ids[@]} < ${#test_files[@]})); then
+  echo "Ran ${#process_ids[@]} of the ${#test_files[@]} tests of the scripts and hooks, those that this branch's changes can affect, as scripts/affected-tests decides. CI runs them all." >&2
+fi
 
 status=0
 for ((index = 0; index < ${#process_ids[@]}; index++)); do

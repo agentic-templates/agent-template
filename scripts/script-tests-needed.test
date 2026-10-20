@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-# Tests scripts/script-tests-needed, with paths on standard input and with --branch in a small repository.
+# Tests scripts/script-tests-needed, with paths on standard input.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 script=$PWD/scripts/script-tests-needed
-
-base=$(mktemp -d)
-trap 'rm -rf "$base"' EXIT
 
 case_count=0
 failed_cases=0
@@ -39,54 +36,7 @@ expect_status "When the change touches a workflow" 0 with_paths .github/workflow
 expect_status "When the change touches the Claude Code settings" 0 with_paths .claude/settings.json
 expect_status "When the change touches the Codex hooks" 0 with_paths .codex/hooks.json
 expect_status "When a file's name only starts like a folder" 1 with_paths scripts.md docs/scripts/notes.md
-expect_status "When the argument isn't --branch" 2 "$script" --all
-
-# A repository whose origin/main has one commit, with a branch checked out from it: new_repository
-new_repository() {
-  repo=$(mktemp -d "$base/repo.XXXXXX")
-  git -C "$repo" init --quiet --initial-branch=main
-  mkdir -p "$repo/docs" "$repo/scripts"
-  echo text >"$repo/docs/page.md"
-  echo script >"$repo/scripts/tool"
-  git -C "$repo" add --all
-  git -C "$repo" -c user.name=test -c user.email=test@example.com commit --quiet -m "chore: start"
-  git -C "$repo" update-ref refs/remotes/origin/main HEAD
-  git -C "$repo" switch --quiet --create 12-change
-}
-
-# Runs the script with --branch in the repository.
-on_branch() {
-  (cd "$repo" && "$script" --branch)
-}
-
-new_repository
-expect_status "When the branch changes nothing" 1 on_branch
-
-new_repository
-echo more >>"$repo/docs/page.md"
-git -C "$repo" -c user.name=test -c user.email=test@example.com commit --quiet -am "docs: more"
-expect_status "When the branch commits a change to the docs" 1 on_branch
-
-new_repository
-echo more >>"$repo/scripts/tool"
-git -C "$repo" -c user.name=test -c user.email=test@example.com commit --quiet -am "fix: more"
-expect_status "When the branch commits a change to a script" 0 on_branch
-
-new_repository
-echo more >>"$repo/scripts/tool"
-expect_status "When a change to a script isn't committed" 0 on_branch
-
-new_repository
-echo new >"$repo/scripts/new"
-expect_status "When a new script isn't added to git" 0 on_branch
-
-new_repository
-git -C "$repo" mv scripts/tool docs/tool.md
-expect_status "When the branch moves a script out of scripts/" 0 on_branch
-
-new_repository
-git -C "$repo" update-ref -d refs/remotes/origin/main
-expect_status "When the repository has no origin/main" 0 on_branch
+expect_status "When it gets an argument" 2 "$script" --all
 
 if ((failed_cases > 0)); then
   echo "error: $failed_cases of the $case_count cases in scripts/script-tests-needed.test failed. The errors above say which." >&2

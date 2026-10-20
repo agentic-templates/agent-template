@@ -35,7 +35,7 @@ class AgentsLineTest(MeterTest):
         if event == "start":
             line |= {"type": agent_type, "issue": issue, "test": False, "pid": pid}
         else:
-            line |= {"minutes": 1.0}
+            line |= {"minutes": 1.0, "output_tokens": 1}
         with (self.loop / "agents.jsonl").open("a") as handle:
             handle.write(json.dumps(line) + "\n")
 
@@ -70,12 +70,16 @@ class AgentsLineTest(MeterTest):
         self.log("start", "71-20261018-021000", issue=71)
         self.builder_run("71-20261018-021000", ["not an event", call(200_000, session_id="s71")])
         self.log("start", "72-20261018-021000", issue=72)
-        self.hand_offs("a1.400000", "s64.400000", "s64.500000", "a9.400000", "t1.400000", "s71.400000", "notes.txt")
+        self.hand_offs(
+            *("a1.400000", "s64.400000", "s64.500000", "a9.400000", "t1.400000", "s71.400000", "notes.txt"),
+            *("a1.room-now", "s64.room-soon", "a9.room-soon", "s71.room-soon"),
+        )
         self.assertEqual(
             self.agents(),
-            "agents | builder #64 412k, told at 400k to hand off | Explore context unknown | "
-            "builder #64 520k, told at 500k to hand off | codex #70 context unknown | builder #71 200k | "
-            "builder #72 context unknown",
+            "agents | builder #64 412k, told at 400k to hand off, told to hand off for its account's room | "
+            "Explore context unknown | "
+            "builder #64 520k, told at 500k to hand off, told to hand off for its account's room | "
+            "codex #70 context unknown | builder #71 200k | builder #72 context unknown",
         )
 
     def test_leaves_out_the_agents_with_an_end_line(self) -> None:
@@ -126,6 +130,13 @@ class AgentsLineTest(MeterTest):
 
     def test_says_when_no_agent_runs_without_a_log(self) -> None:
         self.assertEqual(self.agents(), "agents | none running")
+
+    def test_gives_the_context_of_an_agent_whose_transcript_is_in_the_folder_of_another_claude_account(self) -> None:
+        self.subagents = self.orchestrator_on_another_account() / "abc123" / "subagents"
+        self.subagents.mkdir(parents=True)
+        self.log("start", "toolu_01", issue=64)
+        self.subagent("a1", "toolu_01", [call(300_000)])
+        self.assertEqual(self.agents(), "agents | builder #64 300k")
 
     def test_leaves_out_an_agent_whose_process_ended_and_lists_one_whose_process_runs_or_is_unknown(self) -> None:
         self.log("start", "toolu_01", issue=64, pid=101)

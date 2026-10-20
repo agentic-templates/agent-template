@@ -331,7 +331,7 @@ for part_value in 0/2 1/0 2 "" a/b; do
   part=$part_value
   run_step
   expect_result "fails for the part \"$part_value\", before it starts a test" 2 \
-    "error: scripts/test-scripts takes no argument, or --part and a part such as 2/3, and it got: --part $part_value"
+    "error: scripts/test-scripts takes no argument, --branch, or --part and a part such as 2/3, and it got: --part $part_value"
 done
 
 # Case for stopping the runner, which stops each test that still runs. The stand-in runs for 10 seconds, unless it's
@@ -423,6 +423,43 @@ printf '%s\n' '#!/usr/bin/env bash' 'echo "scripts passed"' > "$case_dir/scripts
 run_step true
 expect_result "fails in CI where jq isn't installed, before it starts a test" 1 \
   "error: jq is not installed. Install it in scripts/install-check-tools, or in an earlier step of this job in .github/workflows/ci.yml."
+
+# Cases for --branch, which scripts/check uses to run only the test files that the branch's changes can affect.
+
+# Runs scripts/test-scripts --branch in the case's folder, with the commands of a folder on PATH, and sets status and
+# output: run_branch <folder of commands>
+# LOOP_HEAVY_COMMAND keeps the runner from waiting its turn through scripts/loop/run-heavy, which the case has no copy of.
+run_branch() {
+  status=0
+  output=$(cd "$case_dir" && LOOP_HEAVY_COMMAND=test TMPDIR=$case_dir/tmp PATH=$case_dir/tools:$1 \
+    scripts/test-scripts --branch 2>&1) || status=$?
+}
+
+new_case
+write_named_tests
+run_branch "$commands"
+expect_result "runs every test file with --branch where uv, which runs scripts/affected-tests, isn't installed" 0 \
+  $'alpha\ncheck\nbravo\ncharlie\ndelta'
+
+if command -v uv >/dev/null; then
+  branch_commands=$base/branch-commands
+  cp -R "$commands" "$branch_commands"
+  for command in git uv; do
+    ln -s "$(command -v "$command")" "$branch_commands/$command"
+  done
+  new_case
+  write_named_tests
+  cp scripts/affected-tests .python-version "$case_dir/scripts/"
+  mv "$case_dir/scripts/.python-version" "$case_dir/"
+  git -C "$case_dir" init --quiet --initial-branch=main
+  git -C "$case_dir" add --all
+  git -C "$case_dir" -c user.name=test -c user.email=test@example.com commit --quiet -m "chore: start"
+  git -C "$case_dir" update-ref refs/remotes/origin/main HEAD
+  echo 'echo again' >> "$case_dir/scripts/charlie.test"
+  run_branch "$branch_commands"
+  expect_result "runs only the test file that the branch changes with --branch" 0 \
+    $'Ran 1 of the 5 tests of the scripts and hooks, those that this branch\'s changes can affect, as scripts/affected-tests decides. CI runs them all.\ncharlie\nagain'
+fi
 
 if ((failed_cases > 0)); then
   echo "error: $failed_cases of the $case_count cases in scripts/ci.test failed. The errors above say which." >&2

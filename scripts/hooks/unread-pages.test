@@ -285,9 +285,14 @@ echo "It waits for the checks." >>docs/loop.md
 commit_all "docs: say that the loop waits for the checks"
 for push in "git push" "git push -u origin HEAD" "git push --force-with-lease origin +HEAD:refs/heads/pushed" \
   "git push origin pushed" "git push origin @" "git push origin @:pushed" "git push --tags origin HEAD" \
-  "git push origin 'refs/heads/*:refs/heads/*' HEAD" "cd docs && git push" "git -C docs push"; do
+  "git push origin 'refs/heads/*:refs/heads/*' HEAD" "cd docs && git push" "git -C docs push" \
+  "git push origin HEAD:heads/pushed" "git push origin heads/pushed"; do
   expect_check "$push" 2 "$(unread_push 5 docs/loop.md)"
 done
+# A tag with the branch's name makes git symbolic-ref --short HEAD print heads/pushed, but git push still sends pushed.
+git tag pushed
+expect_check "git push" 2 "$(unread_push 5 docs/loop.md)"
+git tag --delete pushed >/dev/null
 # A push whose remote or refspec has a variable or a $( ) is blocked, because the check can't tell which branch on which
 # remote it updates.
 # shellcheck disable=SC2016 # The $ in these words is for the check to read, not for the test to expand.

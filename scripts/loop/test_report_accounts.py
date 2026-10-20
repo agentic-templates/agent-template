@@ -2,7 +2,8 @@ import datetime as dt
 import json
 from typing import Any
 
-from test_report import ReportTest, end, meter_reading, start
+from test_report import ReportTest, end, start
+from test_report_machine import meter_reading
 from test_transcripts import START, at
 
 # The reset of the week that the readings start in

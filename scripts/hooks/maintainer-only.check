@@ -85,6 +85,17 @@ check_sudo() {
   fi
 }
 
+# Succeeds if the diskutil command in command_words changes the disks. diskutil apfs takes a verb of its own, as in
+# diskutil apfs list and diskutil apfs deleteVolume.
+diskutil_changes() {
+  local verb=${command_words[1]:-} reading=(list info activity)
+  if [[ $verb == apfs ]]; then
+    verb=${command_words[2]:-}
+    reading=(list listSnapshots listCryptoUsers listUsers listVolumeGroups)
+  fi
+  ! is_one_of "$verb" "${reading[@]}"
+}
+
 # Succeeds if command_words changes the machine's disks, settings or security. For a command that can also only read
 # them, its first argument usually tells which, as in defaults read and defaults write.
 changes_machine() {
@@ -94,7 +105,7 @@ changes_machine() {
       chsh | dscl | passwd | shutdown | reboot | halt | ufw | iptables | pfctl | bless)
       return 0
       ;;
-    diskutil) ! is_one_of "$first" list info activity ;;
+    diskutil) diskutil_changes ;;
     defaults) ! is_one_of "$first" read read-type domains find help ;;
     launchctl) ! is_one_of "$first" list print print-disabled getenv help version blame ;;
     crontab) [[ $first != -l ]] ;;
@@ -102,7 +113,10 @@ changes_machine() {
     scutil) ! is_one_of "$first" --get --dns --proxy --nwi -r ;;
     networksetup) [[ ! $first =~ ^-(list|get|print) ]] ;;
     softwareupdate) ! is_one_of "$first" -l --list --history ;;
-    tmutil) ! is_one_of "$first" status listbackups latestbackup destinationinfo machinedirectory version ;;
+    tmutil)
+      ! is_one_of "$first" status listbackups latestbackup destinationinfo machinedirectory version \
+        listlocalsnapshots listlocalsnapshotdates
+      ;;
     systemctl)
       # The first word that isn't an option, as in systemctl --user restart app
       for ((i = 1; i < ${#command_words[@]}; i++)); do
@@ -661,8 +675,9 @@ gh_posts() {
   esac
 }
 
-# The flags of gh commands that take text, which can hold the URL of an issue of another repository
-text_flags=" -b --body -t --title -c --comment -F --body-file --description -n --notes --notes-file --subject -T --template "
+# The flags that take text, which can hold the URL of an issue of another repository, of the gh commands whose flags the
+# hooks don't list
+text_flags=" -b --body -t --title -c -F --body-file --description -n --notes --notes-file -T --template "
 
 # Sets destination to the repository that a gh command posts to, as the command or git names it, or to empty when the
 # hook can't tell. gh takes the repository from the first of these that it finds:
@@ -801,13 +816,30 @@ find_named_repository() {
   # The URL can stand anywhere among the words after the subcommand.
   for ((i = 3; i < ${#command_words[@]}; i++)); do
     word=${command_words[i]}
-    if [[ $text_flags == *" $word "* ]]; then
+    if is_flag_before_value "$word" "$command_flags_with_value"; then
       i=$((i + 1))
     elif [[ $word =~ ^https?://[^/]+/[^/]+/[^/]+ ]]; then
       destination=$word
       return 0
     fi
   done
+}
+
+# Succeeds if gh reads the word after a word of a gh command as the value of a flag that the word ends in. It reads the
+# word as split_flag_word does, with the command's flags that take a value. For a command whose flags the hooks don't
+# list, it reads only a word in text_flags as such a flag:
+# is_flag_before_value <word> <the command's flags that take a value, or empty>
+is_flag_before_value() {
+  local flag value value_is_next_word flags_before
+  if [[ -z $2 ]]; then
+    [[ $text_flags == *" $1 "* ]]
+    return
+  fi
+  if [[ $1 != -* ]]; then
+    return 1
+  fi
+  split_flag_word "$1" "$2"
+  [[ -n $value_is_next_word ]]
 }
 
 # Blocks a post to a repository other than this one, unless the list of allowed repositories names it. It allows the

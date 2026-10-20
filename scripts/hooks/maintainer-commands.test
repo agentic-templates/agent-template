@@ -4,7 +4,7 @@ set -euo pipefail
 # shellcheck source=scripts/hooks/testing.bash
 source "${BASH_SOURCE[0]%/*}/testing.bash"
 # shellcheck source=scripts/testing-required-checks.bash
-source "${hooks_folder%/hooks}/testing-required-checks.bash"
+source "$hooks_folder/../testing-required-checks.bash"
 
 # The folders that the cases run scripts/configure-github in. The hook runs in the agent's checkout of jtmpl/project,
 # and the home folder holds a clone of jtmpl/other.

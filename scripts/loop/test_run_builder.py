@@ -484,7 +484,7 @@ class ClaudeTest(RunBuilderTest):
         environment = call["env"]
         self.assertEqual(environment["CLAUDE_CONFIG_DIR"], "/claude-main")
         self.assertEqual(environment["CLAUDE_CODE_RETRY_WATCHDOG"], "1")
-        self.assertEqual(environment["LOOP_RUN"], "1")
+        self.assertEqual(environment["LOOP_RUN"], self.run_folder().name)
         self.assertEqual(environment["LOOP_HAND_OFF"], "builder")
         self.assertEqual(environment["GH_REPO"], "owner/repo")
         self.assertEqual([name for name in caller if name in environment], ["CLAUDE_CONFIG_DIR"])
@@ -524,6 +524,21 @@ class ClaudeTest(RunBuilderTest):
         self.assertEqual(status, 0)
         self.assertIn(
             "of the kind `left behind 31`, for the orchestrator", (self.run_folder() / "brief.md").read_text()
+        )
+
+    def test_keeps_every_reply_of_claude_in_the_report_when_it_replies_to_notifications_around_its_report(self) -> None:
+        replies = [
+            "Waiting for scripts/check.",
+            "Opened pull request #5. scripts/check passed.",
+            "That wait has ended.",
+        ]
+        results = [{**RESULT, "result": reply} for reply in replies]
+        self.answer("claude", "", {"stdout": lines(INIT, *results)})
+        status, _, _ = self.run_builder("--tool", "claude")
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            (self.run_folder() / "report.md").read_text(),
+            "Waiting for scripts/check.\n\nOpened pull request #5. scripts/check passed.\n\nThat wait has ended.",
         )
 
     def test_fails_when_claude_starts_in_another_permission_mode(self) -> None:
@@ -903,19 +918,6 @@ class CodexReviewTest(RunBuilderTest):
         self.assertEqual(self.calls("gh", "pr create"), [])
         self.assertIn(f", and the changes stay in {self.worktree}, off the issue's branch |", printed)
         self.assertTrue((self.worktree / "scripts" / "hooks" / "new.check").exists())
-
-
-class CommitSubjectTest(unittest.TestCase):
-    def test_takes_its_type_from_the_label_of_the_issue(self) -> None:
-        for label, subject_type in (
-            ("feature", "feat"),
-            ("bug", "fix"),
-            ("maintenance", "chore"),
-            ("research", "chore"),
-        ):
-            with self.subTest(label=label):
-                issue = {**ISSUE, "labels": [{"name": label}]}
-                self.assertEqual(run_builder.commit_subject(issue), f"{subject_type}: Fix the importer")
 
 
 class ScriptTest(RunBuilderTest):

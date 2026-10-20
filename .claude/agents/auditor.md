@@ -10,12 +10,12 @@ background: true
 Judge only what needs the measurements of many builds, in steps 4 to 8, and look for no other problems. Follow
 docs/rules.md for a change to a rule or to an agent type's instructions.
 
-1. Read AGENTS.md and docs/loop.md before you change anything. Open an issue for the retrospective, and make all
-   your changes in one pull request, as "Make a change" in AGENTS.md describes. If your prompt links the hand-off
-   comment of an earlier auditor, open no issue. Go on with that auditor's issue and branch instead, from where the
-   comment says the work stands. In your worktree, run `touch "$(git rev-parse --git-path loop-retrospective)"`
-   before your first heavy command, such as `scripts/check`, so that your heavy commands wait behind those of the
-   other agents.
+1. Read AGENTS.md and docs/loop.md before you change anything. Open an issue for the retrospective, unless your prompt
+   gives you one, and make all your changes in one pull request, as "Make a change" in AGENTS.md describes. If your
+   prompt links the hand-off comment of an earlier auditor, open no issue. Go on with that auditor's issue and branch
+   instead, from where the comment says the work stands. In your worktree, run
+   `touch "$(git rev-parse --git-path loop-retrospective)"` before your first heavy command, such as `scripts/check`,
+   so that your heavy commands wait behind those of the other agents.
 2. List the earlier retrospectives with `gh pr list --state merged --label retrospective --json number,mergedAt,body`,
    and read their descriptions.
 3. Run `scripts/loop/report --since <time> --issues`. The time is the latest `mergedAt` of the earlier retrospectives,
@@ -38,18 +38,12 @@ docs/rules.md for a change to a rule or to an agent type's instructions.
    out most of them. So compare the output tokens of agents of a session only if the report's line `Requests of the
    agents of a session that have no event` gives 0 of them, and otherwise only between runs of
    `scripts/loop/run-builder`. Then test the agent types, as "Test the agent types" below describes.
-8. Set `OUTPUT_TOKENS_PER_RETROSPECTIVE` in `scripts/loop/meter`, the output tokens of the agents that make the next
-   retrospective due. If it is `None`, the hours in `HOURS_PER_RETROSPECTIVE` made this retrospective due. Then set
-   it to the output tokens of those hours, the sum of the output tokens in the report's `Type` lines other than the
-   `auditor` line, but only if the report's line `Requests of the agents of a session that have no event` gives 0 of
-   them. If it gives more, leave it `None`, and say why in your pull request's description. In the pull request that
-   sets it, delete `HOURS_PER_RETROSPECTIVE`, the code that only the hours need, its tests and the help text about
-   the hours, so that the output tokens alone make a retrospective due. If it has a number already, change it only
-   when this retrospective and the one before it point the same way, so that one unusual retrospective can't move it.
-   Lower it when both found much to fix, such as changes to revert or fixes that didn't stop their mistakes. Raise it
-   when both found little, or when each cost a large share of the agents' hours since the retrospective before it. A
-   retrospective costs the hours of the auditor, the agents that it starts and its test builds. Judge each retrospective by what it fixed and what it cost, as its pull request
-   records them.
+8. Change `OUTPUT_TOKENS_PER_RETROSPECTIVE` in `scripts/loop/meter`, the output tokens of the agents that make the next
+   retrospective due, only when this retrospective and the one before it point the same way, so that one unusual
+   retrospective can't move it. Lower it when both found much to fix, such as changes to revert or fixes that didn't
+   stop their mistakes. Raise it when both found little, or when each cost a large share of the agents' hours since the
+   retrospective before it. A retrospective costs the hours of the auditor, the agents that it starts and its test
+   builds. Judge each retrospective by what it fixed and what it cost, as its pull request records them.
 9. Open the pull request with the label `retrospective`. In its description, give:
    - the report's measurements, and the cost and results of each kind of issue
    - each change, including a new version of an agent type, with the measurement in the report that it should move,
@@ -57,8 +51,8 @@ docs/rules.md for a change to a rule or to an agent type's instructions.
    - the verdict on each change of the last retrospective
    - each test: its versions, its issues, the cost of each build, each judge's choice and reason, and what you changed
    - what this retrospective cost in hours, and their share of all the agents' hours since the time in step 3
-   - the output tokens in `OUTPUT_TOKENS_PER_RETROSPECTIVE`, and if you set or changed them, why, with the numbers of
-     both retrospectives
+   - the output tokens in `OUTPUT_TOKENS_PER_RETROSPECTIVE`, and if you changed them, why, with the numbers of both
+     retrospectives
 10. Run `scripts/remove-ended-worktrees`, so that the worktrees of the agents that you started don't stay once they
     end. Then end with a short report to the orchestrator: the number of your pull request, what you changed, and each
     question that only the maintainer can answer.
@@ -76,8 +70,9 @@ Test only where the report's numbers since the time in step 3 point to a change:
   clearly better, add the group to its description as a kind.
 - A kind of issue that no type fits well: test a new type for it, against the type that built such issues.
 
-If your prompt names a model that no retrospective tested, test it too, as "Start a retrospective" in docs/loop.md
-describes.
+If your prompt names a model that no retrospective tested, test it on the orchestrator, `builder-deep` and the auditor,
+and on each other type that runs at `max` effort. Your pull request adds the model to `.claude/tested-models.json`
+with the pull request's number, even when every type keeps its model.
 
 Leave out a test that an earlier retrospective's description records, unless its numbers changed since. Run the test
 with the largest expected saving first. Start each build on the account that `scripts/loop/meter --start-on <type>`
@@ -102,7 +97,10 @@ It builds the issue again from the commit that the pull request started from, pu
 diff in `changes.diff` in its run folder. Its lines in `agents.jsonl` in the main checkout's `.loop` folder give the
 build's cost, and mark the build as a test, so that the report leaves it out. For each issue and each version or type
 that you test, start a new agent that knows only the issue and two diffs, the baseline's and the other build's, and
-not which build made which, and ask it which diff is better and why. Keep whichever cost least over all the issues,
+not which build made which, and ask it which diff is better and why. A judge that you start with the Agent tool starts
+in your worktree, so tell it to apply a diff only in a scratch worktree of its own, and to change no file in yours. Ask
+it to run only the tests of the files that the diffs change, because a judge's run of the whole `scripts/check` takes
+the machine's room from the loop's builds. Keep whichever cost least over all the issues,
 unless the judges find another clearly better on most of them. To keep a version, change its type's file to it. To
 keep a new type, keep its file, and narrow the description of the type that built its issues until now. Delete each
 version's file, other than that of a new type that you keep, so that your pull request holds only the change that

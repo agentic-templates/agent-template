@@ -113,5 +113,5 @@ class SafetyStopTest(ReportTest):
             return open_file(file, *arguments, **options)
 
         with mock.patch.object(Path, "open", counted_open):
-            report.read_transcripts(self.project, self.root, SINCE)
+            report.read_transcripts([self.project], self.root, SINCE)
         self.assertEqual(opened, Counter({session: 1, agent: 1}))

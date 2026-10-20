@@ -24,9 +24,11 @@ that run on the account still need:
 
 The usage per agent-minute is the rise of a meter since the newest reading of the account that is {period} to {gap}
 minutes old, over the minutes that the account's agents worked since that reading. On its own account, the
-orchestrator counts as an agent for the minutes that its transcript shows it working. When the agents didn't work or
-the meter didn't rise, the meter takes the last usage per agent-minute that it measured, and before it measured one,
-the usage that scripts/loop/account_room.py starts with.
+orchestrator counts as an agent for the minutes that its transcript shows it working. Its own account is the one that
+the meter runs on, if the meter's folder of transcripts holds the transcript of the session that .loop/state.md names,
+or else the first Claude account whose folder holds it. When the agents didn't work or the meter didn't rise, the meter
+takes the last usage per agent-minute that it measured, and before it measured one, the usage that
+scripts/loop/account_room.py starts with.
 
 The line after the accounts names the Claude account to start each agent type on, other than the auditor: the account
 with the lowest 5-hour meter among those where the type fits. Between accounts with the same 5-hour meter, it names the
@@ -39,12 +41,28 @@ that ran at the reading, at their minutes then, each agent that started on the a
 --start-on named the account for since then. So one pass of the loop starts only as many agents on each account as fit.
 It adds a line with the type and the account that it named to .loop/meter.jsonl.
 
+With --hand-off ID, the meter reads no account, and prints the note that scripts/hooks/hand-off gives an agent for its
+account's room: soon, to hand off its work at its next stopping point, now, to hand off as soon as the step it's on
+ends, or none. ID is the id of the agent's start line in .loop/agents.jsonl. The meter takes the newest reading of the
+agent's account in .loop/meter.jsonl, unless it is more than {gap} minutes old, and counts the agents that run on the
+account as --start-on does. An agent that needs no more time to finish its work than a long hand-off takes gets
+none, because a hand-off would only take it longer. An agent that has run longer than every earlier run of its type
+isn't one of them, because its earlier runs don't show how much longer it runs. The other agents get these notes:
+
+- Each one gets now once a meter's room is down to what the agents need to hand off: the usage of each agent, and of
+  the orchestrator at its share, for the time of a long hand-off. That time is the 90th percentile of the minutes from
+  each agent's latest note of scripts/hooks/hand-off to its end line, or {hand_off} minutes until an agent with a note
+  has ended.
+- Before then, the agents that still run get soon, one at a time, the one that still needs the most first, until the
+  room covers what the rest still need. So the agents closest to done finish on the account. An agent that got a note
+  of the hook, about its context or its account's room, needs only the time of a long hand-off.
+
 The line before the last lists the agents that run: those with a start line and no end line in .loop/agents.jsonl,
 each with its type and the number of its issue or pull request. It leaves out an agent whose Claude Code process or
 run of scripts/loop/run-builder has ended, such as a builder of an orchestrator that was restarted. It leaves out an
 agent that the user interrupted too, until the agent gets a message, because Claude Code then runs no hook that writes
-an end line. It gives each agent's context size, and the threshold at which scripts/hooks/hand-off told the agent to
-hand off its work, if it did.
+an end line. It gives each agent's context size, the threshold at which scripts/hooks/hand-off told the agent to hand
+off its work, if it did, and whether the hook told it to hand off for its account's room.
 
 The last line gives the machine's free disk, free memory, swap in use, GPU use and GPU memory in use, how many of its
 cores were busy on average while the meter read the accounts, leaving out the meter's own work, the orchestrator's
@@ -54,10 +72,7 @@ retrospective is the newest merged pull request with the label retrospective, or
 before there is one. The meter counts the output tokens as scripts/loop/report counts them, and an agent of a session
 without an end line until the last line of its transcript. A request with no event in
 .loop/requests.jsonl counts the output tokens that the transcript gives, which leave out most of them, so the line
-says how many requests have none. Until a retrospective sets OUTPUT_TOKENS_PER_RETROSPECTIVE, one is due once the
-agents have worked {hours} hours since the last retrospective instead. The hours come from the periods on each agent's
-last end line in .loop/agents.jsonl, which scripts/loop/agent_log.py describes. An agent without an end line counts
-until the last line of its transcript. The test builds and the auditors don't count.
+says how many requests have none. The test builds and the auditors don't count.
 
 A retrospective is due too when one of Claude Code's aliases opus, sonnet, haiku and fable names a model ID that
 .claude/tested-models.json doesn't list. At most once a day, the meter sends one short request for each alias, on the
@@ -83,11 +98,14 @@ minutes after it started while an account's advice is stop. While an account has
                 {"name": "codex", "tool": "codex", "env": {"CODEX_HOME": "~/.codex"}}]}
 
 Without the file, the meter reads the Claude account that this machine is signed in to. It adds each reading of an
-account to .loop/meter.jsonl, with the usage per agent-minute that it measured under "per_agent_minute". Each time it
-reads the accounts, it first adds a line with no account and the machine's numbers under "machine", as
-scripts/loop/machine.py describes them. A number that the machine doesn't give is null. The meter exits with code 1
-when an account gives no reading. It reads the orchestrator's context size and the times when it worked from the
-transcript of the session that the session: line of .loop/state.md names.
+account to .loop/meter.jsonl, with the usage per agent-minute that it measured under "per_agent_minute", and the share
+of its time that the orchestrator worked so far under "orchestrator_share", which is 0 on any account other than the
+orchestrator's own. Each time it reads the accounts, it first adds a line with no account and the machine's numbers
+under "machine", as scripts/loop/machine.py describes them. A number that the machine doesn't give is null. The meter
+exits with code 1 when an account gives no reading. It reads the orchestrator's context size and the times when it
+worked from the transcript of the session that the session: line of .loop/state.md names. It reads the transcripts
+that Claude Code keeps for the main checkout, for the account that the meter runs on and for each Claude account in
+the file.
 """
 
 import argparse
@@ -105,14 +123,23 @@ from typing import Any, NamedTuple
 
 import account_room
 import agent_log
+import codex_usage
 import heavy_log
 import models
 import paths
 import request_events
 import waste
-from accounts import SIGNED_IN, Account, AccountsError, claude_environment, load_accounts, own_account
+from accounts import (
+    SIGNED_IN,
+    Account,
+    AccountsError,
+    claude_environment,
+    claude_project_folders,
+    load_accounts,
+    transcript_account,
+)
 from github import GitHubError, retrospective_merges
-from hand_offs import FOLDER_NAME, hand_off_thresholds, note_files
+from hand_offs import FOLDER_NAME, hand_off_thresholds, note_files, note_times, told_for_room
 from machine import CpuReading, CpuTicksError, Machine, busy_cores_besides, read_cpu, read_machine
 from meter_waits import LONGEST_READING_GAP, READ_EVERY_SECONDS, WAKE_EVERY
 from transcripts import is_interrupted, tail_lines
@@ -133,16 +160,13 @@ AFTER_RESET_SECONDS = 60
 UNKNOWN_RESET_WAIT_SECONDS = 10 * 60
 LATEST_TIME = dt.datetime.max.replace(tzinfo=dt.UTC)
 CLAUDE_TIMEOUT_SECONDS = 120
-# A Codex snapshot from before this is from an earlier weekly window, so the meter doesn't read older session files.
-CODEX_SNAPSHOT_AGE = dt.timedelta(days=8)
 # How often meter --wake looks for a new note of scripts/hooks/hand-off between two readings
 HAND_OFF_CHECK_SECONDS = 60
 # The longest that meter --wake waits between two readings while an account has no reading, so that it sees the
 # reading come back
 NO_READING_WAIT_SECONDS = 10 * 60
 # .claude/agents/auditor.md says when a retrospective sets this.
-OUTPUT_TOKENS_PER_RETROSPECTIVE: int | None = None
-HOURS_PER_RETROSPECTIVE = 30.0
+OUTPUT_TOKENS_PER_RETROSPECTIVE = 4_543_090
 # A retrospective doesn't look back on the work of an earlier one.
 AUDITOR = "auditor"
 # The subjects of the findings of scripts/loop/waste.py that the meter printed last, so that meter --wake wakes only
@@ -194,6 +218,12 @@ def main(argv: list[str] | None = None) -> int:
         choices=agent_types("claude"),
         help="print the Claude account to start an agent of the type on, without reading the accounts",
     )
+    modes.add_argument(
+        "--hand-off",
+        metavar="ID",
+        help="print the note that scripts/hooks/hand-off gives the agent for its account's room, without reading the "
+        "accounts",
+    )
     options = parser.parse_args(argv)
     loop_folder = paths.loop_dir()
     loop_folder.mkdir(parents=True, exist_ok=True)
@@ -203,17 +233,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 1
     log = loop_folder / "meter.jsonl"
+    if options.hand_off:
+        runs = agent_log.read_runs(loop_folder / "agents.jsonl")
+        print(hand_off_note(options.hand_off, accounts, runs, log, loop_folder / FOLDER_NAME) or "none")
+        return 0
     if options.start_on:
         return start_on(options.start_on, accounts, log)
     hand_offs = loop_folder / FOLDER_NAME
     checkout = paths.main_checkout()
+    project_folders = claude_project_folders(checkout, accounts)
     printed = loop_folder / PRINTED_FINDINGS
     if options.wake:
-        readings = wait_for_wake(accounts, log, hand_offs, lambda: has_new_finding(loop_folder, checkout, printed))
+        readings = wait_for_wake(
+            accounts, log, hand_offs, lambda: has_new_finding(loop_folder, checkout, project_folders, printed)
+        )
     else:
         readings = read_accounts(accounts, log)
-    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
-    agents = agents_line(running_agents(loop_folder, transcripts), hand_off_thresholds(note_files(hand_offs)))
+    transcripts = agent_log.agent_transcripts(project_folders)
+    notes = note_files(hand_offs)
+    agents = agents_line(running_agents(loop_folder, transcripts), hand_off_thresholds(notes), told_for_room(notes))
     runs = agent_log.read_runs(loop_folder / "agents.jsonl")
     try:
         last = max(retrospective_merges(checkout), default=None)
@@ -228,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     machine = machine_line(
         readings.machine,
         readings.busy_cores,
-        context=orchestrator_context(loop_folder / "state.md", checkout),
+        context=orchestrator_context(loop_folder / "state.md", project_folders),
         retrospective=" | ".join([retrospective, *model_notes]),
         findings=[finding.text for finding in findings],
     )
@@ -238,15 +276,15 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def help_text() -> str:
-    """The docstring, with the numbers that the code keeps in place of {hours}, {period}, {gap}, {start} and {retry},
-    so that changing a number takes one edit. The docstring's JSON example has braces of its own, so str.format can't
-    fill it in."""
+    """The docstring, with the numbers that the code keeps in place of {period}, {gap}, {start}, {retry} and
+    {hand_off}, so that changing a number takes one edit. The docstring's JSON example has braces of its own, so
+    str.format can't fill it in."""
     numbers = {
-        "{hours}": f"{HOURS_PER_RETROSPECTIVE:g}",
         "{period}": f"{USAGE_PERIOD.total_seconds() / 60:g}",
         "{gap}": f"{LONGEST_READING_GAP.total_seconds() / 60:g}",
         "{start}": f"{OLDEST_START_READING.total_seconds() / 60:g}",
         "{retry}": f"{NO_READING_WAIT_SECONDS / 60:g}",
+        "{hand_off}": f"{account_room.FIRST_HAND_OFF_MINUTES:g}",
     }
     text = str(__doc__)
     for placeholder, number in numbers.items():
@@ -312,10 +350,9 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
     cpu_before = cpu_reading()
     runs = agent_log.read_runs(log.parent / "agents.jsonl")
     earlier_runs = run_minutes_by_type(runs)
-    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(paths.main_checkout()))
-    orchestrators = own_account(accounts, os.environ)
-    transcript = orchestrator_transcript(log.parent / "state.md", paths.main_checkout())
-    orchestrator_periods = agent_log.session_periods(transcript) if transcript else []
+    project_folders = claude_project_folders(paths.main_checkout(), accounts)
+    transcripts = agent_log.agent_transcripts(project_folders)
+    orchestrators, orchestrator_periods = orchestrator_work(accounts, log)
     candidates: list[account_room.Candidate] = []
     for account in accounts:
         reading_time = now()
@@ -330,11 +367,12 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
             "account": account["name"],
             "meters": meters,
         }
-        is_orchestrators = orchestrators is not None and orchestrators["name"] == account["name"]
+        is_orchestrators = orchestrators == account["name"]
         orchestrator = orchestrator_periods if is_orchestrators else []
         room, measured = read_room(account["name"], meters, reading_time, log, runs, transcripts, orchestrator)
         result = advise(room, agent_types(account["tool"]), earlier_runs, reading_time)
         reading["per_agent_minute"] = measured
+        reading["orchestrator_share"] = room.orchestrator_share
         with log.open("a") as handle:
             handle.write(json.dumps(reading) + "\n")
         advice[account["name"]] = result.text
@@ -366,7 +404,7 @@ def start_on(agent_type: str, accounts: list[Account], log: Path) -> int:
     """Prints the Claude account to start an agent of the type on, as at each account's newest reading, and logs the
     account that it names, so that the next call counts the agent."""
     runs = agent_log.read_runs(log.parent / "agents.jsonl")
-    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(paths.main_checkout()))
+    transcripts = agent_log.agent_transcripts(claude_project_folders(paths.main_checkout(), accounts))
     candidates = start_candidates(accounts, runs, transcripts, log)
     if not candidates:
         minutes = OLDEST_START_READING.total_seconds() / 60
@@ -390,9 +428,7 @@ def start_candidates(
 ) -> list[account_room.Candidate]:
     """The Claude accounts with a reading from the last OLDEST_START_READING, each with the types that fit its room."""
     earlier_runs = run_minutes_by_type(runs)
-    orchestrators = own_account(accounts, os.environ)
-    transcript = orchestrator_transcript(log.parent / "state.md", paths.main_checkout())
-    orchestrator_periods = agent_log.session_periods(transcript) if transcript else []
+    orchestrators, orchestrator_periods = orchestrator_work(accounts, log)
     candidates: list[account_room.Candidate] = []
     for account in accounts:
         readings = account_readings(log, account["name"]) if log.exists() else []
@@ -401,9 +437,10 @@ def start_candidates(
         reading_time = dt.datetime.fromisoformat(readings[-1]["at"])
         if now() - reading_time > OLDEST_START_READING:
             continue
-        is_orchestrators = orchestrators is not None and orchestrators["name"] == account["name"]
+        is_orchestrators = orchestrators == account["name"]
         orchestrator = orchestrator_periods if is_orchestrators else []
-        room = room_at_reading(account["name"], readings, runs, transcripts, log, orchestrator)
+        share = account_room.working_share(orchestrator, reading_time)
+        room = room_at_reading(account["name"], readings, runs, transcripts, log, share)
         fitting = advise(room, agent_types("claude"), earlier_runs, reading_time).fitting
         candidates.append(account_room.Candidate(account["name"], fitting, room.meters, is_orchestrators))
     return candidates
@@ -415,7 +452,7 @@ def room_at_reading(
     runs: list[agent_log.AgentRun],
     transcripts: dict[str, Path],
     log: Path,
-    orchestrator: list[agent_log.Period],
+    orchestrator_share: float,
 ) -> account_room.Room:
     """The account's room at its newest reading, with the agents that ran then, and each agent that started on it since
     then or that --start-on named it for since then."""
@@ -424,25 +461,55 @@ def room_at_reading(
     meters = newest["meters"]
     per_agent_minute = {name: last_measured(readings, name) for name in meters}
     running: list[account_room.Running] = []
-    started: list[tuple[dt.datetime, str]] = []
+    started: list[tuple[dt.datetime, str, str]] = []
     for run in runs:
         if run.start.get("account") != account:
             continue
         if agent_log.started(run) > reading_time:
-            started.append((agent_log.started(run), run.start["type"]))
+            started.append((agent_log.started(run), run.start["type"], run.start["id"]))
         elif is_running(run, transcripts) or (
             run.end is not None and dt.datetime.fromisoformat(run.end["at"]) > reading_time
         ):
             minutes = (reading_time - agent_log.started(run)).total_seconds() / 60
-            running.append(account_room.Running(run.start["type"], minutes))
+            running.append(account_room.Running(run.start["type"], minutes, run.start["id"]))
     entries = (json.loads(line) for line in log.read_text().splitlines())
     namings = [
         (dt.datetime.fromisoformat(entry["at"]), entry["type"]) for entry in entries if entry.get("start_on") == account
     ]
     named = [(at, agent_type) for at, agent_type in namings if at >= reading_time]
     running += account_room.agents_since_reading(started, named)
-    share = account_room.working_share(orchestrator, reading_time)
-    return account_room.Room(meters, per_agent_minute, running, share)
+    return account_room.Room(meters, per_agent_minute, running, orchestrator_share)
+
+
+def hand_off_note(
+    agent_id: str, accounts: list[Account], runs: list[agent_log.AgentRun], log: Path, hand_offs: Path
+) -> str | None:
+    """The note that scripts/hooks/hand-off gives the agent whose start line has the id, for its account's room, from
+    the newest reading of the account, if any. The hook writes the id in the file of each note that it gives."""
+    run = next((run for run in runs if run.start["id"] == agent_id), None)
+    account: str | None = run.start.get("account") if run else None
+    if account is None or not log.exists():
+        return None
+    readings = account_readings(log, account)
+    if not readings:
+        return None
+    newest = readings[-1]
+    reading_time = dt.datetime.fromisoformat(newest["at"])
+    # An older reading is from before a time when the loop stopped.
+    if now() - reading_time > LONGEST_READING_GAP:
+        return None
+    transcripts = agent_log.agent_transcripts(claude_project_folders(paths.main_checkout(), accounts))
+    room = room_at_reading(account, readings, runs, transcripts, log, newest.get("orchestrator_share", 0.0))
+    noted = note_times(hand_offs)
+    ends = {run.start["id"]: dt.datetime.fromisoformat(run.end["at"]) for run in runs if run.end is not None}
+    known = account_room.HandOffs(
+        running={
+            run.start["id"] for run in runs if run.start.get("account") == account and is_running(run, transcripts)
+        },
+        told=set(noted),
+        minutes=account_room.hand_off_minutes(noted, ends),
+    )
+    return account_room.hand_off_note(agent_id, room, run_minutes_by_type(runs), reading_time, known)
 
 
 def read_meters(account: Account, reading_time: dt.datetime) -> tuple[dict[str, Meter], list[str]]:
@@ -486,53 +553,15 @@ def read_claude(account: Account) -> str:
 
 
 def read_codex(account: Account, reading_time: dt.datetime) -> tuple[dict[str, Meter], dt.datetime]:
-    """The meters in the newest rate-limit snapshot that Codex wrote in its session files, because Codex has no command
-    that prints its usage, and the snapshot's time."""
+    """The meters of a Codex account, and the time of the snapshot that gives them, as codex_usage.py reads them."""
     sessions = Path(account["env"].get("CODEX_HOME", os.path.expanduser("~/.codex"))) / "sessions"
-    snapshot = newest_codex_snapshot(sessions, reading_time - CODEX_SNAPSHOT_AGE)
-    if snapshot is None:
+    found = codex_usage.read_meters(sessions, reading_time)
+    if found is None:
+        days = codex_usage.SNAPSHOT_AGE.days
         raise NoReading(
-            f"Codex wrote no usage snapshot in {sessions} in the last {CODEX_SNAPSHOT_AGE.days} days. Run codex once, "
-            "and read again."
+            f"Codex wrote no usage snapshot in {sessions} in the last {days} days. Run codex once, and read again."
         )
-    snapshot_time, limits = snapshot
-    meters: dict[str, Meter] = {}
-    for window in (limits.get("primary"), limits.get("secondary")):
-        if isinstance(window, dict):
-            name = "session" if window.get("window_minutes", 0) <= 5 * 60 else "week"
-            meters[name] = codex_meter(window, reading_time)
-    return meters, snapshot_time
-
-
-def newest_codex_snapshot(sessions: Path, oldest: dt.datetime) -> tuple[dt.datetime, dict[str, Any]] | None:
-    rollouts = [
-        rollout for rollout in sessions.glob("*/*/*/rollout-*.jsonl") if rollout.stat().st_mtime >= oldest.timestamp()
-    ]
-    snapshots = [snapshot for snapshot in map(last_codex_snapshot, rollouts) if snapshot]
-    return max(snapshots, key=lambda snapshot: snapshot[0], default=None)
-
-
-def last_codex_snapshot(rollout: Path) -> tuple[dt.datetime, dict[str, Any]] | None:
-    for line in reversed(rollout.read_text(errors="replace").splitlines()):
-        if '"used_percent"' not in line:
-            continue
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        limits = entry.get("payload", {}).get("rate_limits")
-        if isinstance(limits, dict):
-            return dt.datetime.fromisoformat(entry["timestamp"]), limits
-    return None
-
-
-def codex_meter(window: dict[str, Any], reading_time: dt.datetime) -> Meter:
-    used = float(window.get("used_percent", 0))
-    reset = dt.datetime.fromtimestamp(window["resets_at"], dt.UTC) if window.get("resets_at") else None
-    # Codex writes a snapshot only while it runs, so a snapshot from before its window's reset is out of date.
-    if reset and reset < reading_time:
-        return {"used": 0.0, "resets": None}
-    return {"used": used, "resets": reset.isoformat() if reset else None}
+    return found
 
 
 def run_minutes_by_type(runs: list[agent_log.AgentRun]) -> dict[str, list[float]]:
@@ -692,8 +721,8 @@ def account_line(
 
 
 def start_line(candidates: list[account_room.Candidate]) -> str:
-    """The line that names the account to start each type on, other than the auditor, which starts on the
-    orchestrator's own account."""
+    """The line that names the account to start each type on, other than the auditor, which starts only when a
+    retrospective is due."""
     types = [agent_type for agent_type in agent_types("claude") if agent_type != AUDITOR]
     parts = ["start on"]
     for agent_type in types:
@@ -801,7 +830,7 @@ def run_session(events: Path) -> str | None:
     return session if isinstance(session, str) else None
 
 
-def agents_line(agents: list[Agent], thresholds: dict[str, int]) -> str:
+def agents_line(agents: list[Agent], thresholds: dict[str, int], told_for_room: set[str]) -> str:
     if not agents:
         return "agents | none running"
     parts = ["agents"]
@@ -810,20 +839,36 @@ def agents_line(agents: list[Agent], thresholds: dict[str, int]) -> str:
         threshold = thresholds.get(agent.key or "")
         if threshold:
             part += f", told at {threshold // 1000}k to hand off"
+        if agent.key in told_for_room:
+            part += ", told to hand off for its account's room"
         parts.append(part)
     return " | ".join(parts)
 
 
-def orchestrator_context(state_file: Path, checkout: Path) -> int | None:
-    transcript = orchestrator_transcript(state_file, checkout)
+def orchestrator_context(state_file: Path, project_folders: list[Path]) -> int | None:
+    transcript = orchestrator_transcript(state_file, project_folders)
     return None if transcript is None else context_tokens(transcript)
 
 
-def orchestrator_transcript(state_file: Path, checkout: Path) -> Path | None:
+def orchestrator_work(accounts: list[Account], log: Path) -> tuple[str | None, list[agent_log.Period]]:
+    """The name of the Claude account that the orchestrator runs on, which is the one whose folder holds its
+    transcript, and the periods when the orchestrator worked. The meter can run on another account, as an auditor's
+    does."""
+    checkout = paths.main_checkout()
+    transcript = orchestrator_transcript(log.parent / "state.md", claude_project_folders(checkout, accounts))
+    if transcript is None:
+        return None, []
+    account = transcript_account(checkout, accounts, transcript)
+    return (account["name"] if account else None), agent_log.session_periods(transcript)
+
+
+def orchestrator_transcript(state_file: Path, project_folders: list[Path]) -> Path | None:
+    """The transcript of the session that the state file names, in the first of the Claude Code project folders that
+    holds it, or None."""
     session = session_in_state_file(state_file)
     if session is None:
         return None
-    return paths.claude_project_folder(checkout) / f"{session}.jsonl"
+    return next((file for folder in project_folders if (file := folder / f"{session}.jsonl").exists()), None)
 
 
 def session_in_state_file(state_file: Path) -> str | None:
@@ -863,20 +908,14 @@ def retrospective_note(
     last: dt.datetime | None, runs: list[agent_log.AgentRun], transcripts: dict[str, Path], loop_folder: Path
 ) -> str:
     counted = [run for run in runs if not run.start["test"] and run.start["type"] != AUDITOR]
-    if OUTPUT_TOKENS_PER_RETROSPECTIVE is not None:
-        requests = loop_folder / request_events.REQUESTS_FILE
-        event_tokens = request_events.output_tokens(requests.read_text() if requests.exists() else "")
-        recent = [run for run in counted if last is None or agent_log.started(run) >= last]
-        ends = [end for run in recent if (end := counted_end(run, transcripts))]
-        return tokens_note(last, ends, event_tokens, OUTPUT_TOKENS_PER_RETROSPECTIVE)
-    minutes = sum(
-        agent_log.minutes_after(agent_log.working_periods(run, transcripts, loop_folder / "runs"), last)
-        for run in counted
-    )
-    return hours_note(last, minutes / 60)
+    recent = [run for run in counted if last is None or agent_log.started(run) >= last]
+    ends = [end for run in recent if (end := counted_end(run, transcripts))]
+    requests = loop_folder / request_events.REQUESTS_FILE
+    event_tokens = request_events.output_tokens(requests.read_text() if requests.exists() else "")
+    return tokens_note(last, ends, event_tokens, OUTPUT_TOKENS_PER_RETROSPECTIVE)
 
 
-def has_new_finding(loop_folder: Path, checkout: Path, printed: Path) -> bool:
+def has_new_finding(loop_folder: Path, checkout: Path, project_folders: list[Path], printed: Path) -> bool:
     """Whether the logs give a finding of waste whose subject isn't in the file printed. When GitHub doesn't say when
     the last retrospective merged, the time of scripts/check has nothing to compare with."""
     try:
@@ -884,7 +923,7 @@ def has_new_finding(loop_folder: Path, checkout: Path, printed: Path) -> bool:
     except GitHubError:
         last = None
     runs = agent_log.read_runs(loop_folder / "agents.jsonl")
-    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
+    transcripts = agent_log.agent_transcripts(project_folders)
     subjects = {finding.subject for finding in waste_findings(runs, transcripts, loop_folder, last)}
     return bool(subjects - set(json.loads(printed.read_text()) if printed.exists() else []))
 
@@ -909,10 +948,6 @@ def waste_findings(
     return findings
 
 
-def since_words(last: dt.datetime | None) -> str:
-    return "since the last one" if last else "with no retrospective yet"
-
-
 def counted_end(run: agent_log.AgentRun, transcripts: dict[str, Path]) -> dict[str, Any] | None:
     """The agent's last end line. An agent of a session without one, such as one whose session ended first, gets the
     requests until the last line of its transcript instead."""
@@ -927,7 +962,7 @@ def counted_end(run: agent_log.AgentRun, transcripts: dict[str, Path]) -> dict[s
 def tokens_note(
     last: dt.datetime | None, ends: list[dict[str, Any]], event_tokens: dict[str, int], tokens_per_retrospective: int
 ) -> str:
-    since = since_words(last)
+    since = "since the last one" if last else "with no retrospective yet"
     counts = [agent_log.agent_output_tokens(end, event_tokens) for end in ends]
     tokens = sum(tokens for tokens, _ in counts)
     without_event = sum(without_event for _, without_event in counts)
@@ -939,15 +974,6 @@ def tokens_note(
         return note
     requests = sum(len(end.get("requests") or {}) for end in ends)
     return f"{note}, {without_event} of {requests} requests with no event"
-
-
-def hours_note(last: dt.datetime | None, hours: float) -> str:
-    since = since_words(last)
-    if hours >= HOURS_PER_RETROSPECTIVE:
-        return f"retrospective due: {hours:.1f} hours of agents' work {since}"
-    # Rounded down, so that 29.98 hours don't show as 30.0 of 30
-    shown = math.floor(hours * 10) / 10
-    return f"retrospective not due: {shown:.1f} of {HOURS_PER_RETROSPECTIVE:g} hours of agents' work {since}"
 
 
 if __name__ == "__main__":

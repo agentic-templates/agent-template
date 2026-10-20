@@ -14,7 +14,7 @@ KEEP_FREE_CORES = 0.5
 KEEP_FREE_MEMORY_GB = 2.0
 KEEP_FREE_GPU_PERCENT = 10.0
 # A command reserves the most that it used in this many of its last runs.
-RUNS_PER_NEED = 5
+RUNS_PER_NEED = 3
 
 
 class Use(NamedTuple):

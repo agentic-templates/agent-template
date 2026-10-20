@@ -71,16 +71,17 @@ claude_arguments="[-p][--safe-mode][--tools][]"
 prompt="You are a developer who wants to record what they spend. Read this page once, the way that reader would. Quote each sentence you had to read twice, and say what made you stop. Then quote each sentence you didn't need, and say why. Then quote each sentence that says again what another sentence on the page already says, with the sentence it repeats. Leave out sentences that you'd only word differently."
 prompt_with_new_lines="$prompt After the page come the lines that a change added or rewrote. Check those lines most closely for a sentence that repeats another."
 
-# The record of the pages read, in the project's git folder
+# The record of the pages read, and the folder of the readers' answers, in the project's git folder
 pages_read=$base/project/.git/pages-read
+answers=$base/project/.git/fresh-reader-answers
 
 # Starts a case in which claude fails its first <failures> runs, and the script runs in the folder project, with no
-# record of the pages read: new_case <failures>
+# record of the pages read and no answers: new_case <failures>
 new_case() {
   failures=$1
   error_on_stderr=""
   run_folder=$base/project
-  rm -rf "$records" "$pages_read"
+  rm -rf "$records" "$pages_read" "$answers"
   mkdir -p "$records"
   : >"$records/calls"
 }
@@ -213,6 +214,45 @@ run_fresh_reader "$reader" docs/expenses.md
 expect_result "When claude fails twice with an error on its error output" fails \
   "error: can't get the reader's answer, because claude failed twice. The second time, it exited with code 1 and printed: Error: the error of run 2"
 
+saved_answer="A reader already read this page as it is now, and answered:"$'\n'"The reader's answer from run 1"
+new_case 0
+run_fresh_reader "$reader" docs/expenses.md
+run_fresh_reader "$reader" docs/expenses.md
+expect_result "When the same reader reads the page again" succeeds "$saved_answer"
+expect_calls "When the same reader reads the page again" "$claude_arguments"
+rm "$pages_read"
+run_fresh_reader "$reader" docs/expenses.md
+expect_result "When the same reader reads the page again after the record is gone" succeeds "$saved_answer"
+expect_record "When the same reader reads the page again after the record is gone" "$page_hash"
+
+new_case 0
+run_fresh_reader "$reader" docs/expenses.md
+run_fresh_reader "a developer who wants to export what they spend" docs/expenses.md
+expect_result "When another reader reads the page" succeeds "The reader's answer from run 2"
+
+new_case 0
+run_fresh_reader "$reader" docs/expenses.md
+printf '%s\n' "Run \`expenses list\` to see them." >>"$base/project/docs/expenses.md"
+run_fresh_reader "$reader" docs/expenses.md
+expect_result "When the page changed since the reader read it" succeeds "The reader's answer from run 2"
+git -C "$base/project" checkout --quiet -- docs/expenses.md
+
+new_case 2
+run_fresh_reader "$reader" docs/expenses.md
+run_fresh_reader "$reader" docs/expenses.md
+expect_result "When claude failed twice on the page before" succeeds "The reader's answer from run 3"
+
+# A file where the folder of the answers belongs makes the answer impossible to save.
+new_case 0
+printf '%s\n' "not a folder" >"$answers"
+run_fresh_reader "$reader" docs/expenses.md
+case_count=$((case_count + 1))
+save_error="error: the reader answered, but scripts/fresh-reader can't save the answer in $answers, so the next run on the page as it is now would ask a new reader. Fix the error above."
+if ((status == 0)) || [[ $output != "The reader's answer from run 1"$'\n'*$'\n'"$save_error" ]]; then
+  fail_case "When the answer can't be saved, scripts/fresh-reader must exit with a code other than 0, and print the reader's answer first and \"$save_error\" last, but it exited with code $status and printed \"$output\"."
+fi
+expect_record "When the answer can't be saved" "$page_hash"
+
 new_case 0
 run_fresh_reader
 expect_result "When it gets no argument" fails \
@@ -334,6 +374,9 @@ run_folder=$base
 run_fresh_reader "$reader" notes.md
 expect_result "When the folder isn't in a git repository" succeeds "The reader's answer from run 1"
 expect_input "When the folder isn't in a git repository" "$prompt"$'\n\n'"# Notes"
+run_fresh_reader "$reader" notes.md
+expect_result "When the same reader reads the page again outside a git repository" succeeds \
+  "The reader's answer from run 2"
 
 new_case 0
 git -C "$base/project" update-ref -d refs/remotes/origin/main
