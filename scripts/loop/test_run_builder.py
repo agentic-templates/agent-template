@@ -443,6 +443,45 @@ class WorktreeTest(RunBuilderTest):
         self.assertTrue(printed.endswith(f"| no report, see {self.run_folder()}\n"))
         self.assertEqual(self.calls("claude"), [])
 
+    def test_builds_on_the_branch_that_another_worktree_has_checked_out_and_pushes_the_commits_of_the_builder(
+        self,
+    ) -> None:
+        # The worktree of a builder in the orchestrator's session, which Claude Code locks
+        session = self.repo / ".claude" / "worktrees" / "agent-1"
+        self.git("worktree", "add", "--quiet", "--lock", "-b", BRANCH, str(session))
+        (session / "half.txt").write_text("half\n")
+        (self.standins / "events").write_text(lines(INIT, RESULT))
+        builder = self.standins / "builder"
+        builder.write_text(
+            '#!/bin/sh\nset -e\necho built > built.txt\ngit add built.txt\ngit commit --quiet -m "feat: build it"\n'
+            'cat "$STANDIN_DIR/events"\n'
+        )
+        builder.chmod(0o755)
+        self.answer("claude", "", {"exec": str(builder)})
+        status, printed, _ = self.run_builder("--tool", "claude")
+        self.assertEqual(status, 0, printed)
+        self.assertEqual(self.calls("claude")[0]["head"], f"ref: refs/heads/{BRANCH}")
+        self.assertEqual(self.origin_git("log", "--format=%s", f"main..{BRANCH}"), f"feat: build it\n{SAVE_SUBJECT}")
+        self.assertEqual(self.origin_git("show", f"{BRANCH}:built.txt"), "built")
+        self.assertEqual(self.origin_git("show", f"{BRANCH}:half.txt"), "half")
+        self.assertFalse(session.exists())
+
+    def test_fails_without_running_the_builder_when_clear_worktrees_leaves_the_worktree_that_has_the_branch(
+        self,
+    ) -> None:
+        session = self.repo / ".claude" / "worktrees" / "agent-1"
+        self.git("worktree", "add", "--quiet", "--lock", "-b", BRANCH, str(session))
+        (session / ".env").write_text("A=1\n")
+        status, printed, _ = self.run_builder("--tool", "claude")
+        self.assertEqual(status, 1)
+        self.assertIn(
+            f"| failed: scripts/clear-worktrees failed: Left {session}, which holds the branch of issue #12, because it "
+            "has untracked files whose names suggest a secret: .env |",
+            printed,
+        )
+        self.assertEqual((session / ".env").read_text(), "A=1\n")
+        self.assertEqual(self.calls("claude"), [])
+
     def test_fails_and_leaves_the_folder_that_has_the_branch_when_git_cannot_add_the_worktree(self) -> None:
         self.git("switch", "--quiet", "--create", BRANCH)
         (self.repo / "half.txt").write_text("half\n")

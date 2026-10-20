@@ -17,8 +17,10 @@ the run lasts. When the run ends,
 scripts/clear-worktrees <issue> commits the changes that the builder left on the branch and removes the worktree, and
 the script pushes the branch. If the branch has a pull request, the script turns off its auto-merge and makes it a
 draft before the push. If scripts/clear-worktrees or a check refuses the changes, the script keeps them in the
-worktree or on the local branch, and the run fails and says where they are. The script doesn't start when that
-worktree exists already, or when the issue has needs-triage.
+worktree or on the local branch, and the run fails and says where they are. If a worktree other than the main checkout
+has the issue's branch checked out, such as one of a builder in the orchestrator's session, the script first runs
+scripts/clear-worktrees <issue>, which saves that worktree's changes on the branch and removes it. The script doesn't
+start when its own worktree exists already, or when the issue has needs-triage.
 
 The builder's prompt holds the issue's text. With --message, the text of the file FILE follows it there, as a message
 from the orchestrator, such as the errors that a reviewer found in the issue's pull request. The script doesn't start
@@ -337,7 +339,7 @@ def build(
     worktree. Returns how the run ended, with the worktree's size before its removal."""
     branch = issue_branch(issue["number"], folders)
     try:
-        add_worktree(branch, folders)
+        add_worktree(issue["number"], branch, folders)
         if work.tool == "claude":
             brief = write_brief(issue, work.kind, message, CLAUDE_BRIEF, folders)
             run_claude(brief, account, settings, folders, hand_off_type=work.agent_type)
@@ -438,7 +440,26 @@ def clear_worktree(issue: int, branch: str, folders: Folders) -> str:
     the worktree and pushes the branch. Returns where the changes stay when that fails, or an empty string."""
     if not folders.worktree.exists():
         return ""
-    # Git runs the main checkout's hooks, because the worktree's copies are files that the builder can change.
+    problem = free_issue_branches(issue, folders)
+    if problem:
+        return problem
+    # The script skips a worktree that doesn't hold the issue's branch, such as one where a check refused the commit of
+    # a Codex builder's changes.
+    if folders.worktree.exists():
+        if has_unpushed_changes(folders):
+            return f"the changes stay in {folders.worktree}, off the issue's branch"
+        remove_worktree(folders)
+    try:
+        push_saved_changes(branch, folders)
+    except Stop as stop:
+        return f"the changes stay on the local branch {branch}, because {stop}"
+    return ""
+
+
+def free_issue_branches(issue: int, folders: Folders) -> str:
+    """Runs scripts/clear-worktrees for the issue, which saves the changes of each worktree that holds a branch of the
+    issue on the branch, and removes the worktree. Returns why the script failed, or an empty string."""
+    # Git runs the main checkout's hooks, because the worktree's copies are files that a builder can change.
     count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
     hooks = {"GIT_CONFIG_COUNT": str(count + 1), f"GIT_CONFIG_KEY_{count}": "core.hooksPath"}
     hooks[f"GIT_CONFIG_VALUE_{count}"] = folders.hooks
@@ -452,16 +473,6 @@ def clear_worktree(issue: int, branch: str, folders: Folders) -> str:
     )
     if done.returncode != 0:
         return f"scripts/clear-worktrees failed: {one_line(done.stdout + done.stderr)}"
-    # The script skips a worktree that doesn't hold the issue's branch, such as one where a check refused the commit of
-    # a Codex builder's changes.
-    if folders.worktree.exists():
-        if has_unpushed_changes(folders):
-            return f"the changes stay in {folders.worktree}, off the issue's branch"
-        remove_worktree(folders)
-    try:
-        push_saved_changes(branch, folders)
-    except Stop as stop:
-        return f"the changes stay on the local branch {branch}, because {stop}"
     return ""
 
 
@@ -562,9 +573,23 @@ def issue_branch(issue: int, folders: Folders) -> str:
     return branch
 
 
-def add_worktree(branch: str, folders: Folders) -> None:
+def add_worktree(issue: int, branch: str, folders: Folders) -> None:
+    # Git checks out a branch in one worktree at a time, and a builder's worktree in the orchestrator's session keeps
+    # the branch until its pull request merges. The main checkout stays as it is, because the maintainer may work there.
+    if is_held_by_linked_worktree(branch, folders):
+        problem = free_issue_branches(issue, folders)
+        if problem:
+            raise Stop(problem)
     add_locked_worktree(branch, folders)
     git(["merge", "--ff-only", "--quiet", f"refs/remotes/origin/{branch}"], folders.worktree, folders.hooks)
+
+
+def is_held_by_linked_worktree(branch: str, folders: Folders) -> bool:
+    """Whether a worktree other than the main checkout has the branch checked out."""
+    listing = git(["worktree", "list", "--porcelain"], folders.checkout, folders.hooks)
+    # git lists the main checkout first, and ends each worktree with an empty line.
+    linked = listing.split("\n\n")[1:]
+    return any(f"branch refs/heads/{branch}" in worktree.splitlines() for worktree in linked)
 
 
 def add_locked_worktree(target: str, folders: Folders, detach: bool = False) -> None:
