@@ -227,5 +227,5 @@ When the meter's `machine` line says `retrospective due`, start an `auditor` age
 request is still open.
 
 Each agent file in `.claude/agents` names the full ID of its model, such as `claude-opus-5-5`, and not an alias such
-as `opus`. When Anthropic points an alias at a newer model, each type keeps its model until a retrospective tests the
-newer one. That retrospective changes the ID in the file of each type that the test moves to the newer model.
+as `opus`, so that its type keeps its model when Anthropic points the alias at a newer one. A retrospective that tests
+a newer model moves a type to it by changing the ID in the type's file.
