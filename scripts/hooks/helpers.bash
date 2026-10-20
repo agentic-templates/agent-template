@@ -26,6 +26,8 @@ source "${BASH_SOURCE[0]%/*}/words-without-secrets.bash"
 source "${BASH_SOURCE[0]%/*}/simple-commands.bash"
 # shellcheck source=scripts/hooks/command-prefixes.bash
 source "${BASH_SOURCE[0]%/*}/command-prefixes.bash"
+# shellcheck source=scripts/hooks/physical-path.bash
+source "${BASH_SOURCE[0]%/*}/physical-path.bash"
 
 # This file's folder, as an absolute path, because some checks change to the folder that the agent works in.
 hooks_folder=${BASH_SOURCE[0]%/*}
@@ -142,47 +144,15 @@ expand_home() {
   [[ $expanded_path != *[\$\`]* ]]
 }
 
-# Prints a path with symlinks and .. resolved in its folders, also when the file or its folders don't exist yet,
-# so that two ways to write one path, such as /tmp and /private/tmp on macOS, give the same result. A relative folder
-# starts from the current folder: physical_path <path> <folder that a relative path starts from>
-physical_path() {
-  local path=$1 folder rest="" part
-  local -a parts=()
-  if [[ $path != /* ]]; then
-    path=$2/$path
-  fi
-  # The loop below cuts the path at each /, so a relative path without one would never get shorter.
-  if [[ $path != /* ]]; then
-    path=$PWD/$path
-  fi
-  # The deepest folder that exists can hold symlinks. The parts after it can't, so they're resolved as text.
-  folder=$path
-  while [[ -n $folder && ! -d $folder ]]; do
-    rest=/${folder##*/}$rest
-    folder=${folder%/*}
-  done
-  folder=$(CDPATH='' cd -- "${folder:-/}" && pwd -P)
-  IFS=/ read -r -a parts <<<"$rest"
-  if ((${#parts[@]} > 0)); then
-    for part in "${parts[@]}"; do
-      case $part in
-        "" | .) ;;
-        ..)
-          folder=${folder%/*}
-          folder=${folder:-/}
-          ;;
-        *) folder=${folder%/}/$part ;;
-      esac
-    done
-  fi
-  echo "$folder"
-}
-
 # Sets the array tool_paths to the files that the agent's file-writing tool would create or change: the file_path of
 # Write and Edit, or each file that a patch of Codex's apply_patch adds, changes or moves to. A patch names each file
 # on a line of its own. The files that a patch deletes aren't on the list.
+# Claude Code's Write and Edit resolve each .. in a path as text before they write, so a .. after a symlink leads to
+# the folder that holds the link. The system leads to the parent of the link's target instead, and another tool may
+# leave the path to it. So each path with a .. is on the list twice: as written, and as an absolute path with each .
+# and .. resolved as text. A relative path starts from the folder the agent works in.
 read_tool_paths() {
-  local line
+  local line path
   tool_paths=()
   case $tool_name in
     Write | Edit) tool_paths=("$file_path") ;;
@@ -196,6 +166,17 @@ read_tool_paths() {
       done <<<"$patch"
       ;;
   esac
+  for path in ${tool_paths[@]+"${tool_paths[@]}"}; do
+    if [[ /$path/ != */../* ]]; then
+      continue
+    fi
+    # expand_home fails on a $, but no shell reads this path, so a $ in it is only part of a name.
+    expand_home "$path" || true
+    if [[ $expanded_path != /* ]]; then
+      expanded_path=${cwd:-$PWD}/$expanded_path
+    fi
+    tool_paths+=("$(textual_path "$expanded_path")")
+  done
 }
 
 # Changes command_folder as a cd command in command_words would, or empties it when the hook can't tell the folder.

@@ -58,6 +58,7 @@ EVERY_TEST = {
     "scripts/fixtures/allowed-repositories",
     "scripts/hooks/simple-commands.bash",
     "scripts/hooks/command-prefixes.bash",
+    "scripts/hooks/physical-path.bash",
 }
 
 # The script doesn't follow the files that these name, because they use the names only as data, as this script does in

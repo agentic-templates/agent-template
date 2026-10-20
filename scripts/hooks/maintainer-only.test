@@ -195,6 +195,9 @@ expect_allow Bash 'echo "alias ll=\"ls -l\"" >> .bashrc'
 expect_block Bash 'cp .zshrc ~' "$(settings_file '~/.zshrc')"
 expect_block Bash 'mv ../dotfiles/.vimrc ~/' "$(settings_file '~/.vimrc')"
 expect_allow Bash 'cp notes.txt ~'
+# Claude Code's Write resolves a .. after a symlink as text, so it leads to the folder that holds the link.
+ln -s "$project/scripts" "$home_with_project/link"
+expect_block Write "$home_with_project/link/../.zshrc" "$(settings_file "$home_with_project/.zshrc")"
 test_home=/home-for-tests/someone test_cwd=$project
 
 # Deleting outside the repository's worktrees and the temporary folders
