@@ -450,6 +450,29 @@ feat: block the commands that print the token
 gh auth token
 EOF"
 
+# pkill and killall, which pick processes by their name or by a pattern in their command line
+# shellcheck disable=SC2016 # The commands are the text that the agent sends, so $! and $( ) stay as written.
+picks_processes='Blocked: pkill and killall pick processes by their name or by a pattern in their command line, so they can stop other agents, whose command lines hold their prompts. Stop your own processes by their process ids instead, such as with kill $! in the command that started one in the background.'
+# shellcheck disable=SC2016
+picks_processes_commands=(
+  'pkill -f errors'
+  'pkill node'
+  'killall python3'
+  'killall -m python'
+  '/usr/bin/pkill -TERM -f errors'
+  'scripts/check & sleep 60; pkill -f scripts/check'
+  'echo "$(pkill node)"'
+)
+for command in "${picks_processes_commands[@]}"; do
+  expect_block Bash "$command" "$picks_processes"
+done
+expect_block_behind_wrappers 'pkill -f errors' "$picks_processes"
+# shellcheck disable=SC2016
+for command in 'kill 1234' 'kill $!' 'kill -TERM 1234 1235' 'scripts/check & sleep 60; kill $!' 'pgrep -f errors' \
+  'git commit -m "Block pkill and killall"'; do
+  expect_allow Bash "$command"
+done
+
 # Substitutions run inside quoted words and expandable here-documents, but quoted delimiters keep them literal.
 # shellcheck disable=SC2016 # Inspect shell text without expanding it in the test.
 substitution_commands=(
