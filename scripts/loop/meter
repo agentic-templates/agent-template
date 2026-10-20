@@ -622,16 +622,17 @@ def agent_minutes(
     reading_time: dt.datetime,
     runs_folder: Path,
 ) -> float:
-    """The minutes that the agents on the account worked since the time. An agent without an end line counts while
-    is_running says that it runs."""
+    """The minutes that the agents on the account worked since the time. An agent without an end line counts until the
+    reading while is_running says that it runs, and until the last line of its transcript or events once it stopped,
+    such as when the user interrupted it."""
     minutes = 0.0
     for run in runs:
         if run.start.get("account") != account:
             continue
-        if run.end is not None:
-            minutes += agent_log.minutes_after(agent_log.working_periods(run, {}, runs_folder), since)
-        elif is_running(run, transcripts):
+        if is_running(run, transcripts):
             minutes += agent_log.minutes_after([(agent_log.started(run), reading_time)], since)
+        else:
+            minutes += agent_log.minutes_after(agent_log.working_periods(run, transcripts, runs_folder), since)
     return minutes
 
 

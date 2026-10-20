@@ -7,7 +7,7 @@ from typing import Any
 from unittest import mock
 
 import paths
-from test_meter import METER, MeterTest, meter
+from test_meter import INTERRUPTION, METER, MeterTest, meter
 from test_transcripts import call_line, prompt_line, write_transcript
 
 
@@ -16,12 +16,6 @@ def call(tokens: int, **fields: Any) -> str:
     are far off, as in Claude Code's transcripts."""
     usage = {"input_tokens": 5, "cache_read_input_tokens": tokens - 1005, "cache_creation_input_tokens": 1000}
     return json.dumps({"type": "assistant", "message": {"usage": usage | {"output_tokens": 999_999}}} | fields)
-
-
-# The line that Claude Code writes in an agent's transcript when the user interrupts the agent
-INTERRUPTION = json.dumps(
-    {"type": "user", "message": {"content": [{"type": "text", "text": "[Request interrupted by user for tool use]"}]}}
-)
 
 
 class AgentsLineTest(MeterTest):

@@ -4,8 +4,7 @@ import os
 from unittest import mock
 
 import paths
-from test_meter import NOW, MeterTest, meter, meters
-from test_meter_agents import INTERRUPTION
+from test_meter import INTERRUPTION, NOW, MeterTest, meter, meters
 from test_transcripts import call_line, write_transcript
 
 
