@@ -36,9 +36,10 @@ The steps:
 
 Work through these steps each time you wake, for a message or because an agent or a background task ended.
 
-Make a change of text yourself, such as a fix to a guide, when you can write it in full, because a builder would only
-write it again. Run `scripts/check` for it as a background task, and go on with the cycle while it runs. Give each
-change of code to a builder, even a change of one line, because a failing check in code can take many runs to fix.
+Make a change of text yourself, such as a fix to a guide, when you already know each word of it, because a builder
+would only write the same words. Run `scripts/check` for it as a background task, and go on with the cycle while it
+runs. Give each change of code to a builder, even a change of one line, because a failing check in code can take many
+runs to fix, and a builder's runs don't keep you from acting.
 
 To give a builder something, such as a correction or a reviewer's errors, send it a message. A builder that
 `scripts/loop/run-builder` started can't take messages. Wait until its run ends, and then start a new builder with
