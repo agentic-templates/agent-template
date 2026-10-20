@@ -42,6 +42,7 @@ add_fork_remote() {
   fi
   if ! answer=$(git remote add "$fork_remote" "https://github.com/$fork.git" 2>&1); then
     echo "error: can't add the private fork $fork as the git remote $fork_remote, because git failed: $answer" >&2
+    echo "Once git can add it, run scripts/create-private-fork $ghsa_id again, which adds the remote." >&2
     return 1
   fi
 }

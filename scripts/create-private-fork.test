@@ -208,6 +208,7 @@ run_create_private_fork "$ghsa_id"
 expected_start="$fork
 error: can't add the private fork $fork as the git remote $fork_remote, because git failed: "
 expected_end="
+Once git can add it, run scripts/create-private-fork $ghsa_id again, which adds the remote.
 Deleted 441-fix-import
 Deleted dependabot/github_actions/actions/checkout-5"
 case_count=$((case_count + 1))
