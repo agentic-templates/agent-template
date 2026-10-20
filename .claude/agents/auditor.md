@@ -86,8 +86,9 @@ If your prompt names a model that no retrospective tested, test it too, as "Star
 describes.
 
 Leave out a test that an earlier retrospective's description records, unless its numbers changed since. Run the test
-with the largest expected saving first, and start each build only while `scripts/loop/meter` gives the advice `go`
-for the account that the build runs on.
+with the largest expected saving first. Start each build on the account that `scripts/loop/meter --start-on <type>`
+prints, where `<type>` is the type that the tested version is a version of, and start none while it prints
+`no account`.
 
 A version can differ from its type in its model, effort, instructions, tools, disallowed tools or limit on turns.
 Write each version as an agent file in `.claude/agents/` in your worktree, such as `builder-cheaper.md`. In a test,
