@@ -14,7 +14,7 @@ When a maintainer asks you to publish a release, or a goal is done:
 
    Open an issue for each problem that the reviewer reports but didn't record in an advisory. If the problem is a vulnerability that's public already, such as one in a dependency that a published advisory describes, fix it before the release: once its pull request merges, start again from step 2.
 
-   Add the line `<GHSA ID> holds-release` to `.loop/advisory-marks` in the main checkout for each advisory that the reviewer's report gives for a vulnerability that isn't public yet. If you aren't the orchestrator, tell the maintainer these GHSA IDs instead, and ask them to have the orchestrator add the lines before any release. Then run `scripts/holding-advisories`. If it prints any GHSA ID, or you told the maintainer any, stop here, and go on to "Fix a security vulnerability" for each of them.
+   Add the line `<GHSA ID> holds-release` to `.loop/advisory-marks` in the main checkout for each advisory that the reviewer's report gives for a vulnerability that isn't public yet. Then run `scripts/holding-advisories`. If the reviewer's report gives any such GHSA ID, or the script prints any, stop here, and go on to "Fix a security vulnerability" for each of them.
 4. Choose the version with `scripts/next-version <sha>`. If the script prints an error instead of a version, ask the maintainer about it, and publish the release once they answer. If the maintainer named a version that differs from the one the script printed, ask which one to publish.
 5. Publish the release with notes built from the merged pull requests:
    ```sh
