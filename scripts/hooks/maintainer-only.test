@@ -674,6 +674,26 @@ expect_allow Bash 'GH_REPO=jtmpl/project gh pr comment 5 --body Hello'
 expect_allow Bash 'GH_REPO=someone/else gh pr comment 5 -R jtmpl/project --body Hello'
 # time -o names the file that time writes to, so GH_REPO=someone/else sets no variable there.
 expect_allow Bash 'time -o GH_REPO=someone/else gh pr comment 5 --body Hello'
+# A GH_REPO that an earlier command exports or assigns holds for each gh command after it.
+for command in 'export GH_REPO=someone/else; gh pr comment 5 --body Hello' \
+  'GH_REPO=someone/else && gh issue comment 5 --body Hello' 'declare -x GH_REPO=someone/else; gh pr close 5' \
+  'export GH_REPO=someone/else; gh pr view 5; gh issue comment 5 --body Hello'; do
+  expect_block Bash "$command" "$(other_repository someone/else)"
+done
+expect_block Bash "export GH_REPO=someone/else; gh api -X PATCH 'repos/{owner}/{repo}' -F private=false" \
+  "$(public someone/else)"
+expect_allow Bash 'export GH_REPO=jtmpl/project; gh pr comment 5 --body Hello'
+expect_allow Bash 'export GH_REPO=; gh pr comment 5 --body Hello'
+expect_allow Bash 'gh pr comment 5 --body Hello; export GH_REPO=someone/else'
+expect_allow Bash 'export GH_REPO=someone/else; gh pr view 5'
+expect_allow Bash 'export GH_REPO=someone/else; gh pr comment 5 -R jtmpl/project --body Hello'
+expect_allow Bash 'export GH_REPO=someone/else; GH_REPO=jtmpl/project gh pr comment 5 --body Hello'
+expect_allow Bash 'GH_REPO=someone/else make; gh pr comment 5 --body Hello'
+# Once the list names someone/else, the hook allows the post.
+cp "$project/.loop/allowed-repositories" "$base/allowed-repositories"
+echo someone/else >>"$project/.loop/allowed-repositories"
+expect_allow Bash 'export GH_REPO=someone/else; gh pr comment 5 --body Hello'
+mv "$base/allowed-repositories" "$project/.loop/allowed-repositories"
 expect_allow Bash 'gh api -X POST "repos/{owner}/{repo}/issues/5/comments" -f body=Thanks'
 expect_allow Bash 'gh pr list --repo someone/else'
 expect_allow Bash 'gh pr view 42 -R someone/else'
@@ -718,6 +738,8 @@ expect_block Bash "cd '$other_clone' && gh api -X POST 'repos/{owner}/{repo}/iss
   "$(other_repository someone/else)"
 test_cwd=$other_clone
 expect_block Bash 'gh pr comment 5 --body Hello' "$(other_repository someone/else)"
+# gh posts to the origin when the shell doesn't export a GH_REPO that an earlier command assigns.
+expect_block Bash 'GH_REPO=jtmpl/project; gh pr comment 5 --body Hello' "$(other_repository someone/else)"
 test_cwd=$project
 expect_allow Bash "(cd '$other_clone' && gh pr list) && gh pr comment 5 --body Hello"
 expect_allow Bash "cd '$base' && gh issue comment 5 --body Hello"

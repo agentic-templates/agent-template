@@ -47,6 +47,9 @@ security_change="Blocked: this changes the repository's rules or security settin
 physical_home=""
 reviewed_fixes_file=""
 deletable_folders=()
+# The values of GH_REPO that the Bash call's simple commands so far set in the shell, as record_earlier_gh_repo finds
+# them
+earlier_gh_repos=()
 
 # Succeeds if a word is one of the others: is_one_of <word> <other>...
 is_one_of() {
@@ -632,7 +635,7 @@ check_repo_edit() {
 }
 
 check_gh_api() {
-  local i field="" makes_public=""
+  local i field="" makes_public="" guessed
   read_arguments 2 "$api_flags_with_value"
   read_api_method
   if [[ $api_method == GET ]]; then
@@ -653,6 +656,9 @@ check_gh_api() {
   done
   if [[ -n $makes_public ]]; then
     find_destination
+    for guessed in ${guessed_repositories[@]+"${guessed_repositories[@]}"}; do
+      block_if_public_unless_allowed "$guessed" "a repository"
+    done
     block_if_public_unless_allowed "$destination" "a repository"
   fi
 }
@@ -684,9 +690,11 @@ text_flags=" -b --body -t --title -c -F --body-file --description -n --notes --n
 # - the endpoint of gh api, such as repos/owner/name/issues, unless it's repos/{owner}/{repo}
 # - for any other command, the repository that gh repo edit and the like take, -R or --repo, or the URL of an issue or
 #   a pull request
-# - GH_REPO, whose value check_gh puts in gh_repo
+# - GH_REPO, whose value check_gh puts in gh_repo when the words before gh set it
 # - the remote named origin of the folder that the command runs in
-# It also sets guessed_repositories, as find_named_repository describes.
+# It also sets guessed_repositories, as find_named_repository describes. Before it takes the origin, it adds each value
+# in earlier_gh_repos to guessed_repositories, because gh takes such a GH_REPO while the shell exports it, but takes the
+# origin when the shell didn't export it or no longer has it, as after the ( ) that set it ends.
 # For gh api, run read_arguments first.
 find_destination() {
   local origin
@@ -709,6 +717,7 @@ find_destination() {
     destination=$gh_repo
     return 0
   fi
+  guessed_repositories+=(${earlier_gh_repos[@]+"${earlier_gh_repos[@]}"})
   if [[ -z $command_folder ]]; then
     return 0
   fi
@@ -912,6 +921,24 @@ check_gh() {
   check_destination
 }
 
+# Adds to earlier_gh_repos the value of GH_REPO that the simple command in command_words sets in the shell for the
+# commands after it: with words that set variables and no command, or with export, declare and the like. An empty
+# value counts as none, as it does for gh. Run drop_command_prefixes first.
+record_earlier_gh_repo() {
+  local word
+  local -a setting_words=()
+  if ((${#command_words[@]} == 0)); then
+    setting_words=(${assignment_words[@]+"${assignment_words[@]}"})
+  elif is_one_of "${command_words[0]}" export declare typeset readonly local; then
+    setting_words=("${command_words[@]:1}")
+  fi
+  for word in ${setting_words[@]+"${setting_words[@]}"}; do
+    if [[ $word == GH_REPO=?* ]]; then
+      earlier_gh_repos+=("${word#GH_REPO=}")
+    fi
+  done
+}
+
 check_simple_command() {
   local prefix_count file i
   drop_command_prefixes "$@"
@@ -927,6 +954,7 @@ check_simple_command() {
     # bash -c, because zsh has no compgen.
     block "Blocked: this command prints the whole environment, which holds tokens. Print only the variables you need, by name, as in printenv PATH. To list the variables' names without their values, run bash -c 'compgen -e'."
   fi
+  record_earlier_gh_repo
   if ((${#command_words[@]} == 0)); then
     return 0
   fi
