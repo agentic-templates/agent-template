@@ -3,8 +3,9 @@
 # in a Markdown page anywhere in docs/, and no fresh reader has read that page as it is now, because "Review a changed
 # page with a fresh reader" in docs/pages.md asks for one. A pull request that only deletes a page's lines or renames
 # the page needs no reader. Once the pull request is open, the check blocks a git push to its branch in the same way,
-# for each page that the push adds a line to that the page on the pull request's base branch lacks. So a page needs no
-# reader when a merge of the base branch, or a rebase onto it, only brings in the base branch's lines.
+# for each page that the push adds a line to that the page lacks where the branch starts from the pull request's base
+# branch. So a page needs no reader when a merge of the base branch, or a rebase onto it, only brings in the base
+# branch's lines.
 # scripts/fresh-reader records git's hash of each page that it gives a reader, as pages-read.bash describes, and this
 # check looks up the hash of each such page. The pull request's commits are those that find_commits in helpers.bash
 # finds, in the folder that gh runs in, as follow_cd in helpers.bash finds it. A push's commits are those after the
@@ -63,15 +64,17 @@ added_lines() {
     awk '/^@@/ { in_hunk = 1; next } /^diff --git / { in_hunk = 0 } in_hunk && /^\+/ { print substr($0, 2) }'
 }
 
-# Prints each page on the input that has a line that a commit doesn't have and that the page on the base branch lacks,
-# one to a line: pages_with_lines_not_on_base <the base branch's commit> <commit>
+# Prints each page on the input that has a line that a commit doesn't have and that the page lacks at the commit where
+# the branch starts from the base branch, one to a line:
+# pages_with_lines_not_at_branch_start <the commit where the branch starts> <commit>
 # Such a line is one that the branch wrote, rather than one that a merge of the base branch, or a rebase onto it,
-# brought in.
-pages_with_lines_not_on_base() {
+# brought in. The page counts as it is where the branch starts, not at the base branch's latest commit, because the base
+# branch can rewrite a line after a merge brought it in.
+pages_with_lines_not_at_branch_start() {
   local path lines
   while IFS= read -r path; do
     lines=$(added_lines "$2" "$path")
-    # A page that the base branch doesn't have lacks every line, and grep -v with no patterns prints every line.
+    # A page that the branch's start doesn't have lacks every line, and grep -v with no patterns prints every line.
     if [[ -n $lines ]] && grep -qvxF -f <(git cat-file blob "$1:$path" 2>/dev/null || true) <<<"$lines"; then
       printf '%s\n' "$path"
     fi
@@ -154,10 +157,10 @@ open_pull_requests() {
 }
 
 # Blocks a push that gives a branch on origin pages that no reader has read as the push leaves them, when the branch has
-# an open pull request, and the push adds lines to those pages that the pull request's base branch lacks:
-# check_pushed_branch <the commit or branch that the push sends> <the branch on origin>
+# an open pull request, and the push adds lines to those pages that they lack where the branch starts from the pull
+# request's base branch: check_pushed_branch <the commit or branch that the push sends> <the branch on origin>
 check_pushed_branch() {
-  local origin_commit unread uncommitted pull_requests number base_branch written
+  local origin_commit unread uncommitted pull_requests number base_branch branch_start written
   # The repository has a copy of the branch on origin once it has fetched or pushed the branch. Without one, the hook
   # can't tell which text the push adds.
   if ! head_commit=$(git rev-parse --verify --quiet "$1^{commit}") ||
@@ -171,12 +174,12 @@ check_pushed_branch() {
     return 0
   fi
   while read -r number base_branch; do
-    if ! find_base_commit "$base_branch"; then
+    if ! find_base_commit "$base_branch" || ! branch_start=$(git merge-base "$base_commit" "$head_commit"); then
       continue
     fi
     written=""
     if [[ -n $unread ]]; then
-      written=$(pages_with_lines_not_on_base "$base_commit" "$origin_commit" <<<"$unread")
+      written=$(pages_with_lines_not_at_branch_start "$branch_start" "$origin_commit" <<<"$unread")
     fi
     if [[ -n $written ]]; then
       block "$(unread_message "this push to pull request #$number" "git push" "$written")"

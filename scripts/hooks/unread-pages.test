@@ -341,6 +341,16 @@ commit_all "chore: keep more notes"
 expect_check "git push" 0 ""
 git merge --quiet --no-edit main >/dev/null
 expect_check "git push" 0 ""
+# The base branch's page counts as it is where the branch starts, so the merge still needs no reader once main rewrites
+# the line that the merge brought in.
+work_in "$clone"
+sed 's/^Then rewrite each sentence that the reader found unclear\.$/Then rewrite each sentence that the reader read twice./' \
+  docs/pages.md >"$base/pages.md"
+mv "$base/pages.md" docs/pages.md
+commit_all "docs: say which sentences to rewrite"
+git push --quiet origin main
+work_in "$pushed_worktree"
+expect_check "git push" 0 ""
 
 # A merge whose resolution of a conflict writes a line that neither branch has is blocked.
 work_in "$clone"
