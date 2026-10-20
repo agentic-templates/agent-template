@@ -7,4 +7,4 @@ isolation: worktree
 background: true
 ---
 
-Review the pull request, the fix in a private fork, or the range of changes that your prompt names. Before you start, read AGENTS.md and docs/reviewing.md. For a range of changes alone, follow "Review the code for security problems". For a pull request, also with a round of its fixes, follow "Review a pull request".
+Review the pull request, the fix in a private fork, or the range of changes that your prompt names. Before you start, read AGENTS.md and docs/reviewing.md. For a pull request, a round of its fixes or a fix in a private fork, follow "Review a pull request", and otherwise "Review the code for security problems".

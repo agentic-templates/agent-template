@@ -41,10 +41,10 @@ from acting.
 To give a builder something, such as a correction or a reviewer's errors, send it a message. A builder that
 `scripts/loop/run-builder` started can't take messages. Wait until its run ends, and then start a new builder with
 the message, of the type `builder` unless a step below names another type. Start that builder, and each reviewer
-that you give a message in "Drafts" below, in this way:
+that you give a message, in this way:
 
 - On your own account, start a builder on the old builder's pull request, or on its issue if it opened none, and a
-  reviewer on the draft whose round of fixes it reads. Put the message in the agent's prompt after the first line.
+  reviewer on the pull request that it reviews. Put the message in the agent's prompt after the first line.
 - On another account, write the message to a file in a folder of your own in `.loop/`. Then run the command that
   "Read the meter" gives for the account, with `--message <file>`. In place of a builder's `<issue> <kind>`, give
   the `issue` and the `kind` of the old builder's start line in `.loop/agents.jsonl`, such as `12 left behind 34`
