@@ -41,8 +41,10 @@ It adds a line with the type and the account that it named to .loop/meter.jsonl.
 
 The line before the last lists the agents that run: those with a start line and no end line in .loop/agents.jsonl,
 each with its type and the number of its issue or pull request. It leaves out an agent whose Claude Code process or
-run of scripts/loop/run-builder has ended, such as a builder of an orchestrator that was restarted. It gives each
-agent's context size, and the threshold at which scripts/hooks/hand-off told the agent to hand off its work, if it did.
+run of scripts/loop/run-builder has ended, such as a builder of an orchestrator that was restarted. It leaves out an
+agent that the user interrupted too, until the agent gets a message, because Claude Code then runs no hook that writes
+an end line. It gives each agent's context size, and the threshold at which scripts/hooks/hand-off told the agent to
+hand off its work, if it did.
 
 The last line gives the machine's free disk, free memory, swap in use, GPU use and GPU memory in use, its load, the
 orchestrator's context size, and whether a retrospective is due. One is due once the output tokens of the agents that
@@ -68,10 +70,11 @@ that took far longer than the median of its type, heavy commands that waited lon
 the last hour, and passing runs of scripts/check that grew slower since the last retrospective. The meter writes the
 subjects of the signs that it printed to .loop/printed-findings.json.
 
-With --wake, the meter keeps reading, and prints and ends when an account's advice changes, when an account gives no
-reading, when a reading has a sign of waste whose subject the meter didn't print last time, when scripts/hooks/hand-off
-tells an agent to hand off its work, and 50 minutes after it started while an account's advice is stop. Run it in the
-background, so that its end wakes the orchestrator.
+With --wake, the meter keeps reading, and prints and ends when an account's advice changes, when an account loses the
+reading that it had at the start or gets back the one that it didn't have, when a reading has a sign of waste whose
+subject the meter didn't print last time, when scripts/hooks/hand-off tells an agent to hand off its work, and 50
+minutes after it started while an account's advice is stop. While an account has no reading, it reads at least every
+{retry} minutes. Run it in the background, so that its end wakes the orchestrator.
 
 .loop/accounts.json in the main checkout lists the accounts, each with the environment variables that select it:
 
@@ -111,6 +114,7 @@ from github import GitHubError, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, note_files
 from machine import Machine, read_machine
 from meter_waits import LONGEST_READING_GAP, READ_EVERY_SECONDS, WAKE_EVERY
+from transcripts import is_interrupted, tail_lines
 from usage import Meter, parse_usage
 
 # The period over which the meter measures the usage per agent-minute. It measures from the newest reading at least
@@ -130,11 +134,11 @@ LATEST_TIME = dt.datetime.max.replace(tzinfo=dt.UTC)
 CLAUDE_TIMEOUT_SECONDS = 120
 # A Codex snapshot from before this is from an earlier weekly window, so the meter doesn't read older session files.
 CODEX_SNAPSHOT_AGE = dt.timedelta(days=8)
-# The meter reads only the end of a transcript, where the last call is. An orchestrator's transcript of 218 MB took
-# 0.25 seconds and about 0.5 GB of memory to read whole.
-TRANSCRIPT_TAIL_BYTES = 400_000
 # How often meter --wake looks for a new note of scripts/hooks/hand-off between two readings
 HAND_OFF_CHECK_SECONDS = 60
+# The longest that meter --wake waits between two readings while an account has no reading, so that it sees the
+# reading come back
+NO_READING_WAIT_SECONDS = 10 * 60
 # .claude/agents/auditor.md says when a retrospective sets this.
 OUTPUT_TOKENS_PER_RETROSPECTIVE: int | None = None
 HOURS_PER_RETROSPECTIVE = 30.0
@@ -205,9 +209,9 @@ def main(argv: list[str] | None = None) -> int:
         readings = wait_for_wake(accounts, log, hand_offs, lambda: has_new_finding(loop_folder, checkout, printed))
     else:
         readings = read_accounts(accounts, log)
-    agents = agents_line(running_agents(loop_folder, checkout), hand_off_thresholds(note_files(hand_offs)))
-    runs = agent_log.read_runs(loop_folder / "agents.jsonl")
     transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
+    agents = agents_line(running_agents(loop_folder, transcripts), hand_off_thresholds(note_files(hand_offs)))
+    runs = agent_log.read_runs(loop_folder / "agents.jsonl")
     try:
         last = max(retrospective_merges(checkout), default=None)
     except GitHubError as error:
@@ -230,14 +234,15 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def help_text() -> str:
-    """The docstring, with the numbers that the code keeps in place of {hours}, {period}, {gap} and {start}, so that
-    changing a number takes one edit. The docstring's JSON example has braces of its own, so str.format can't fill it
-    in."""
+    """The docstring, with the numbers that the code keeps in place of {hours}, {period}, {gap}, {start} and {retry},
+    so that changing a number takes one edit. The docstring's JSON example has braces of its own, so str.format can't
+    fill it in."""
     numbers = {
         "{hours}": f"{HOURS_PER_RETROSPECTIVE:g}",
         "{period}": f"{USAGE_PERIOD.total_seconds() / 60:g}",
         "{gap}": f"{LONGEST_READING_GAP.total_seconds() / 60:g}",
         "{start}": f"{OLDEST_START_READING.total_seconds() / 60:g}",
+        "{retry}": f"{NO_READING_WAIT_SECONDS / 60:g}",
     }
     text = str(__doc__)
     for placeholder, number in numbers.items():
@@ -250,15 +255,17 @@ def now() -> dt.datetime:
 
 
 def wait_for_wake(accounts: list[Account], log: Path, hand_offs: Path, has_new_finding: Callable[[], bool]) -> Readings:
-    """Reads until an account's advice differs from its advice at the first reading, until a reading has a new finding
-    of waste, until scripts/hooks/hand-off writes a new note in the folder hand_offs, or until the orchestrator needs a
-    wake while it waits for a reset."""
+    """Reads until an account's advice differs from its advice at the first reading, which it does too when the account
+    loses or gets back its reading, until a reading has a new finding of waste, until scripts/hooks/hand-off writes a
+    new note in the folder hand_offs, or until the orchestrator needs a wake while it waits for a reset."""
     started = now()
     notes_at_start = note_files(hand_offs)
     first = read_accounts(accounts, log)
     readings = first
-    while readings.has_every_account and not has_new_finding():
+    while not has_new_finding():
         wait = readings.wait_seconds
+        if not readings.has_every_account:
+            wait = min(wait, NO_READING_WAIT_SECONDS)
         if is_waiting_for_reset(readings):
             wait = min(wait, max(0, math.ceil((started + WAKE_EVERY - now()).total_seconds())))
         if sleep_until_hand_off(wait, hand_offs, notes_at_start):
@@ -298,6 +305,7 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
         handle.write(json.dumps({"at": machine_time.isoformat(timespec="seconds"), "machine": machine}) + "\n")
     runs = agent_log.read_runs(log.parent / "agents.jsonl")
     earlier_runs = run_minutes_by_type(runs)
+    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(paths.main_checkout()))
     orchestrators = own_account(accounts, os.environ)
     transcript = orchestrator_transcript(log.parent / "state.md", paths.main_checkout())
     orchestrator_periods = agent_log.session_periods(transcript) if transcript else []
@@ -317,7 +325,7 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
         }
         is_orchestrators = orchestrators is not None and orchestrators["name"] == account["name"]
         orchestrator = orchestrator_periods if is_orchestrators else []
-        room, measured = read_room(account["name"], meters, reading_time, log, runs, orchestrator)
+        room, measured = read_room(account["name"], meters, reading_time, log, runs, transcripts, orchestrator)
         result = advise(room, agent_types(account["tool"]), earlier_runs, reading_time)
         reading["per_agent_minute"] = measured
         with log.open("a") as handle:
@@ -341,7 +349,8 @@ def start_on(agent_type: str, accounts: list[Account], log: Path) -> int:
     """Prints the Claude account to start an agent of the type on, as at each account's newest reading, and logs the
     account that it names, so that the next call counts the agent."""
     runs = agent_log.read_runs(log.parent / "agents.jsonl")
-    candidates = start_candidates(accounts, runs, log)
+    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(paths.main_checkout()))
+    candidates = start_candidates(accounts, runs, transcripts, log)
     if not candidates:
         minutes = OLDEST_START_READING.total_seconds() / 60
         print(
@@ -360,7 +369,7 @@ def start_on(agent_type: str, accounts: list[Account], log: Path) -> int:
 
 
 def start_candidates(
-    accounts: list[Account], runs: list[agent_log.AgentRun], log: Path
+    accounts: list[Account], runs: list[agent_log.AgentRun], transcripts: dict[str, Path], log: Path
 ) -> list[account_room.Candidate]:
     """The Claude accounts with a reading from the last OLDEST_START_READING, each with the types that fit its room."""
     earlier_runs = run_minutes_by_type(runs)
@@ -377,7 +386,7 @@ def start_candidates(
             continue
         is_orchestrators = orchestrators is not None and orchestrators["name"] == account["name"]
         orchestrator = orchestrator_periods if is_orchestrators else []
-        room = room_at_reading(account["name"], readings, runs, log, orchestrator)
+        room = room_at_reading(account["name"], readings, runs, transcripts, log, orchestrator)
         fitting = advise(room, agent_types("claude"), earlier_runs, reading_time).fitting
         candidates.append(account_room.Candidate(account["name"], fitting, room.meters, is_orchestrators))
     return candidates
@@ -387,6 +396,7 @@ def room_at_reading(
     account: str,
     readings: list[dict[str, Any]],
     runs: list[agent_log.AgentRun],
+    transcripts: dict[str, Path],
     log: Path,
     orchestrator: list[agent_log.Period],
 ) -> account_room.Room:
@@ -403,7 +413,9 @@ def room_at_reading(
             continue
         if agent_log.started(run) > reading_time:
             started.append((agent_log.started(run), run.start["type"]))
-        elif is_running(run) or (run.end is not None and dt.datetime.fromisoformat(run.end["at"]) > reading_time):
+        elif is_running(run, transcripts) or (
+            run.end is not None and dt.datetime.fromisoformat(run.end["at"]) > reading_time
+        ):
             minutes = (reading_time - agent_log.started(run)).total_seconds() / 60
             running.append(account_room.Running(run.start["type"], minutes))
     entries = (json.loads(line) for line in log.read_text().splitlines())
@@ -529,6 +541,7 @@ def read_room(
     reading_time: dt.datetime,
     log: Path,
     runs: list[agent_log.AgentRun],
+    transcripts: dict[str, Path],
     orchestrator: list[agent_log.Period],
 ) -> tuple[account_room.Room, dict[str, float]]:
     """The account's room, and the usage per agent-minute that the reading measured. orchestrator holds the periods
@@ -538,14 +551,14 @@ def read_room(
     earlier = next((entry for entry in reversed(readings) if is_measuring_base(entry, reading_time)), None)
     if earlier is not None:
         since = dt.datetime.fromisoformat(earlier["at"])
-        minutes = agent_minutes(runs, account, since, reading_time, log.parent / "runs")
+        minutes = agent_minutes(runs, transcripts, account, since, reading_time, log.parent / "runs")
         minutes += agent_log.minutes_after(orchestrator, since)
         measured = account_room.measured_per_agent_minute(meters, earlier["meters"], minutes)
     per_agent_minute = {name: measured.get(name) or last_measured(readings, name) for name in meters}
     running = [
         account_room.Running(run.start["type"], (reading_time - agent_log.started(run)).total_seconds() / 60)
         for run in runs
-        if run.start.get("account") == account and is_running(run)
+        if run.start.get("account") == account and is_running(run, transcripts)
     ]
     share = account_room.working_share(orchestrator, reading_time)
     return account_room.Room(meters, per_agent_minute, running, share), measured
@@ -563,18 +576,24 @@ def is_measuring_base(entry: dict[str, Any], reading_time: dt.datetime) -> bool:
 
 
 def agent_minutes(
-    runs: list[agent_log.AgentRun], account: str, since: dt.datetime, reading_time: dt.datetime, runs_folder: Path
+    runs: list[agent_log.AgentRun],
+    transcripts: dict[str, Path],
+    account: str,
+    since: dt.datetime,
+    reading_time: dt.datetime,
+    runs_folder: Path,
 ) -> float:
-    """The minutes that the agents on the account worked since the time. An agent without an end line counts while its
-    process runs."""
+    """The minutes that the agents on the account worked since the time. An agent without an end line counts until the
+    reading while is_running says that it runs, and until the last line of its transcript or events once it stopped,
+    such as when the user interrupted it."""
     minutes = 0.0
     for run in runs:
         if run.start.get("account") != account:
             continue
-        if run.end is not None:
-            minutes += agent_log.minutes_after(agent_log.working_periods(run, {}, runs_folder), since)
-        elif is_running(run):
+        if is_running(run, transcripts):
             minutes += agent_log.minutes_after([(agent_log.started(run), reading_time)], since)
+        else:
+            minutes += agent_log.minutes_after(agent_log.working_periods(run, transcripts, runs_folder), since)
     return minutes
 
 
@@ -705,13 +724,12 @@ def gpu_part(machine: Machine) -> str:
     return f"{use}, {memory:.1f} GB {whose}"
 
 
-def running_agents(loop_folder: Path, checkout: Path) -> list[Agent]:
+def running_agents(loop_folder: Path, transcripts: dict[str, Path]) -> list[Agent]:
     """The agents that run, as is_running tells from agents.jsonl in the loop folder. An agent of a session reads its
     context from its transcript, and a run of scripts/loop/run-builder from its events in its run folder."""
-    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
     agents = []
     for run in agent_log.read_runs(loop_folder / "agents.jsonl"):
-        if not is_running(run):
+        if not is_running(run, transcripts):
             continue
         issue = run.start.get("issue")
         name = f"{run.start['type']} #{issue}" if issue else run.start["type"]
@@ -725,13 +743,17 @@ def running_agents(loop_folder: Path, checkout: Path) -> list[Agent]:
     return agents
 
 
-def is_running(run: agent_log.AgentRun) -> bool:
-    """Whether an agent runs: it has no end line, and the process that would write that line runs. An agent whose
-    start line has no process id counts as running, because the meter can't tell whether it ended."""
+def is_running(run: agent_log.AgentRun, transcripts: dict[str, Path]) -> bool:
+    """Whether an agent runs: it has no end line, the process that would write that line runs, and the user didn't
+    interrupt it last. transcripts holds the transcripts of the agents of sessions, by the ids of their Agent calls. An
+    agent whose start line has no process id counts as running, because the meter can't tell whether it ended."""
     if run.end is not None:
         return False
     pid = run.start.get("pid")
-    return pid is None or process_runs(pid)
+    if pid is not None and not process_runs(pid):
+        return False
+    transcript = transcripts.get(run.start["id"])
+    return transcript is None or not is_interrupted(transcript)
 
 
 def process_runs(pid: int) -> bool:
@@ -796,10 +818,7 @@ def context_tokens(transcript: Path) -> int | None:
     count."""
     if not transcript.exists():
         return None
-    with transcript.open("rb") as handle:
-        handle.seek(max(0, transcript.stat().st_size - TRANSCRIPT_TAIL_BYTES))
-        lines = handle.read().decode(errors="replace").splitlines()
-    for line in reversed(lines):
+    for line in reversed(tail_lines(transcript)):
         if '"usage"' not in line:
             continue
         try:
@@ -854,15 +873,14 @@ def waste_findings(
     compare with."""
     reading_time = now()
     heavy = heavy_log.read(loop_folder / heavy_log.NAME)
-    builder_minutes = sum(
+    agent_minutes = sum(
         agent_log.minutes_after(
             agent_log.working_periods(run, transcripts, loop_folder / "runs"), reading_time - waste.RECENT
         )
         for run in runs
-        if run.start["type"] in waste.BUILDER_TYPES
     )
     findings = waste.long_builds(runs, reading_time)
-    for finding in (waste.long_waits(heavy, builder_minutes, reading_time), waste.slower_check(heavy, last)):
+    for finding in (waste.long_waits(heavy, agent_minutes, reading_time), waste.slower_check(heavy, last)):
         if finding:
             findings.append(finding)
     return findings

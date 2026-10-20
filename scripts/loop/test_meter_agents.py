@@ -7,7 +7,7 @@ from typing import Any
 from unittest import mock
 
 import paths
-from test_meter import METER, MeterTest, meter
+from test_meter import INTERRUPTION, METER, MeterTest, meter
 from test_transcripts import call_line, prompt_line, write_transcript
 
 
@@ -138,6 +138,14 @@ class AgentsLineTest(MeterTest):
                 self.agents(),
                 "agents | builder #65 context unknown | builder #65 context unknown | builder #66 context unknown",
             )
+
+    def test_leaves_out_an_agent_that_the_user_interrupted_and_lists_it_again_once_it_gets_a_message(self) -> None:
+        self.log("start", "toolu_01", issue=64, pid=os.getpid())
+        self.subagent("a1", "toolu_01", [call(300_000), INTERRUPTION])
+        self.log("start", "toolu_02", issue=65, pid=os.getpid())
+        message = '{"type": "user", "message": {"content": "Go on."}}'
+        self.subagent("a2", "toolu_02", [call(300_000), INTERRUPTION, message, call(310_000)])
+        self.assertEqual(self.agents(), "agents | builder #65 310k")
 
 
 class ProcessTest(unittest.TestCase):
