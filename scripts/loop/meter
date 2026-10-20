@@ -915,15 +915,14 @@ def waste_findings(
     compare with."""
     reading_time = now()
     heavy = heavy_log.read(loop_folder / heavy_log.NAME)
-    builder_minutes = sum(
+    agent_minutes = sum(
         agent_log.minutes_after(
             agent_log.working_periods(run, transcripts, loop_folder / "runs"), reading_time - waste.RECENT
         )
         for run in runs
-        if run.start["type"] in waste.BUILDER_TYPES
     )
     findings = waste.long_builds(runs, reading_time)
-    for finding in (waste.long_waits(heavy, builder_minutes, reading_time), waste.slower_check(heavy, last)):
+    for finding in (waste.long_waits(heavy, agent_minutes, reading_time), waste.slower_check(heavy, last)):
         if finding:
             findings.append(finding)
     return findings

@@ -19,7 +19,7 @@ EARLIER_BUILDS = 5
 # While an account isn't parked, scripts/loop/meter --wake reads at least every 50 minutes, and ends when a reading
 # has a finding that the meter hadn't printed. So the meter prints each finding of this time at least once.
 RECENT = dt.timedelta(hours=1)
-WAIT_MINUTES_PER_BUILDER_HOUR = 10.0
+WAIT_MINUTES_PER_AGENT_HOUR = 10.0
 CHECK = "scripts/check"
 # How much longer the median passing run of scripts/check has to take since the last retrospective. A test alone
 # finds any growth, however small, among the hundreds of runs between two retrospectives.
@@ -70,11 +70,11 @@ def build_name(start: dict[str, Any]) -> str:
     return f"{start['type']} #{issue}" if issue else start["type"]
 
 
-def long_waits(heavy_entries: list[dict[str, Any]], builder_minutes: float, now: dt.datetime) -> Finding | None:
+def long_waits(heavy_entries: list[dict[str, Any]], agent_minutes: float, now: dt.datetime) -> Finding | None:
     """A finding when the waits of all heavy commands in scripts/loop/run-heavy's line that ended came to more than 10
-    minutes per hour of builder work over the last hour. A wait ends on a start line or a stop line of
-    .loop/heavy.jsonl, which doesn't say which agent waited."""
-    if builder_minutes <= 0:
+    minutes per hour of the work of all agents, of any type, over the last hour. A wait ends on a start line or a stop
+    line of .loop/heavy.jsonl, which doesn't say which agent waited, so the work of every agent counts."""
+    if agent_minutes <= 0:
         return None
     since = now - RECENT
     waited_seconds = 0.0
@@ -84,12 +84,12 @@ def long_waits(heavy_entries: list[dict[str, Any]], builder_minutes: float, now:
         wait_end = dt.datetime.fromisoformat(entry["at"])
         wait_start = max(wait_end - dt.timedelta(seconds=entry["waited_seconds"]), since)
         waited_seconds += max(0.0, (min(wait_end, now) - wait_start).total_seconds())
-    per_hour = waited_seconds / 60 / (builder_minutes / 60)
-    if per_hour <= WAIT_MINUTES_PER_BUILDER_HOUR:
+    per_hour = waited_seconds / 60 / (agent_minutes / 60)
+    if per_hour <= WAIT_MINUTES_PER_AGENT_HOUR:
         return None
     text = (
-        f"heavy commands waited {per_hour:.1f} min in run-heavy's line per hour of builder work in the last hour, more "
-        f"than {WAIT_MINUTES_PER_BUILDER_HOUR:g}"
+        f"heavy commands waited {per_hour:.1f} min in run-heavy's line per hour of agent work in the last hour, more "
+        f"than {WAIT_MINUTES_PER_AGENT_HOUR:g}"
     )
     return Finding("waits", text)
 
