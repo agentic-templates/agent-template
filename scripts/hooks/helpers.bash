@@ -330,7 +330,9 @@ push_flags_with_value=" --repo --recurse-submodules --receive-pack --exec -o --p
 # - flags: the flags, without their values
 # - push_remote: the first word that isn't a flag or a flag's value, which names a remote or a URL, or empty
 # - push_refspecs: the other words that aren't flags or flags' values
-# Run read_git_options first.
+# Blocks the push when one of these other words may expand, as in git push origin "$branch", because the hook can't
+# tell which remote or branch the word names before the command runs, and both checks of git push need them. Run
+# read_git_options first.
 read_push_arguments() {
   local i word
   local -a words=()
@@ -344,7 +346,12 @@ read_push_arguments() {
           i=$((i + 1))
         fi
         ;;
-      *) words+=("$word") ;;
+      *)
+        if [[ -n ${command_word_may_expand[i]:-} ]]; then
+          block "Blocked: the shell expands $word in this git push, so this hook can't tell which remote or branch it names. Write the remote and each branch in plain words, as in git push origin <branch>."
+        fi
+        words+=("$word")
+        ;;
     esac
   done
   if ((${#words[@]} > 0)); then

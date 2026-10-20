@@ -238,6 +238,16 @@ expect_block Bash 'git -C ../other push' "$to_dependabot"
 expect_block Bash 'git --git-dir ../other/.git push' "$to_dependabot"
 expect_block Bash 'git --git-dir=other/.git -C .. push' "$to_dependabot"
 expect_allow Bash 'git push'
+# A push whose remote or refspec the shell expands is blocked, because the hook can't tell before the command runs
+# whether it pushes to a dependabot/ branch or a version tag.
+# shellcheck disable=SC2016 # The $ in these words is for the hook to read, not for the test to expand.
+{
+  expect_block Bash "branch=$dependabot_branch; git push origin \"\$branch\"" "$(expanded_push_word '$branch')"
+  expect_block Bash 'git push origin HEAD:"$(git branch --show-current)"' \
+    "$(expanded_push_word 'HEAD:$(git branch --show-current)')"
+  expect_block Bash 'git push "$remote" HEAD' "$(expanded_push_word '$remote')"
+  expect_block Bash 'tag=v1.0.0; git push origin "$tag"' "$(expanded_push_word '$tag')"
+}
 
 # Publishing a release or putting a version tag on GitHub. The orchestrator's session is the one that the state file
 # names. A builder runs as a subagent of that session, with an agent id of its own, or in a session of its own. The

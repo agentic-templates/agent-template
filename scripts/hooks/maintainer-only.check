@@ -15,7 +15,8 @@
 # - printing the whole environment with env or printenv, because it holds tokens
 # A path or a repository that a variable other than HOME decides goes ahead, because the hook can't tell it before the
 # command runs. A push is blocked, though, when the hook can't tell the folder that it runs in, or when git fails on the
-# push's own words, because the hook can't ask git then which hooks the push would run.
+# push's own words, because the hook can't ask git then which hooks the push would run. It's blocked too when the shell
+# expands its remote or a refspec, as read_push_arguments in helpers.bash describes.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 

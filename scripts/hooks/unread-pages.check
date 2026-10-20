@@ -19,7 +19,8 @@
 # group of short options such as -nu, or with --tags and no refspec, which sends only the tags. It also
 # allows a push whose branches or repository the command doesn't name: one with --all, --branches or --mirror, or with
 # --git-dir or --work-tree before push. For the same reason, it skips each refspec with a *, such as
-# refs/heads/*:refs/heads/*, and checks the push's other refspecs.
+# refs/heads/*:refs/heads/*, and checks the push's other refspecs. But it blocks a push whose remote or refspec the shell
+# expands, as in git push origin "$branch", as read_push_arguments in helpers.bash describes.
 # shellcheck source=scripts/hooks/helpers.bash
 source "${BASH_SOURCE[0]%/*}/helpers.bash"
 # shellcheck source=scripts/hooks/pages-read.bash

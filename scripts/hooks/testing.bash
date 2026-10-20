@@ -158,6 +158,12 @@ expect_repository_flags() {
   done
 }
 
+# Prints the message that blocks a git push whose remote or refspec the shell expands, as read_push_arguments in
+# helpers.bash reads them: expanded_push_word <the word as the command writes it, without its quotes>
+expanded_push_word() {
+  echo "Blocked: the shell expands $1 in this git push, so this hook can't tell which remote or branch it names. Write the remote and each branch in plain words, as in git push origin <branch>."
+}
+
 finish_tests() {
   if ((failed_cases > 0)); then
     echo "error: $failed_cases of the $case_count cases in $test_name failed. The errors above say which." >&2
