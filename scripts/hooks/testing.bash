@@ -67,20 +67,18 @@ export HOOK_ALLOWED_REPOSITORIES=${hooks_folder%/hooks}/fixtures/allowed-reposit
 export HOOK_GH_VERSION_FILE=/dev/null
 
 # Sets quoted_json to a text as a JSON string, in quotes: quote_json <text>
-# The cases build their inputs without jq, because starting jq took 4 ms of CPU time for each case.
+# The cases build their inputs without jq, because starting jq took 4 ms of CPU time for each case. But jq quotes each
+# text that has a control character, such as a line break, which JSON escapes. For the line breaks in a text of 60 KB,
+# bash 3.2 took 36 seconds of CPU time with ${text//…}, and 3 seconds in CI with a loop that cut the text at each one.
 quote_json() {
-  local LC_ALL=C rest=$1 escaped="" code
-  rest=${rest//\\/\\\\}
-  rest=${rest//\"/\\\"}
-  # JSON escapes each control character, such as a line break, which this writes as \u000a. The loop moves the text up
-  # to each control character in turn from rest to escaped. For the line breaks in a text of 60 KB, that took bash 3.2
-  # 0.4 seconds of CPU time, and replacing them with ${rest//…} took 36 seconds.
-  while [[ $rest =~ ^([^[:cntrl:]]*)([[:cntrl:]]) ]]; do
-    printf -v code '\\u%04x' "'${BASH_REMATCH[2]}"
-    escaped+=${BASH_REMATCH[1]}$code
-    rest=${rest:${#BASH_REMATCH[0]}}
-  done
-  quoted_json="\"$escaped$rest\""
+  local LC_ALL=C text=$1
+  if [[ $text =~ [[:cntrl:]] ]]; then
+    quoted_json=$(jq -n --arg text "$text" '$text')
+    return
+  fi
+  text=${text//\\/\\\\}
+  text=${text//\"/\\\"}
+  quoted_json="\"$text\""
 }
 
 # Sets sample_input_json to a sample of what a tool sends the hook before an action:
