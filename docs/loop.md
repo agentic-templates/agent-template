@@ -163,6 +163,9 @@ Besides the `session:` and `pid:` lines, it holds:
 - the `BLOCKED` pull requests from your last pass
 - what you do next, and the open questions
 
+When an entry changes, rewrite it in place rather than add a new one. Delete an entry once it no longer tells you what
+to do next, such as a pull request that merged or an agent that ended.
+
 A hook writes the clock's time into the file: on its `updated:` line each time you write the file, on its `taken in:`
 line each time you write `now` there, and on its `heartbeat:` line each time you schedule the heartbeat. Keep these
 times as the hook wrote them. Once the `updated:` time is 6 days or more after the `heartbeat:` time, delete the
@@ -214,7 +217,8 @@ the script again, followed by the number of each issue that no account can take,
 ## Compact your context
 
 Keep your shell in the main checkout, and run git in a worktree with `git -C <worktree>`. After a compaction, the
-session-start hook shows you your state file only when your shell is in the main checkout.
+session-start hook shows you your state file, this guide and `docs/writing.md` only when your shell is in the main
+checkout.
 
 When `scripts/hooks/hand-off` tells you that your context has grown long enough to compact, ask for a compaction if the
 maintainer installed a compaction sender. That's a hook in the maintainer's own Claude Code settings that runs on both

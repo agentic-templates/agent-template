@@ -82,12 +82,45 @@ expect_state() {
   fi
 }
 
+# Checks that the hook exited with code 0 and gave Claude Code a note: expect_note <description> <note>
+expect_note() {
+  local description=$1 expected=$2 note
+  case_count=$((case_count + 1))
+  note=$(jq -r '.hookSpecificOutput | select(.hookEventName == "PostToolUse") | .additionalContext' \
+    <<<"$hook_output" 2>/dev/null) || note=$hook_output
+  if [[ $hook_status != 0 || $note != "$expected" ]]; then
+    echo "error: $description, the hook must exit with code 0 and tell \"$expected\", but it exited with code $hook_status and told \"$note\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Checks that the hook exited with code 0 and printed nothing: expect_no_note <description>
+expect_no_note() {
+  case_count=$((case_count + 1))
+  if [[ $hook_status != 0 || -n $hook_output ]]; then
+    echo "error: $1, the hook must exit with code 0 and print nothing, but it exited with code $hook_status and printed \"${hook_output:0:300}\"." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
 # Writes the state file from lines: write_state <line>...
 write_state() {
   printf '%s\n' "$@" >"$state_file"
 }
 
 old_heartbeat='heartbeat: 2020-01-01T00:00:00Z'
+
+# Writes a state file that holds a number of characters, also once the hook wrote the clock's time on its updated line.
+# Its last line is of characters of two bytes, so that the file has almost twice as many bytes: sized_state <characters>
+sized_state() {
+  local start=$'session: owner-1\nupdated: 2020-01-02T00:00:00Z\n'"$old_heartbeat"$'\nnote: '
+  # The line break at the end takes one character.
+  {
+    printf '%s' "$start"
+    printf 'é%.0s' $(seq $(($1 - ${#start} - 1)))
+    printf '\n'
+  } >"$state_file"
+}
 
 write_state 'session: owner-1' 'pid: 42' "$old_heartbeat"
 run_hook "$main_checkout" "$(file_input Edit "$state_file")"
@@ -176,6 +209,33 @@ expect_state "After a Read of the state file" "$unchanged"
 
 run_hook "$main_checkout" "not JSON"
 expect_state "For input that isn't JSON" "$unchanged"
+
+# The hook tells the orchestrator when the state file grows too long.
+sized_state 10000
+run_hook "$main_checkout" "$(file_input Edit "$state_file")"
+expect_no_note "After an Edit of a state file of 10,000 characters"
+
+sized_state 10001
+run_hook "$main_checkout" "$(file_input Write "$state_file")"
+expect_note "After a Write of a state file of 10,001 characters" \
+  "Your state file, $state_file, holds 10001 characters, and the limit is 10000. Delete each entry that no longer tells you what to do next, such as a pull request that merged or an agent that ended."
+
+# The hook tells the orchestrator about each time with x in place of a digit, in the whole file.
+write_state 'session: owner-1' 'updated: 2020-01-02T00:00:00Z' "$old_heartbeat" '- #12 merged at 2026-10-19T02:45Z'
+run_hook "$main_checkout" "$(file_input Edit "$state_file")"
+expect_no_note "After an Edit of a state file with the time 02:45Z"
+
+write_state 'session: owner-1' 'updated: 2020-01-02T00:00:00Z' "$old_heartbeat" '- #12 merged at 2026-10-19T02:4xZ'
+run_hook "$main_checkout" "$(file_input Edit "$state_file")"
+expect_note "After an Edit of a state file with the time 02:4xZ" \
+  "Your state file, $state_file, holds a guessed time, with x in place of a digit: line 4 has 02:4x. Run date -u and write the time that it prints, or leave the time out."
+
+sized_state 10001
+guesses=$'- #12 merged at 2026-10-19T02:4xZ, after the check of 01:5x\n- builder of #13 started at 22:1x\n'
+printf '%s' "$guesses" >>"$state_file"
+run_hook "$main_checkout" "$(cron_input "$heartbeat")"
+expect_note "After CronCreate of the heartbeat, with a long state file and three guessed times" \
+  "Your state file, $state_file, holds $((10001 + ${#guesses})) characters, and the limit is 10000. Delete each entry that no longer tells you what to do next, such as a pull request that merged or an agent that ended. It also holds a guessed time, with x in place of a digit: line 5 has 02:4x, line 5 has 01:5x, line 6 has 22:1x. Run date -u and write the time that it prints, or leave the time out."
 
 rm "$state_file"
 run_hook "$main_checkout" "$(cron_input "$heartbeat")"
