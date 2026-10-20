@@ -37,14 +37,14 @@ that line names it, or "no account". It takes each account's newest reading in .
 account whose newest reading is more than {start} minutes old. As the agents that run on the account, it counts those
 that ran at the reading, at their minutes then, each agent that started on the account since then, and each agent that
 --start-on named the account for since then. So one pass of the loop starts only as many agents on each account as fit.
-It adds a line with the type and the account that it named to .loop/meter.jsonl. For a builder type, it prints "no
-account" once the agents that build at the newest reading, with each that started and each builder that it named an
-account for since then, reach the limit that the last line names, and says why on standard error.
+It adds a line with the type and the account that it named to .loop/meter.jsonl.
 
 The line before the last lists the agents that run: those with a start line and no end line in .loop/agents.jsonl,
 each with its type and the number of its issue or pull request. It leaves out an agent whose Claude Code process or
-run of scripts/loop/run-builder has ended, such as a builder of an orchestrator that was restarted. It gives each
-agent's context size, and the threshold at which scripts/hooks/hand-off told the agent to hand off its work, if it did.
+run of scripts/loop/run-builder has ended, such as a builder of an orchestrator that was restarted. It leaves out an
+agent that the user interrupted too, until the agent gets a message, because Claude Code then runs no hook that writes
+an end line. It gives each agent's context size, and the threshold at which scripts/hooks/hand-off told the agent to
+hand off its work, if it did.
 
 The last line gives the machine's free disk, free memory, swap in use, GPU use and GPU memory in use, how many of its
 cores were busy on average while the meter read the accounts, leaving out the meter's own work, the orchestrator's
@@ -65,20 +65,17 @@ first Claude account, and reads the IDs from the result. It keeps them in .loop/
 that starts with "retrospective due:" for each such ID, and one that starts with "model of" for each alias whose
 request failed.
 
-Once {building} agents that build run, the last line says so after the busy cores, so that the loop starts no builder
-and no test build until fewer run. The agents that build are those of a builder type, the Codex runs and the test
-builds of a retrospective.
-
 The last line ends with a part that starts with "audit due:" for each sign of clear waste, so that the orchestrator
 starts a focused audit of it. scripts/loop/waste.py gives the thresholds of the three signs: a build of a builder type
 that took far longer than the median of its type, heavy commands that waited long in scripts/loop/run-heavy's line over
 the last hour, and passing runs of scripts/check that grew slower since the last retrospective. The meter writes the
 subjects of the signs that it printed to .loop/printed-findings.json.
 
-With --wake, the meter keeps reading, and prints and ends when an account's advice changes, when an account gives no
-reading, when a reading has a sign of waste whose subject the meter didn't print last time, when scripts/hooks/hand-off
-tells an agent to hand off its work, and 50 minutes after it started while an account's advice is stop. Run it in the
-background, so that its end wakes the orchestrator.
+With --wake, the meter keeps reading, and prints and ends when an account's advice changes, when an account loses the
+reading that it had at the start or gets back the one that it didn't have, when a reading has a sign of waste whose
+subject the meter didn't print last time, when scripts/hooks/hand-off tells an agent to hand off its work, and 50
+minutes after it started while an account's advice is stop. While an account has no reading, it reads at least every
+{retry} minutes. Run it in the background, so that its end wakes the orchestrator.
 
 .loop/accounts.json in the main checkout lists the accounts, each with the environment variables that select it:
 
@@ -118,6 +115,7 @@ from github import GitHubError, retrospective_merges
 from hand_offs import FOLDER_NAME, hand_off_thresholds, note_files
 from machine import CpuReading, CpuTicksError, Machine, busy_cores_besides, read_cpu, read_machine
 from meter_waits import LONGEST_READING_GAP, READ_EVERY_SECONDS, WAKE_EVERY
+from transcripts import is_interrupted, tail_lines
 from usage import Meter, parse_usage
 
 # The period over which the meter measures the usage per agent-minute. It measures from the newest reading at least
@@ -134,21 +132,14 @@ SHORTEST_WAIT_SECONDS = 60
 AFTER_RESET_SECONDS = 60
 UNKNOWN_RESET_WAIT_SECONDS = 10 * 60
 LATEST_TIME = dt.datetime.max.replace(tzinfo=dt.UTC)
-EARLIEST_TIME = dt.datetime.min.replace(tzinfo=dt.UTC)
 CLAUDE_TIMEOUT_SECONDS = 120
 # A Codex snapshot from before this is from an earlier weekly window, so the meter doesn't read older session files.
 CODEX_SNAPSHOT_AGE = dt.timedelta(days=8)
-# The meter reads only the end of a transcript, where the last call is. An orchestrator's transcript of 218 MB took
-# 0.25 seconds and about 0.5 GB of memory to read whole.
-TRANSCRIPT_TAIL_BYTES = 400_000
 # How often meter --wake looks for a new note of scripts/hooks/hand-off between two readings
 HAND_OFF_CHECK_SECONDS = 60
-# The most agents that build that the machine has room for. Each runs scripts/check, which waits in
-# scripts/loop/run-heavy while the machine has no room for it. A retrospective changes this from the "Machine" lines of
-# scripts/loop/report, which give the readings for each number of agents that worked.
-MOST_BUILDING_AGENTS = 6
-# The types of the agents that build start with this, as do the versions of them that a retrospective tests.
-BUILDER_TYPE_PREFIX = "builder"
+# The longest that meter --wake waits between two readings while an account has no reading, so that it sees the
+# reading come back
+NO_READING_WAIT_SECONDS = 10 * 60
 # .claude/agents/auditor.md says when a retrospective sets this.
 OUTPUT_TOKENS_PER_RETROSPECTIVE: int | None = None
 HOURS_PER_RETROSPECTIVE = 30.0
@@ -185,7 +176,6 @@ class Agent(NamedTuple):
     # The subagent's agent id or the run's session id, which names the notes of scripts/hooks/hand-off
     key: str | None
     context: int | None
-    is_building: bool
 
 
 class NoReading(Exception):
@@ -222,10 +212,9 @@ def main(argv: list[str] | None = None) -> int:
         readings = wait_for_wake(accounts, log, hand_offs, lambda: has_new_finding(loop_folder, checkout, printed))
     else:
         readings = read_accounts(accounts, log)
-    running = running_agents(loop_folder, checkout)
-    agents = agents_line(running, hand_off_thresholds(note_files(hand_offs)))
-    runs = agent_log.read_runs(loop_folder / "agents.jsonl")
     transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
+    agents = agents_line(running_agents(loop_folder, transcripts), hand_off_thresholds(note_files(hand_offs)))
+    runs = agent_log.read_runs(loop_folder / "agents.jsonl")
     try:
         last = max(retrospective_merges(checkout), default=None)
     except GitHubError as error:
@@ -239,7 +228,6 @@ def main(argv: list[str] | None = None) -> int:
     machine = machine_line(
         readings.machine,
         readings.busy_cores,
-        building=sum(agent.is_building for agent in running),
         context=orchestrator_context(loop_folder / "state.md", checkout),
         retrospective=" | ".join([retrospective, *model_notes]),
         findings=[finding.text for finding in findings],
@@ -250,15 +238,15 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def help_text() -> str:
-    """The docstring, with the numbers that the code keeps in place of {hours}, {period}, {gap}, {start} and
-    {building}, so that changing a number takes one edit. The docstring's JSON example has braces of its own, so
-    str.format can't fill it in."""
+    """The docstring, with the numbers that the code keeps in place of {hours}, {period}, {gap}, {start} and {retry},
+    so that changing a number takes one edit. The docstring's JSON example has braces of its own, so str.format can't
+    fill it in."""
     numbers = {
         "{hours}": f"{HOURS_PER_RETROSPECTIVE:g}",
         "{period}": f"{USAGE_PERIOD.total_seconds() / 60:g}",
         "{gap}": f"{LONGEST_READING_GAP.total_seconds() / 60:g}",
         "{start}": f"{OLDEST_START_READING.total_seconds() / 60:g}",
-        "{building}": str(MOST_BUILDING_AGENTS),
+        "{retry}": f"{NO_READING_WAIT_SECONDS / 60:g}",
     }
     text = str(__doc__)
     for placeholder, number in numbers.items():
@@ -271,15 +259,17 @@ def now() -> dt.datetime:
 
 
 def wait_for_wake(accounts: list[Account], log: Path, hand_offs: Path, has_new_finding: Callable[[], bool]) -> Readings:
-    """Reads until an account's advice differs from its advice at the first reading, until a reading has a new finding
-    of waste, until scripts/hooks/hand-off writes a new note in the folder hand_offs, or until the orchestrator needs a
-    wake while it waits for a reset."""
+    """Reads until an account's advice differs from its advice at the first reading, which it does too when the account
+    loses or gets back its reading, until a reading has a new finding of waste, until scripts/hooks/hand-off writes a
+    new note in the folder hand_offs, or until the orchestrator needs a wake while it waits for a reset."""
     started = now()
     notes_at_start = note_files(hand_offs)
     first = read_accounts(accounts, log)
     readings = first
-    while readings.has_every_account and not has_new_finding():
+    while not has_new_finding():
         wait = readings.wait_seconds
+        if not readings.has_every_account:
+            wait = min(wait, NO_READING_WAIT_SECONDS)
         if is_waiting_for_reset(readings):
             wait = min(wait, max(0, math.ceil((started + WAKE_EVERY - now()).total_seconds())))
         if sleep_until_hand_off(wait, hand_offs, notes_at_start):
@@ -322,6 +312,7 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
     cpu_before = cpu_reading()
     runs = agent_log.read_runs(log.parent / "agents.jsonl")
     earlier_runs = run_minutes_by_type(runs)
+    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(paths.main_checkout()))
     orchestrators = own_account(accounts, os.environ)
     transcript = orchestrator_transcript(log.parent / "state.md", paths.main_checkout())
     orchestrator_periods = agent_log.session_periods(transcript) if transcript else []
@@ -341,7 +332,7 @@ def read_accounts(accounts: list[Account], log: Path) -> Readings:
         }
         is_orchestrators = orchestrators is not None and orchestrators["name"] == account["name"]
         orchestrator = orchestrator_periods if is_orchestrators else []
-        room, measured = read_room(account["name"], meters, reading_time, log, runs, orchestrator)
+        room, measured = read_room(account["name"], meters, reading_time, log, runs, transcripts, orchestrator)
         result = advise(room, agent_types(account["tool"]), earlier_runs, reading_time)
         reading["per_agent_minute"] = measured
         with log.open("a") as handle:
@@ -375,7 +366,8 @@ def start_on(agent_type: str, accounts: list[Account], log: Path) -> int:
     """Prints the Claude account to start an agent of the type on, as at each account's newest reading, and logs the
     account that it names, so that the next call counts the agent."""
     runs = agent_log.read_runs(log.parent / "agents.jsonl")
-    candidates = start_candidates(accounts, runs, log)
+    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(paths.main_checkout()))
+    candidates = start_candidates(accounts, runs, transcripts, log)
     if not candidates:
         minutes = OLDEST_START_READING.total_seconds() / 60
         print(
@@ -384,11 +376,6 @@ def start_on(agent_type: str, accounts: list[Account], log: Path) -> int:
             file=sys.stderr,
         )
         return 1
-    building = building_since_reading(runs, log)
-    if is_building({"type": agent_type}) and building >= MOST_BUILDING_AGENTS:
-        print("no account")
-        print(building_part(building)[0], file=sys.stderr)
-        return 0
     named = account_room.account_for(agent_type, candidates)
     if named is not None:
         entry = {"at": now().isoformat(timespec="seconds"), "start_on": named, "type": agent_type}
@@ -399,7 +386,7 @@ def start_on(agent_type: str, accounts: list[Account], log: Path) -> int:
 
 
 def start_candidates(
-    accounts: list[Account], runs: list[agent_log.AgentRun], log: Path
+    accounts: list[Account], runs: list[agent_log.AgentRun], transcripts: dict[str, Path], log: Path
 ) -> list[account_room.Candidate]:
     """The Claude accounts with a reading from the last OLDEST_START_READING, each with the types that fit its room."""
     earlier_runs = run_minutes_by_type(runs)
@@ -416,40 +403,17 @@ def start_candidates(
             continue
         is_orchestrators = orchestrators is not None and orchestrators["name"] == account["name"]
         orchestrator = orchestrator_periods if is_orchestrators else []
-        room = room_at_reading(account["name"], readings, runs, log, orchestrator)
+        room = room_at_reading(account["name"], readings, runs, transcripts, log, orchestrator)
         fitting = advise(room, agent_types("claude"), earlier_runs, reading_time).fitting
         candidates.append(account_room.Candidate(account["name"], fitting, room.meters, is_orchestrators))
     return candidates
-
-
-def building_since_reading(runs: list[agent_log.AgentRun], log: Path) -> int:
-    """The agents that build as at the newest reading: those that started before it and still run, each that started
-    since then, and each builder that --start-on named an account for since then and that hasn't started yet."""
-    entries = [json.loads(line) for line in log.read_text().splitlines()]
-    reading_times = [dt.datetime.fromisoformat(entry["at"]) for entry in entries if "start_on" not in entry]
-    reading_time = max(reading_times, default=EARLIEST_TIME)
-    building = [run for run in runs if is_building(run.start)]
-    running = sum(is_running(run) for run in building if agent_log.started(run) <= reading_time)
-    # Only an agent on a Claude account can be one that --start-on named, because it names only Claude accounts.
-    started = [
-        (agent_log.started(run), "codex" if run.start["type"] == "codex" else "claude")
-        for run in building
-        if agent_log.started(run) > reading_time
-    ]
-    named = [
-        (dt.datetime.fromisoformat(entry["at"]), "claude")
-        for entry in entries
-        if "start_on" in entry
-        and is_building({"type": entry["type"]})
-        and dt.datetime.fromisoformat(entry["at"]) >= reading_time
-    ]
-    return running + len(account_room.agents_since_reading(started, named))
 
 
 def room_at_reading(
     account: str,
     readings: list[dict[str, Any]],
     runs: list[agent_log.AgentRun],
+    transcripts: dict[str, Path],
     log: Path,
     orchestrator: list[agent_log.Period],
 ) -> account_room.Room:
@@ -466,7 +430,9 @@ def room_at_reading(
             continue
         if agent_log.started(run) > reading_time:
             started.append((agent_log.started(run), run.start["type"]))
-        elif is_running(run) or (run.end is not None and dt.datetime.fromisoformat(run.end["at"]) > reading_time):
+        elif is_running(run, transcripts) or (
+            run.end is not None and dt.datetime.fromisoformat(run.end["at"]) > reading_time
+        ):
             minutes = (reading_time - agent_log.started(run)).total_seconds() / 60
             running.append(account_room.Running(run.start["type"], minutes))
     entries = (json.loads(line) for line in log.read_text().splitlines())
@@ -592,6 +558,7 @@ def read_room(
     reading_time: dt.datetime,
     log: Path,
     runs: list[agent_log.AgentRun],
+    transcripts: dict[str, Path],
     orchestrator: list[agent_log.Period],
 ) -> tuple[account_room.Room, dict[str, float]]:
     """The account's room, and the usage per agent-minute that the reading measured. orchestrator holds the periods
@@ -601,14 +568,14 @@ def read_room(
     earlier = next((entry for entry in reversed(readings) if is_measuring_base(entry, reading_time)), None)
     if earlier is not None:
         since = dt.datetime.fromisoformat(earlier["at"])
-        minutes = agent_minutes(runs, account, since, reading_time, log.parent / "runs")
+        minutes = agent_minutes(runs, transcripts, account, since, reading_time, log.parent / "runs")
         minutes += agent_log.minutes_after(orchestrator, since)
         measured = account_room.measured_per_agent_minute(meters, earlier["meters"], minutes)
     per_agent_minute = {name: measured.get(name) or last_measured(readings, name) for name in meters}
     running = [
         account_room.Running(run.start["type"], (reading_time - agent_log.started(run)).total_seconds() / 60)
         for run in runs
-        if run.start.get("account") == account and is_running(run)
+        if run.start.get("account") == account and is_running(run, transcripts)
     ]
     share = account_room.working_share(orchestrator, reading_time)
     return account_room.Room(meters, per_agent_minute, running, share), measured
@@ -626,18 +593,24 @@ def is_measuring_base(entry: dict[str, Any], reading_time: dt.datetime) -> bool:
 
 
 def agent_minutes(
-    runs: list[agent_log.AgentRun], account: str, since: dt.datetime, reading_time: dt.datetime, runs_folder: Path
+    runs: list[agent_log.AgentRun],
+    transcripts: dict[str, Path],
+    account: str,
+    since: dt.datetime,
+    reading_time: dt.datetime,
+    runs_folder: Path,
 ) -> float:
-    """The minutes that the agents on the account worked since the time. An agent without an end line counts while its
-    process runs."""
+    """The minutes that the agents on the account worked since the time. An agent without an end line counts until the
+    reading while is_running says that it runs, and until the last line of its transcript or events once it stopped,
+    such as when the user interrupted it."""
     minutes = 0.0
     for run in runs:
         if run.start.get("account") != account:
             continue
-        if run.end is not None:
-            minutes += agent_log.minutes_after(agent_log.working_periods(run, {}, runs_folder), since)
-        elif is_running(run):
+        if is_running(run, transcripts):
             minutes += agent_log.minutes_after([(agent_log.started(run), reading_time)], since)
+        else:
+            minutes += agent_log.minutes_after(agent_log.working_periods(run, transcripts, runs_folder), since)
     return minutes
 
 
@@ -740,7 +713,7 @@ def describe(meter: Meter, reading_time: dt.datetime) -> str:
 
 
 def machine_line(
-    machine: Machine, busy: float | None, building: int, context: int | None, retrospective: str, findings: list[str]
+    machine: Machine, busy: float | None, context: int | None, retrospective: str, findings: list[str]
 ) -> str:
     memory, swap = machine["memory_free_gb"], machine["swap_used_gb"]
     context_part = "orchestrator context unknown" if context is None else f"orchestrator context {context // 1000}k"
@@ -752,7 +725,6 @@ def machine_line(
             "swap unknown" if swap is None else f"swap {swap:.1f} GB used",
             gpu_part(machine),
             cores_part(busy, machine["cores"]),
-            *building_part(building),
             context_part,
             retrospective,
             *(f"audit due: {finding}" for finding in findings),
@@ -762,12 +734,6 @@ def machine_line(
 
 def cores_part(busy: float | None, cores: int) -> str:
     return f"busy cores of {cores} unknown" if busy is None else f"{busy:.1f} of {cores} cores busy"
-
-
-def building_part(building: int) -> list[str]:
-    if building < MOST_BUILDING_AGENTS:
-        return []
-    return [f"{building} agents build, and the limit is {MOST_BUILDING_AGENTS}: start no builder or test build"]
 
 
 def gpu_part(machine: Machine) -> str:
@@ -781,41 +747,36 @@ def gpu_part(machine: Machine) -> str:
     return f"{use}, {memory:.1f} GB {whose}"
 
 
-def running_agents(loop_folder: Path, checkout: Path) -> list[Agent]:
+def running_agents(loop_folder: Path, transcripts: dict[str, Path]) -> list[Agent]:
     """The agents that run, as is_running tells from agents.jsonl in the loop folder. An agent of a session reads its
     context from its transcript, and a run of scripts/loop/run-builder from its events in its run folder."""
-    transcripts = agent_log.agent_transcripts(paths.claude_project_folder(checkout))
     agents = []
     for run in agent_log.read_runs(loop_folder / "agents.jsonl"):
-        if not is_running(run):
+        if not is_running(run, transcripts):
             continue
         issue = run.start.get("issue")
         name = f"{run.start['type']} #{issue}" if issue else run.start["type"]
-        building = is_building(run.start)
         transcript = transcripts.get(run.start["id"])
         if transcript is not None:
-            agents.append(Agent(name, transcript.stem.removeprefix("agent-"), context_tokens(transcript), building))
+            agents.append(Agent(name, transcript.stem.removeprefix("agent-"), context_tokens(transcript)))
             continue
         events = loop_folder / "runs" / run.start["id"] / "events.jsonl"
         session = run_session(events) if events.exists() else None
-        agents.append(Agent(name, session, context_tokens(events), building))
+        agents.append(Agent(name, session, context_tokens(events)))
     return agents
 
 
-def is_building(start: dict[str, Any]) -> bool:
-    """Whether an agent builds, from its start line: a test build of a retrospective, a Codex run, or an agent of a
-    builder type."""
-    agent_type = start["type"]
-    return bool(start.get("test")) or agent_type == "codex" or agent_type.startswith(BUILDER_TYPE_PREFIX)
-
-
-def is_running(run: agent_log.AgentRun) -> bool:
-    """Whether an agent runs: it has no end line, and the process that would write that line runs. An agent whose
-    start line has no process id counts as running, because the meter can't tell whether it ended."""
+def is_running(run: agent_log.AgentRun, transcripts: dict[str, Path]) -> bool:
+    """Whether an agent runs: it has no end line, the process that would write that line runs, and the user didn't
+    interrupt it last. transcripts holds the transcripts of the agents of sessions, by the ids of their Agent calls. An
+    agent whose start line has no process id counts as running, because the meter can't tell whether it ended."""
     if run.end is not None:
         return False
     pid = run.start.get("pid")
-    return pid is None or process_runs(pid)
+    if pid is not None and not process_runs(pid):
+        return False
+    transcript = transcripts.get(run.start["id"])
+    return transcript is None or not is_interrupted(transcript)
 
 
 def process_runs(pid: int) -> bool:
@@ -880,10 +841,7 @@ def context_tokens(transcript: Path) -> int | None:
     count."""
     if not transcript.exists():
         return None
-    with transcript.open("rb") as handle:
-        handle.seek(max(0, transcript.stat().st_size - TRANSCRIPT_TAIL_BYTES))
-        lines = handle.read().decode(errors="replace").splitlines()
-    for line in reversed(lines):
+    for line in reversed(tail_lines(transcript)):
         if '"usage"' not in line:
             continue
         try:
@@ -938,15 +896,14 @@ def waste_findings(
     compare with."""
     reading_time = now()
     heavy = heavy_log.read(loop_folder / heavy_log.NAME)
-    builder_minutes = sum(
+    agent_minutes = sum(
         agent_log.minutes_after(
             agent_log.working_periods(run, transcripts, loop_folder / "runs"), reading_time - waste.RECENT
         )
         for run in runs
-        if run.start["type"] in waste.BUILDER_TYPES
     )
     findings = waste.long_builds(runs, reading_time)
-    for finding in (waste.long_waits(heavy, builder_minutes, reading_time), waste.slower_check(heavy, last)):
+    for finding in (waste.long_waits(heavy, agent_minutes, reading_time), waste.slower_check(heavy, last)):
         if finding:
             findings.append(finding)
     return findings

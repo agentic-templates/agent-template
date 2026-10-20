@@ -241,6 +241,35 @@ class StartTest(RunHeavyTest):
         self.assertEqual(errors, warning)
         self.assertEqual(self.log(skipped=1)[1]["need"], need(2.0))
 
+    def test_starts_a_retrospectives_command_after_another_agents_that_came_later(self) -> None:
+        worktree = self.root / "test-build"
+        subprocess.run(["git", "init", "--quiet", str(worktree)], check=True)
+        paths.retrospective_mark(worktree).touch()
+        command = [PYTHON, "-c", "pass"]
+        self.write_log(end_line(command, need(6.0)))
+        self.add_entry("check", need(6.0), started=None, arrived=1)
+        lock = self.hold("check")
+        started_check: list[float] = []
+
+        def end_check() -> None:
+            [check] = self.state()["commands"][:1]
+            started_check.append(check["started"])
+            lock.close()
+
+        # The first look starts the check, and the second, once the check ended, starts the command.
+        self.clock.actions = [end_check]
+        with contextlib.chdir(worktree):
+            self.assertEqual(self.run_heavy(*command), (0, ""))
+        self.assertEqual(started_check, [NOW])
+        self.assertEqual(self.log()[2]["waited_seconds"], 2.0)
+
+    def test_runs_a_command_from_a_folder_outside_any_git_checkout_as_another_agents(self) -> None:
+        outside = self.root / "outside"
+        outside.mkdir()
+        with contextlib.chdir(outside):
+            self.assertEqual(self.run_heavy(PYTHON, "-c", "pass"), (0, ""))
+        self.assertEqual(self.log()[0]["event"], "start")
+
 
 class EndTest(RunHeavyTest):
     def test_releases_the_room_of_a_command_that_a_signal_ends_and_leaves_its_run_out_of_the_reservation(self) -> None:
