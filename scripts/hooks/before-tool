@@ -120,7 +120,8 @@ messages=$(
           continue
         fi
         pushd . >/dev/null 2>&1
-        # With set -e, a check that bash can't parse ends the subshell with code 2, as it would in a process of its own.
+        # With set -e, bash 3.2 ends the subshell with code 2 for a check that it can't parse, as it would in a process
+        # of its own. Bash 5 skips such a check instead, as issue #529 describes.
         set -e
         # shellcheck source=/dev/null # ShellCheck checks each check as a file of its own.
         source "$check" >/dev/null </dev/null

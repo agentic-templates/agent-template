@@ -10,8 +10,9 @@ trap 'exit 1' ERR
 # The file name of the check that sourced this file, which log_block writes.
 check_name=${BASH_SOURCE[1]##*/}
 
-# scripts/hooks/before-tool reads this file once, and then runs each check in a subshell, which skips the rest of the
-# file when the check sources it. Reading the file took a third of the CPU time of each check, as issue #91 measured.
+# scripts/hooks/before-tool reads this file once, and then sources the checks in a subshell that they share, which
+# skips the rest of the file each time a check sources it. Reading the file took a third of the CPU time of each check,
+# as issue #91 measured.
 if [[ -n ${helpers_read:-} ]]; then
   return 0
 fi

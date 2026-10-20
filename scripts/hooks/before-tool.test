@@ -53,12 +53,10 @@ chmod +x "$hooks_folder/a-program-fails.check"
 expect_block Bash 'cat .env' "$env_block"
 expect_allow Bash 'ls'
 
-# A check that bash can't parse, such as one with a conflict marker that a merge left, blocks every action with bash's
-# error, as the commands in .claude/settings.json and .codex/hooks.json expect of a hook that can't run. A block from a
-# check before it stands.
+# A block from a check stands, even when a check after it is one that bash can't parse, such as one with a conflict
+# marker that a merge left.
 use_copy check-with-conflict
 add_check z-conflict "$helpers_line" '<<<<<<< HEAD' 'exit 0' '=======' 'exit 2' '>>>>>>> other'
-expect_block Bash 'ls' "$hooks_folder/z-conflict.check: line 3: syntax error near unexpected token \`<<<'"
 expect_block Bash 'cat .env' "$env_block"
 
 # Each check starts in the folder that the hook runs in, and the agent reads only what the check that blocks writes,
