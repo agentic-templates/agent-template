@@ -90,6 +90,8 @@ for template in "${body_commands[@]}"; do
   expect_block Bash "$(with_text "$template" "$change_body"$'\n'"$code_block")" \
     "$(blocked "$name" "$(home_path "The line \"cat /home/$person/bank.csv\"" "/home/$person/")")"
 done
+expect_block_behind_wrappers "$(with_text "gh issue comment 7 --body TEXT" "$change_body"$'\n'"$semicolon_line")" \
+  "$(blocked "gh issue comment" "$(semicolon "The line \"$semicolon_line\"")")"
 
 # A review that asks for changes, with the dash line written as two sentences, with an empty body, with no body, and
 # with the dash line only in code, then also as prose after the code
@@ -229,6 +231,20 @@ expect_allow Bash 'gh pr reopen 5'
 
 # Commands that post nothing
 expect_allow Bash "gh issue comment 7 --body '$semicolon_line' --help"
+# gh reads -eh as -e -h, and -ch as -c -h.
+expect_allow Bash "gh issue comment 7 --body '$semicolon_line' -eh"
+expect_allow Bash "gh pr review 5 --body '$semicolon_line' -ch"
+# gh keeps the last value that the command gives --help, but it reads no flag after -h.
+expect_block Bash "gh issue comment 7 --body '$semicolon_line' --help --help=false" \
+  "$(blocked "gh issue comment" "$(semicolon "The line \"$semicolon_line\"")")"
+expect_allow Bash "gh issue comment 7 --body '$semicolon_line' --help=false --help"
+expect_allow Bash "gh issue comment 7 --body '$semicolon_line' -h --help=false"
+# The shell can turn the letters or the word before the h into a flag that takes the h as its value, so the hook checks
+# a command with a word that may expand, and a word with ANSI-C quotes, a brace expansion or a glob before the h.
+for help in "-e\${x}h" "\$x -h" "--help \$x" "-e\$'\\x62'h" "-e{a..c}h" "-e?h"; do
+  expect_block Bash "gh issue comment 7 --body '$semicolon_line' $help" \
+    "$(blocked "gh issue comment" "$(semicolon "The line \"$semicolon_line\"")")"
+done
 expect_allow Bash "echo gh issue comment 7 --body '$semicolon_line'"
 expect_allow Bash 'gh issue view 7 --comments'
 

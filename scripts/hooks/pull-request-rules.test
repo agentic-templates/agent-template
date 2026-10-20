@@ -174,6 +174,7 @@ expect_allow Bash "gh pr create --base main --title '$title' --body-file ../body
 expect_block Bash "gh pr create --title 'skip the expenses that were already imported' --body-file ../body.md" \
   "$(blocked "$not_a_type")"
 expect_block Bash "gh pr create --title '$title' --body-file ../no-closing-line.md" "$(blocked "$no_closing_line")"
+expect_block_behind_wrappers "gh pr create --title '$title' --body-file ../no-closing-line.md" "$(blocked "$no_closing_line")"
 expect_block Bash "git push && GH_DEBUG=1 gh pr new --body-file ../no-closing-line.md --title 'skip the expenses that were already imported'" \
   "$(blocked "$not_a_type" "$no_closing_line")"
 
@@ -255,6 +256,19 @@ expect_block Bash "cat ../body.md > ../copy.md && gh pr create --title '$title' 
 # Commands that don't open a pull request
 expect_allow Bash "gh pr create --fill --dry-run"
 expect_allow Bash "gh pr create --help"
+# gh reads -dh as -d -h, so it shows its help for both.
+expect_allow Bash "gh pr create -d -h"
+expect_allow Bash "gh pr create -dh"
+# gh keeps the last value that the command gives --help, but it reads no flag after -h.
+expect_block Bash "gh pr create --help --help=false" \
+  "Blocked: the command gives no title, so this hook can't check it. Give the title with --title."
+expect_allow Bash "gh pr create -h --help=false"
+# The shell can turn the letters or the word before the h into a flag that takes the h as its value, so the hook checks
+# a command with a word that may expand, and a word with ANSI-C quotes, a brace expansion or a glob before the h.
+for help in "-d\${x}h" "\$x -h" "--help \$x" "-d\$'\\x74'h" "-d{e..f}h" "-d?h"; do
+  expect_block Bash "gh pr create $help" \
+    "Blocked: the command gives no title, so this hook can't check it. Give the title with --title."
+done
 expect_allow Bash "gh pr view 7 --json title"
 expect_allow Bash "echo gh pr create --fill"
 

@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 # Claude Code runs this hook after each tool call, because .claude/settings.json lists it. It tells the orchestrator,
-# and the builders and auditors that it starts, to shrink their context once it grows past a threshold, because each
-# call reads the whole context again, so a long context costs more on every step, and the agent works worse.
+# and the builders, auditors, reviewers and researchers that it starts, to shrink their context once it grows past a
+# threshold, because each call reads the whole context again, so a long context costs more on every step, and the agent
+# works worse.
 # The orchestrator is the session that the session: line of the state file names. Once its context passes
 # compact_tokens, it asks for a compaction, as "Compact your context" in docs/loop.md describes. It gets the note once
 # each time its context passes the threshold: the hook creates .loop/told-to-compact when it gives the note, and deletes
-# the file once the context is below the threshold again, as after a compaction.
-# A builder or an auditor hands off its work: once its context first passes soon_tokens, at its next stopping point,
-# and once it first passes now_tokens, after the step it's on. These are the subagents of a builder type or of the
-# type auditor that the orchestrator's session starts itself, and the builders that scripts/loop/run-builder starts
-# for an issue, which have LOOP_HAND_OFF set. Other agents, and the maintainer's other sessions, get no note, because
-# the notes' steps are those of the orchestrator, a builder and an auditor. Each note comes once to each builder and
-# auditor. For each note, the hook creates a file in .loop/hand-offs, named <agent>.<threshold>, where <agent> is a
-# subagent's agent id or a session's id. scripts/loop/meter reads them.
+# the file once the context is below the threshold again, as after a compaction. Until the note, the hook refuses the
+# orchestrator's request for a compaction: it deletes the request while the context is at or below compact_tokens,
+# because the note comes at the first tool call past that size.
+# A builder, an auditor, a reviewer or a researcher hands off its work: once its context first passes soon_tokens, at
+# its next stopping point, and once it first passes now_tokens, after the step it's on. These are the subagents of
+# those types that the orchestrator's session starts itself, and the agents that scripts/loop/run-builder starts,
+# which have their type in LOOP_HAND_OFF. Each type gets the steps of its own hand-off. Other agents, and the
+# maintainer's other sessions, get no note, because the notes' steps are those of the orchestrator and these types.
+# Each note comes once to each agent. For each note, the hook creates a file in .loop/hand-offs, named
+# <agent>.<threshold>, where <agent> is a subagent's agent id or a session's id. scripts/loop/meter reads them.
 # The files are in the .loop of the main checkout. When the hook can't create a note's file, the note says so. The hook
 # says nothing when it can't tell the context's size, such as when it can't find the agent's transcript, or after a
 # compaction until the agent's next reply.
@@ -79,9 +82,20 @@ tell() {
   jq -n --arg message "$1" '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $message}}'
 }
 
-# Tells the orchestrator to ask for a compaction, once each time its context passes compact_tokens.
+# Deletes the orchestrator's request for a compaction, and prints why: refuse_request <request> <context size>
+refuse_request() {
+  local why="because your context is $(($2 / 1000))k tokens. Go on with the loop, and ask for a compaction only after the hook tells you that your context has passed $((compact_tokens / 1000))k tokens."
+  if rm -f "$1" 2>/dev/null; then
+    echo "scripts/hooks/hand-off deleted your request for a compaction, $1, $why"
+  else
+    echo "scripts/hooks/hand-off refuses your request for a compaction, $1, $why It couldn't delete the file, so delete it."
+  fi
+}
+
+# Tells the orchestrator to ask for a compaction, once each time its context passes compact_tokens, and refuses a
+# request for one before then.
 tell_orchestrator() {
-  local loop size told note
+  local loop size told request message=""
   loop=$(find_loop_folder) || return 0
   if ! is_orchestrators_session "$loop" "$session_id"; then
     return 0
@@ -91,20 +105,27 @@ tell_orchestrator() {
     return 0
   fi
   told=$loop/told-to-compact
+  request=$loop/compact-request.txt
   if ((size <= compact_tokens)); then
     if [[ -e $told ]] && ! rm -f "$told" 2>/dev/null; then
-      tell "scripts/hooks/hand-off couldn't delete $told, so it won't tell you again when your context passes $((compact_tokens / 1000))k tokens. Delete the file."
+      message="scripts/hooks/hand-off couldn't delete $told, so it won't tell you again when your context passes $((compact_tokens / 1000))k tokens. Delete the file."
+    fi
+    if [[ -e $request ]]; then
+      message+="${message:+ }$(refuse_request "$request" "$size")"
+    fi
+    if [[ -n $message ]]; then
+      tell "$message"
     fi
     return 0
   fi
   if ! claim_note "$told"; then
     return 0
   fi
-  note="Your context has passed $((compact_tokens / 1000))k tokens. If the maintainer installed a compaction sender, ask for a compaction, as \"Compact your context\" in docs/loop.md describes: finish the step you're on, and bring your state file up to date. Then write $loop/compact-request.txt with $session_id on its first line and \"Resume from .loop/state.md.\" on its second, and end your turn. Without a sender, ask the maintainer to type /compact, and go on with the loop."
+  message="Your context has passed $((compact_tokens / 1000))k tokens. If the maintainer installed a compaction sender, ask for a compaction, as \"Compact your context\" in docs/loop.md describes: finish the step you're on, and bring your state file up to date. Then write $request with $session_id on its first line and \"Resume from .loop/state.md.\" on its second, and end your turn. Without a sender, ask the maintainer to type /compact, and go on with the loop."
   if [[ -n $unwritten ]]; then
-    note+=" scripts/hooks/hand-off couldn't write${unwritten}, so it may give this note again."
+    message+=" scripts/hooks/hand-off couldn't write${unwritten}, so it may give this note again."
   fi
-  tell "$note"
+  tell "$message"
 }
 
 # A subagent's input has an agent_id, and a session that scripts/loop/run-builder started has LOOP_HAND_OFF.
@@ -112,13 +133,25 @@ if [[ -z $agent_id && -z ${LOOP_HAND_OFF:-} ]]; then
   tell_orchestrator
   exit 0
 fi
-# A subagent of a builder that scripts/loop/run-builder started has LOOP_HAND_OFF too.
+# A subagent of an agent that scripts/loop/run-builder started has LOOP_HAND_OFF too.
 if [[ -n $agent_id && -n ${LOOP_HAND_OFF:-} ]]; then
   exit 0
 fi
-# The types in .claude/agents that hand off are auditor, builder and builder-<kind of issue>.
+# The input of a session that scripts/loop/run-builder started has no type, so the session has it in LOOP_HAND_OFF.
+if [[ -z $agent_id ]]; then
+  agent_type=${LOOP_HAND_OFF:-}
+fi
+# The types in .claude/agents that hand off are auditor, builder, builder-<kind of issue>, reviewer and researcher.
 case $agent_type in
-  "" | auditor | builder | builder-*) ;;
+  auditor | builder | builder-*)
+    how="To hand off, push your branch. Then write a comment on your issue or pull request with what's done, what's left, the commands you ran and where their outputs are, and the open questions. End with a report that says that you handed off, with the comment's link."
+    ;;
+  reviewer)
+    how="To hand off, end with a report that says that you handed off, with the errors that you have found so far, and the parts of the diff that you haven't read yet."
+    ;;
+  researcher)
+    how="To hand off, write a comment on your issue with what you have found so far, what's left to find out, and the open questions. End with a report that says that you handed off, with the comment's link."
+    ;;
   *) exit 0 ;;
 esac
 # A subagent's hook gets the transcript of its session, and the subagent's own is in a folder next to it.
@@ -150,7 +183,6 @@ fi
 notes=$loop/hand-offs
 mkdir -p "$notes" 2>/dev/null
 
-how="To hand off, push your branch. Then write a comment on your issue or pull request with what's done, what's left, the commands you ran and where their outputs are, and the open questions. End with a report that says that you handed off, with the comment's link."
 note=""
 if ((size > now_tokens)); then
   # The note to hand off at the next stopping point would come too late after this one.

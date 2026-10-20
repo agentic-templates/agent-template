@@ -22,6 +22,8 @@ notes=$repository/.loop/hand-offs
 soon="Your context has passed 400k tokens. Hand off your work at your next stopping point, so that a fresh agent continues it."
 now="Your context has passed 500k tokens. Hand off your work as soon as the step you're on ends, so that a fresh agent continues it."
 how="To hand off, push your branch. Then write a comment on your issue or pull request with what's done, what's left, the commands you ran and where their outputs are, and the open questions. End with a report that says that you handed off, with the comment's link."
+reviewer_how="To hand off, end with a report that says that you handed off, with the errors that you have found so far, and the parts of the diff that you haven't read yet."
+researcher_how="To hand off, write a comment on your issue with what you have found so far, what's left to find out, and the open questions. End with a report that says that you handed off, with the comment's link."
 compact="Your context has passed 300k tokens. If the maintainer installed a compaction sender, ask for a compaction, as \"Compact your context\" in docs/loop.md describes: finish the step you're on, and bring your state file up to date. Then write $repository/.loop/compact-request.txt with $orchestrator on its first line and \"Resume from .loop/state.md.\" on its second, and end your turn. Without a sender, ask the maintainer to type /compact, and go on with the loop."
 
 # Prints a reply of a transcript, whose call read the given number of tokens: reply <tokens>
@@ -92,6 +94,25 @@ expect_note_files() {
     echo "error: $description, the hook must leave the files \"$expected\" in .loop/hand-offs, but it left \"${files# }\"." >&2
     failed_cases=$((failed_cases + 1))
   fi
+}
+
+# Checks whether the orchestrator's request for a compaction is in place: expect_request <description> <kept or deleted>
+request=$repository/.loop/compact-request.txt
+expect_request() {
+  local actual=deleted
+  case_count=$((case_count + 1))
+  if [[ -e $request ]]; then
+    actual=kept
+  fi
+  if [[ $actual != "$2" ]]; then
+    echo "error: $1, the hook must leave the request for a compaction $2, but it left it $actual." >&2
+    failed_cases=$((failed_cases + 1))
+  fi
+}
+
+# Writes the orchestrator's request for a compaction, as "Compact your context" in docs/loop.md describes.
+write_request() {
+  printf '%s\nResume from .loop/state.md.\n' "$orchestrator" >"$request"
 }
 
 # Checks that the hook didn't create the file of the orchestrator's note: expect_no_compact_file <description>
@@ -204,6 +225,51 @@ add_reply "$orchestrator" "" 310000
 run_hook "$orchestrator" ""
 expect_note "For the orchestrator past 300k tokens after a compaction that the transcript marks" "$compact"
 
+# The orchestrator's request for a compaction, before and after the hook tells it to ask for one
+refused="because your context is"
+go_on="Go on with the loop, and ask for a compaction only after the hook tells you that your context has passed 300k tokens."
+add_reply "$orchestrator" "" 40000
+run_hook "$orchestrator" ""
+write_request
+add_reply "$orchestrator" "" 261000
+run_hook "$orchestrator" ""
+expect_note "For a request at 261k tokens" \
+  "scripts/hooks/hand-off deleted your request for a compaction, $request, $refused 261k tokens. $go_on"
+expect_request "For a request at 261k tokens" deleted
+write_request
+add_reply "$orchestrator" "" 300000
+run_hook "$orchestrator" ""
+expect_note "For a request at 300k tokens" \
+  "scripts/hooks/hand-off deleted your request for a compaction, $request, $refused 300k tokens. $go_on"
+expect_request "For a request at 300k tokens" deleted
+add_reply "$orchestrator" "" 300001
+run_hook "$orchestrator" ""
+expect_note "For the orchestrator just past 300k tokens, before its request" "$compact"
+write_request
+run_hook "$orchestrator" ""
+expect_note "For a request after the note" ""
+expect_request "For a request after the note" kept
+add_reply "$orchestrator" "" 241000
+run_hook "$orchestrator" ""
+expect_note "For a request after the note, once the context is below 300k tokens again" \
+  "scripts/hooks/hand-off deleted your request for a compaction, $request, $refused 241k tokens. $go_on"
+expect_request "For a request after the note, once the context is below 300k tokens again" deleted
+write_request
+add_reply "$orchestrator" "" 320000
+run_hook "$orchestrator" ""
+expect_note "For a request that comes with the first tool call past 300k tokens" "$compact"
+expect_request "For a request that comes with the first tool call past 300k tokens" kept
+add_reply "$orchestrator" a11 100000
+run_hook "$orchestrator" a11
+expect_request "For a builder in the orchestrator's session, under 300k tokens" kept
+rm "$request"
+mkdir "$request"
+add_reply "$orchestrator" "" 250000
+run_hook "$orchestrator" ""
+expect_note "For a request that the hook can't delete" \
+  "scripts/hooks/hand-off refuses your request for a compaction, $request, $refused 250k tokens. $go_on It couldn't delete the file, so delete it."
+rmdir "$request"
+
 # Agents that get no note
 rm -rf "$notes"
 run_hook "$orchestrator" a9
@@ -222,7 +288,7 @@ add_reply "$orchestrator" d2 600000
 rm "$projects/$orchestrator/subagents/agent-d2.meta.json"
 run_hook "$orchestrator" d2
 expect_note "For a subagent without the file that says who started it" ""
-for agent_type in reviewer researcher Explore general-purpose; do
+for agent_type in Explore general-purpose; do
   add_reply "$orchestrator" "t-$agent_type" 600000
   run_hook "$orchestrator" "t-$agent_type"
   expect_note "For a subagent of the type $agent_type" ""
@@ -241,23 +307,51 @@ expect_note "For an auditor just past 400k tokens" "$soon $how"
 add_reply "$orchestrator" t-auditor 500001
 run_hook "$orchestrator" t-auditor
 expect_note "For an auditor just past 500k tokens" "$now $how"
+agent_type=reviewer
+add_reply "$orchestrator" t-reviewer 400001
+run_hook "$orchestrator" t-reviewer
+expect_note "For a reviewer just past 400k tokens" "$soon $reviewer_how"
+add_reply "$orchestrator" t-reviewer 500001
+run_hook "$orchestrator" t-reviewer
+expect_note "For a reviewer just past 500k tokens" "$now $reviewer_how"
+agent_type=researcher
+add_reply "$orchestrator" t-researcher 400001
+run_hook "$orchestrator" t-researcher
+expect_note "For a researcher just past 400k tokens" "$soon $researcher_how"
+add_reply "$orchestrator" t-researcher 500001
+run_hook "$orchestrator" t-researcher
+expect_note "For a researcher just past 500k tokens" "$now $researcher_how"
 agent_type=builder
-expect_note_files "For the subagents of the other types that hand off" "t-auditor.400000 t-auditor.500000 t-small.400000"
+expect_note_files "For the subagents of the other types that hand off" \
+  "t-auditor.400000 t-auditor.500000 t-researcher.400000 t-researcher.500000 t-reviewer.400000 t-reviewer.500000 t-small.400000"
 rm -rf "$notes"
 
-# A session that scripts/loop/run-builder started, and its subagent
+# The sessions that scripts/loop/run-builder started, and a subagent of one
 builder=33333333-aaaa-4bbb-8ccc-000000000003
 add_reply "$builder" "" 410000
-run_hook "$builder" "" LOOP_HAND_OFF=1
+run_hook "$builder" "" LOOP_HAND_OFF=builder
 expect_note "For a builder that scripts/loop/run-builder started" "$soon $how"
+reviewer=55555555-aaaa-4bbb-8ccc-000000000005
+add_reply "$reviewer" "" 410000
+run_hook "$reviewer" "" LOOP_HAND_OFF=reviewer
+expect_note "For a reviewer that scripts/loop/run-builder started" "$soon $reviewer_how"
+researcher=66666666-aaaa-4bbb-8ccc-000000000006
+add_reply "$researcher" "" 410000
+run_hook "$researcher" "" LOOP_HAND_OFF=researcher
+expect_note "For a researcher that scripts/loop/run-builder started" "$soon $researcher_how"
+other=77777777-aaaa-4bbb-8ccc-000000000007
+add_reply "$other" "" 410000
+run_hook "$other" "" LOOP_HAND_OFF=Explore
+expect_note "For a session whose type in LOOP_HAND_OFF doesn't hand off" ""
 run_hook "$builder" ""
 expect_note "For a session that scripts/loop/run-builder didn't start, and that isn't the orchestrator" ""
 add_reply "$builder" c1 410000
-run_hook "$builder" c1 LOOP_HAND_OFF=1
+run_hook "$builder" c1 LOOP_HAND_OFF=builder
 expect_note "For a subagent of a builder that scripts/loop/run-builder started" ""
-run_hook 44444444-aaaa-4bbb-8ccc-000000000004 "" LOOP_HAND_OFF=1
+run_hook 44444444-aaaa-4bbb-8ccc-000000000004 "" LOOP_HAND_OFF=builder
 expect_note "For a builder whose transcript can't be found" ""
-expect_note_files "For the builders" "$builder.400000"
+expect_note_files "For the sessions that scripts/loop/run-builder started" \
+  "$builder.400000 $reviewer.400000 $researcher.400000"
 
 # A note whose file the hook can't write, because a file stands where its folder should be. A read-only folder
 # wouldn't stop root.

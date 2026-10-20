@@ -47,9 +47,26 @@ ready_issue_facts() {
   { grep -- "^$1"$'\t'"$2"$'\t' <<<"$ready_issues" || true; } | cut -f 3-
 }
 
-# Prints the numbers of the ready issues, lowest first: ready_issue_numbers
+# Succeeds if a ready issue has the priority label: has_priority <issue>
+has_priority() {
+  grep -qxF priority <<<"$(ready_issue_facts label "$1")"
+}
+
+# Prints the numbers of the ready issues, those with the priority label first, and the lowest first in each group:
+# ready_issue_numbers
 ready_issue_numbers() {
-  { grep $'^issue\t' <<<"$ready_issues" || true; } | cut -f 2 | sort -n
+  local numbers issue
+  numbers=$({ grep $'^issue\t' <<<"$ready_issues" || true; } | cut -f 2 | sort -n)
+  for issue in $numbers; do
+    if has_priority "$issue"; then
+      printf '%s\n' "$issue"
+    fi
+  done
+  for issue in $numbers; do
+    if ! has_priority "$issue"; then
+      printf '%s\n' "$issue"
+    fi
+  done
 }
 
 # Succeeds if a word is one of the other words: is_one_of <word> [<other word>...]

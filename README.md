@@ -60,7 +60,7 @@ You need:
    gh issue list --label needs-decision
    ```
 
-5. When the goal's issue closes, the orchestrator publishes a release. It checks that CI passed on main and that no code scanning or Dependabot alert of high or critical severity is open. Then it publishes the next semantic version, with notes from the merged pull requests.
+5. When the goal's issue closes, the orchestrator publishes a release. It checks that CI passed on main and that no code scanning or Dependabot alert of high or critical severity is open. An agent reviews the changes since the last release for security problems. The orchestrator fixes each problem that the agent finds, and waits until another agent has checked each fix. Then it publishes the next semantic version, with notes from the merged pull requests.
 
 ## Steer the orchestrator
 

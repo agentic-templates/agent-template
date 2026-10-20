@@ -24,8 +24,7 @@ source "${BASH_SOURCE[0]%/*}/../minimum-gh-version"
 # shellcheck source=scripts/needs-triage
 source "${BASH_SOURCE[0]%/*}/../needs-triage"
 
-# The flags that take a value, as gh issue develop --help, gh auth token --help and gh auth status --help list them.
-develop_flags_with_value=" -b --base --branch-repo -n --name --worktree -R --repo "
+# The flags that take a value, as gh auth token --help and gh auth status --help list them.
 token_flags_with_value=" -h --hostname -u --user "
 status_flags_with_value=" -h --hostname --jq --json --template "
 
@@ -313,7 +312,7 @@ check_gh_auth_status() {
 
 check_simple_command() {
   drop_command_prefixes "$@"
-  move_gh_repository_flags
+  move_flags_after_gh_subcommand
   if ((${#command_words[@]} == 0)); then
     return 0
   fi

@@ -151,6 +151,9 @@ mv "$base/loop.md" docs/loop.md
 commit_all "docs: say how the loop merges"
 expect_check "$create" 2 "$(unread docs/loop.md)"
 expect_check 'gh pr new --title "docs: say how the loop runs" --body "Closes #1"' 2 "$(unread docs/loop.md)"
+for wrapper in "${wrappers[@]}"; do
+  expect_check "$wrapper $create" 2 "$(unread docs/loop.md)"
+done
 read_page docs/loop.md
 expect_check "$create" 0 ""
 echo "It waits for the checks." >>docs/loop.md

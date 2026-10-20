@@ -172,6 +172,7 @@ TEST_RULESETS=main
 for command in "${runs_of_the_script[@]}"; do
   expect_block Bash "$command" "$second_run"
 done
+expect_block_behind_wrappers scripts/configure-github "$second_run"
 for TEST_RULESETS in another none fail; do
   for command in "${runs_of_the_script[@]}"; do
     expect_allow Bash "$command"
@@ -217,11 +218,20 @@ TEST_RULESETS=none TEST_OTHER_RULESETS=main
 for command in "${runs_on_the_other[@]}"; do
   expect_block Bash "$command" "$second_run"
 done
-# Only a cd before the script, outside a subshell, changes the folder that the script runs in.
+# Only a cd before the script, outside a subshell, changes the folder that the script runs in, and only one that the
+# shell runs itself, as after builtin, rather than another program, such as env or timeout.
 TEST_RULESETS=main TEST_OTHER_RULESETS=none
 expect_block Bash "scripts/configure-github; cd '$other_clone'" "$second_run"
 expect_block Bash "(cd '$other_clone') && scripts/configure-github" "$second_run"
 expect_block Bash "folder=\$(cd '$other_clone' && pwd) && scripts/configure-github" "$second_run"
+for wrapper in env "timeout 10" "nice -n 5" nohup "stdbuf -oL" xargs /usr/bin/time "FOO=1 time"; do
+  expect_block Bash "$wrapper cd '$other_clone' && scripts/configure-github" "$second_run"
+done
+for wrapper in builtin "FOO=1 builtin"; do
+  expect_allow Bash "$wrapper cd '$other_clone' && scripts/configure-github"
+done
+# time -o names the file that time writes to, so GH_REPO=jtmpl/other sets no variable there.
+expect_block Bash "time -o GH_REPO=jtmpl/other scripts/configure-github" "$second_run"
 # gh can't name the repository of a folder that isn't a clone.
 expect_allow Bash "cd '$folders' && scripts/configure-github"
 
@@ -239,12 +249,19 @@ for rulesets in "main none" "none main"; do
   expect_block Bash 'cd && scripts/configure-github' "$cannot_tell"
   expect_block Bash "cd -P '$other_clone' && scripts/configure-github" "$cannot_tell"
 done
+# The hooks block a cd that the shell may run as a program. bash runs its own cd after command, and zsh runs the
+# program cd. zsh runs the cd after noglob, and bash has no noglob. The shell runs its own time only for the word time
+# unquoted, and the program time for 'time', but the hook sees the word without its quotes.
+TEST_RULESETS=main TEST_OTHER_RULESETS=none
+for wrapper in command noglob time "time -p" "'time'"; do
+  expect_block Bash "$wrapper cd '$other_clone' && scripts/configure-github" "$cd_after_wrapper"
+done
 
 # A run of scripts/configure-github by the orchestrator, the session that the state file names, once the settings were
 # applied. It runs the main checkout's script in the main checkout, while the checkout's scripts folder is the same as
 # on main on GitHub.
 orchestrator=11111111-aaaa-4bbb-8ccc-000000000001
-not_alone="Blocked: the orchestrator runs scripts/configure-github again only in the main checkout, as a command of its own, without a variable, env, bash, sh or a redirection: cd $main_checkout && scripts/configure-github."
+not_alone="Blocked: the orchestrator runs scripts/configure-github again only in the main checkout, as a command of its own, without a word before it, such as a variable, env, timeout or bash, and without a redirection: cd $main_checkout && scripts/configure-github."
 unlike_main="Blocked: the orchestrator runs scripts/configure-github again only while the main checkout's scripts folder, with its untracked files, and its .gitignore are the same as on main on GitHub, because a reviewer read each change to them before it merged. Bring the main checkout up to date with git fetch origin && git merge --ff-only origin/main, undo any other change to its .gitignore and its scripts folder, remove any new file in the folder, also a .gitignore that ignores itself, and run the script again."
 cannot_compare="Blocked: this hook can't compare the main checkout's scripts folder and .gitignore with the ones on main on GitHub, because gh or git failed, or the folder holds a repository of its own. Check that gh can reach GitHub, remove any repository inside the folder, and try again."
 TEST_RULESETS=main TEST_OTHER_RULESETS=main
@@ -280,7 +297,8 @@ for command in "cd '$worktree' && scripts/configure-github" "'$worktree/scripts/
   "PATH=/tmp/dir:\$PATH scripts/configure-github" "scripts/configure-github 2>scripts/admin-access" \
   "scripts/configure-github >configure.log 2>&1" "cd . >scripts/admin-access && scripts/configure-github" \
   "cp '$worktree/scripts/configure-github' scripts/ && scripts/configure-github" \
-  "scripts/configure-github | tail -n 5" "scripts/configure-github & git switch --quiet work"; do
+  "scripts/configure-github | tail -n 5" "scripts/configure-github & git switch --quiet work" \
+  "timeout 10m scripts/configure-github"; do
   expect_from "$orchestrator" "" "$command" 2 "$not_alone"
 done
 

@@ -1,7 +1,7 @@
 ---
 name: auditor
 description: Runs a retrospective of this repository's loop when scripts/loop/meter says one is due, and opens a pull request with the label retrospective that changes the loop's rules, checks and agent types.
-model: opus
+model: claude-opus-5-5
 effort: max
 isolation: worktree
 background: true
@@ -81,6 +81,9 @@ Test only where the report's numbers since the time in step 3 point to a change:
 - A group of `builder`'s issues that share something and keep needing fixes: test `builder-deep` on them. If it does
   clearly better, add the group to its description as a kind.
 - A kind of issue that no type fits well: test a new type for it, against the type that built such issues.
+
+If your prompt names a model that no retrospective tested, test it too, as "Start a retrospective" in docs/loop.md
+describes.
 
 Leave out a test that an earlier retrospective's description records, unless its numbers changed since. Run the test
 with the largest expected saving first, and start each build only while `scripts/loop/meter` gives the advice `go`

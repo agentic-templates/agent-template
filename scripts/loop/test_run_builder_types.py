@@ -7,6 +7,7 @@ import json
 import os
 import re
 from typing import Any
+from unittest import mock
 
 from test_run_builder import (
     BRANCH,
@@ -19,6 +20,7 @@ from test_run_builder import (
     lines,
     run_builder,
 )
+from test_run_builder_message import MESSAGE, MESSAGE_START
 from test_transcripts import call_line, command_line, prompt_line, result_line
 
 
@@ -58,16 +60,32 @@ class TypeTest(RunBuilderTest):
         self.assertEqual((status, errors), (0, ""))
         [call] = self.calls("claude")
         self.assertEqual(
-            call["args"][len(run_builder.CLAUDE_COMMAND) - 1 : -1],
-            ["--tools", "Read, Grep, Bash", "--disallowedTools", "Bash(git push *), WebFetch", "--max-turns", "40"],
+            call["args"][len(run_builder.CLAUDE_COMMAND) - 1 :],
+            [
+                "--tools",
+                "Read, Grep, Bash",
+                "--disallowedTools",
+                "Bash(git push *), WebFetch",
+                "--max-turns",
+                "40",
+                "--",
+                (self.run_folder() / "brief.md").read_text(),
+            ],
         )
+
+    def test_puts_the_brief_after_a_double_dash_when_the_agent_file_disallows_tools(self) -> None:
+        (self.agents / "builder-cheaper.md").write_text("---\nname: builder-cheaper\ndisallowedTools: Bash\n---\n")
+        status, _, errors = self.run_builder("--tool", "claude", agent_type="builder-cheaper")
+        self.assertEqual((status, errors), (0, ""))
+        [call] = self.calls("claude")
+        self.assertEqual(call["args"][-3:], ["Bash", "--", (self.run_folder() / "brief.md").read_text()])
 
     def test_runs_claude_without_the_settings_that_the_agent_file_lacks(self) -> None:
         (self.agents / "builder-small.md").write_text("---\nname: builder-small\nmodel: sonnet\n---\n")
         status, _, _ = self.run_builder("--tool", "claude", agent_type="builder-small")
         self.assertEqual(status, 0)
         [call] = self.calls("claude")
-        self.assertEqual(call["args"][len(run_builder.CLAUDE_COMMAND) - 1 : -1], ["--model", "sonnet"])
+        self.assertEqual(call["args"][len(run_builder.CLAUDE_COMMAND) - 1 : -1], ["--model", "sonnet", "--"])
 
 
 class AgentLinesTest(RunBuilderTest):
@@ -139,6 +157,7 @@ class AgentLinesTest(RunBuilderTest):
                 "kind": "other",
                 "test": False,
                 "pid": os.getpid(),
+                "account": "main",
             },
         )
         self.assert_run_usage(end)
@@ -157,6 +176,12 @@ class AgentLinesTest(RunBuilderTest):
                 "pull_request": 5,
             },
         )
+
+    def test_names_the_account_that_the_builder_ran_on(self) -> None:
+        status, _, _ = self.run_builder("--tool", "claude", "--account", "second")
+        self.assertEqual(status, 0)
+        start, _ = self.start_and_end()
+        self.assertEqual(start["account"], "second")
 
     def test_gives_a_claude_builder_without_a_transcript_no_calls(self) -> None:
         status, _, _ = self.run_builder("--tool", "claude", kind="left behind 31")
@@ -206,6 +231,7 @@ class AgentLinesTest(RunBuilderTest):
                 "kind": "other",
                 "test": False,
                 "pid": os.getpid(),
+                "account": "work",
             },
         )
         self.assert_run_usage(end)
@@ -260,7 +286,8 @@ class TestBuildTest(RunBuilderTest):
         self.worktree = self.repo / ".claude" / "worktrees" / "test-12-builder"
 
     def test_builds_the_issue_from_the_commit_that_its_pull_request_started_from_and_keeps_the_diff(self) -> None:
-        status, printed, errors = self.run_builder("--tool", "claude", "--test", "7")
+        with mock.patch.dict(os.environ, {"LOOP_HAND_OFF": "1"}):
+            status, printed, errors = self.run_builder("--tool", "claude", "--test", "7")
         self.assertEqual((status, errors), (0, ""))
         run = self.run_folder()
         self.assertTrue(run.name.startswith("test-12-builder-"))
@@ -279,6 +306,16 @@ class TestBuildTest(RunBuilderTest):
         self.assertEqual([call["start"] for call in self.calls("gh")], ["repo view", "issue view", "pr view"])
         start, end = self.agent_lines()
         self.assertEqual((start["id"], start["test"], end["id"]), (run.name, True, run.name))
+
+    def test_test_builder_gets_the_message_after_the_text_of_its_issue(self) -> None:
+        message = self.root / "message.md"
+        message.write_text(f"{MESSAGE}\n")
+        status, _, errors = self.run_builder("--tool", "claude", "--test", "7", "--message", str(message))
+        self.assertEqual((status, errors), (0, ""))
+        brief = (self.run_folder() / "brief.md").read_text()
+        self.assertTrue(brief.startswith(MESSAGE_START))
+        self.assertIn("This build is a test", brief)
+        self.assertEqual(self.calls("claude")[0]["args"][-1], brief)
 
     def test_keeps_the_diff_of_a_test_build_that_failed(self) -> None:
         self.answer("claude", "", {"stdout": lines(INIT), "status": 1, "write": {"half.txt": "half\n"}})

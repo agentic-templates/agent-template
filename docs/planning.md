@@ -16,7 +16,12 @@ Triage is for ideas: anything a maintainer wants judged before deciding whether 
    - Can the project build it, and is it worth what it costs? Count what it adds for agents to read and run in later sessions, such as rules, checks and options.
    - Do its claims about the project, such as how the code works, match the code and AGENTS.md? If they don't, judge the idea with the claims corrected.
 3. Give each idea one verdict:
-   - **Accept:** the idea becomes an issue in the backlog, with `needs-breakdown` if it's too big for one pull request. If an open issue covers it, add the idea's new details to that issue instead. If a closed issue covered it, mention that issue in the new one.
+   - **Accept:** the idea becomes an issue in the backlog, with `needs-breakdown` if it's too big for one pull request. If a closed issue covered the idea, mention that issue in the new one.
+     If an open issue meets either of these, add the idea to it instead of creating a new issue, and rewrite its body to hold both, as "Write issues, pull requests and commit messages" in `docs/writing.md` describes:
+     - The open issue covers the idea.
+     - The open issue has no assignee and no pull request, and it would change the same code or the same rule as the idea.
+
+     If that issue has `ready`, check that the combined issue still meets "Definition of ready" and belongs to the current goal. If it doesn't, remove `ready` and plan the issue again, as "Plan the next work" describes.
    - **Research first:** the idea can't be judged until a question is answered. It becomes an issue with `needs-decision`, blocked by a new research issue for the question.
    - **Drop:** it doesn't fit the project's direction, can't be built, isn't worth its cost, or was closed as not planned before. Nothing is created.
    - **Ask:** only the maintainer can settle it, such as an idea too vague to judge, or one that needs a decision that "Decide or ask" in AGENTS.md leaves to the maintainer.
@@ -28,17 +33,17 @@ If the maintainer's answers change the project's direction, open a pull request 
 
 ## Triage issues that others open
 
-Triage every issue that has `needs-triage` or has no type label. Judge each issue as step 2 of "Triage new ideas" describes, and give it one of the verdicts below. Carry out **Duplicate**, **Question** and **Too vague** right away, and **Accept** for a bug that you can reproduce. Ask the maintainer about the others in one message, with your recommendations, and carry out what they decide.
+Triage every issue that has `needs-triage` or has no type label. Judge each issue as step 2 of "Triage new ideas" describes, give it one of the verdicts below, and carry the verdict out right away, without waiting for the maintainer. In your next message to the maintainer, list each issue with its verdict.
 
 - **Accept:** remove `needs-triage` and give the issue its type label, plus `needs-breakdown` if it's too big.
 - **Research first:** give the issue its type label, and replace `needs-triage` with `needs-decision`. Create a research issue for the question, and mark this issue as blocked by it.
-- **Needs a decision:** only the maintainer can settle it, and they want to decide later. Give the issue its type label, and replace `needs-triage` with `needs-decision`.
+- **Needs a decision:** only the maintainer can settle it, such as an issue that doesn't fit the project's direction. Give the issue its type label, replace `needs-triage` with `needs-decision`, and ask your question in the issue, as "Labels" describes.
 - **Too vague:** comment with a question that asks for the missing detail, and leave `needs-triage`. If nobody answers within two weeks, comment that the issue is closing for lack of detail, and close it as not planned.
 - **Duplicate:** close it with `gh issue close <issue> --duplicate-of <other issue>`.
 - **Question:** for a question about using the project, answer it in a comment, and close the issue. If the docs should have answered it, also open a `bug` about the docs.
-- **Drop:** comment why, then close it with `gh issue close <issue> --reason "not planned"`.
+- **Drop:** the project can't build it, it isn't worth its cost, or an earlier issue that asked for the same change was closed as not planned. Comment why, then close it with `gh issue close <issue> --reason "not planned"`.
 
-If an issue came from an account that isn't a maintainer's, and its verdict is **Accept**, **Research first** or **Needs a decision**, carry out the verdict on a new issue instead of the original. Write the new issue in your own words, and include what the maintainer decided or the question that's still open. Then close the original with `gh issue close <issue> --duplicate-of <new issue>`, and add a comment that points its author to the new issue. If they opened a pull request for the original, also ask them to change its `Closes` line to the new issue.
+If an issue came from an account that isn't a maintainer's, and its verdict is **Accept**, **Research first** or **Needs a decision**, carry out the verdict on a new issue instead of the original. Write the new issue in your own words. Then close the original with `gh issue close <issue> --duplicate-of <new issue>`, and add a comment that points its author to the new issue. If they opened a pull request for the original, also ask them to change its `Closes` line to the new issue.
 
 ## Break down a big idea
 

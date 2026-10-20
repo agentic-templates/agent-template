@@ -468,7 +468,7 @@ block_unknown_hooks() {
 # --work-tree can move. So the hook asks git, with the push's options and variables as the command writes them, but
 # with HOME filled in, as run_git_as_command describes. It doesn't see the variables that an earlier part of the command
 # exports. env's -i and -u don't count either, because they only take variables away, and of these variables the
-# agent's environment usually holds only HOME: check_push_hooks <the words before the command's name>...
+# agent's environment usually holds only HOME: check_push_hooks <word that sets a variable for git>...
 check_push_hooks() {
   local word hooks worktrees physical_hooks line
   git_variables=()
@@ -495,7 +495,7 @@ check_push_hooks() {
   block "Blocked: this push would run the git hooks in $hooks, not the ones in scripts/git-hooks of the repository's main checkout or of one of its worktrees, so the pre-push hook wouldn't scan the push for leaks. If the repository's core.hooksPath names another folder, or none, run scripts/install-git-hooks. Push from the main checkout or a worktree, without setting core.hooksPath for the push."
 }
 
-# check_git_push <the words before the command's name>...
+# check_git_push <word that sets a variable for git>...
 check_git_push() {
   read_push_arguments
   if has_git_flag --no-verify; then
@@ -660,14 +660,15 @@ text_flags=" -b --body -t --title -c --comment -F --body-file --description -n -
 # Sets destination to the repository that a gh command posts to, as the command or git names it, or to empty when the
 # hook can't tell. gh takes the repository from the first of these that it finds:
 # - the endpoint of gh api, such as repos/owner/name/issues, unless it's repos/{owner}/{repo}
-# - for any other command, -R or --repo, the repository that gh repo edit and the like take, or the URL of an issue or
+# - for any other command, the repository that gh repo edit and the like take, -R or --repo, or the URL of an issue or
 #   a pull request
 # - GH_REPO, whose value check_gh puts in gh_repo
 # - the remote named origin of the folder that the command runs in
+# It also sets guessed_repositories, as find_named_repository describes.
 # For gh api, run read_arguments first.
 find_destination() {
   local origin
-  destination=""
+  destination="" guessed_repositories=()
   if [[ ${command_words[1]:-} == api ]]; then
     if [[ ! $argument =~ ^/?repos/([^/]+/[^/?#]+) ]]; then
       return 0
@@ -697,35 +698,97 @@ find_destination() {
   fi
 }
 
-# Sets destination to the repository that the words of a gh command other than gh api name, or to empty.
-find_named_repository() {
-  local i word flag value value_is_next_word flags_before
+# Sets command_flags_with_value to the flags that take a value of the gh command in command_words, from the lists in
+# helpers.bash, or to empty when the hooks list no flags of the command.
+read_command_flags_with_value() {
+  case "${command_words[1]:-} ${command_words[2]:-}" in
+    "issue create" | "issue new") command_flags_with_value=$issue_create_flags_with_value ;;
+    "issue edit") command_flags_with_value=$issue_edit_flags_with_value ;;
+    "issue close") command_flags_with_value=$issue_close_flags_with_value ;;
+    "issue develop") command_flags_with_value=$develop_flags_with_value ;;
+    "issue comment" | "pr comment") command_flags_with_value=$comment_flags_with_value ;;
+    "issue reopen" | "pr reopen") command_flags_with_value=$reopen_flags_with_value ;;
+    "pr create" | "pr new") command_flags_with_value=$pr_create_flags_with_value ;;
+    "pr edit") command_flags_with_value=$pr_edit_flags_with_value ;;
+    "pr review") command_flags_with_value=$review_flags_with_value ;;
+    "pr close") command_flags_with_value=$pr_close_flags_with_value ;;
+    "pr merge") command_flags_with_value=$merge_flags_with_value ;;
+    *) command_flags_with_value="" ;;
+  esac
+}
+
+# Sets destination to the repository that gh repo edit, delete, archive or unarchive in command_words takes as its
+# argument, or to empty for another command or when the command names none. These commands take no -R.
+read_repository_argument() {
   destination=""
-  for ((i = 2; i < ${#command_words[@]}; i++)); do
-    word=${command_words[i]}
-    case $word in
-      -R | --repo)
-        destination=${command_words[i + 1]:-}
-        return 0
-        ;;
-      --repo=*)
-        destination=${word#--repo=}
-        return 0
-        ;;
-      -R?*)
-        split_flag_word "$word" " -R "
-        destination=$value
-        return 0
-        ;;
-    esac
+  case "${command_words[1]:-} ${command_words[2]:-}" in
+    "repo edit")
+      read_arguments 3 "$repo_edit_flags_with_value"
+      destination=$argument
+      ;;
+    "repo delete" | "repo archive" | "repo unarchive")
+      read_arguments 3 " "
+      destination=$argument
+      ;;
+  esac
+}
+
+# Adds the repository of each -R and --repo that read_arguments found to guessed_repositories.
+add_guessed_repositories() {
+  local i
+  for ((i = 0; i < ${#last_flags[@]}; i++)); do
+    if [[ ${last_flags[i]} == -R || ${last_flags[i]} == --repo ]]; then
+      guessed_repositories+=("${flag_values[i]}")
+    fi
   done
+}
+
+# Adds to guessed_repositories the repository of each -R and --repo after the first word with an expansion, which it
+# reads as read_arguments reads a command whose flags the hooks don't list. Once the shell expands that word, it can
+# become nothing, become a flag that takes a value, or end in a flag that takes no value or one whose value is the next
+# word, as -${letters}b and -b$text can. Then gh can read a word as a flag that the hook reads as a flag's value, as in
+# -b $text -b -Rowner/name. It sets the variables of read_arguments anew.
+# A word with an expansion is one that the splitter marks, or one that holds $, {, *, ? or [, because the splitter
+# doesn't mark ANSI-C quoting, locale quoting, brace expansion or a pattern, as in $'-b', $"-b", {-b,} and -[b].
+add_repositories_after_expansions() {
+  local i
+  for ((i = 2; i < ${#command_words[@]}; i++)); do
+    if [[ -n ${command_word_may_expand[i]:-} || ${command_words[i]} == *[\$\{\*\?\[]* ]]; then
+      read_arguments $((i + 1)) " -R --repo "
+      add_guessed_repositories
+      return 0
+    fi
+  done
+}
+
+# Sets destination to the repository that the words of a gh command other than gh api name, or to empty. It reads -R
+# and --repo as read_arguments in helpers.bash reads them, with the command's flags that take a value, and takes the
+# last of them, as gh does.
+# A later -R can be part of the value of a flag before it, and gh then takes an earlier -R. The hook can't tell this
+# when a word with an expansion becomes nothing, so that the -R after it becomes the value of the flag before it. So the
+# function adds the repository of each -R and --repo to guessed_repositories, which must all be allowed. It also adds
+# that of each -R that gh can read as a flag after a word with an expansion, as add_repositories_after_expansions
+# describes.
+# For a command whose flags the hooks don't list, it reads each flag other than -R and --repo as one that takes no
+# value, as in -dRowner/name, which it reads as -d -R owner/name. Then any -R can be part of the value of a flag before
+# it, in the same word or the word before, and without another -R, gh posts to the repository that the command names
+# without -R. So for such a command, the function goes on as if the command gave no -R.
+find_named_repository() {
+  local i word command_flags_with_value
+  guessed_repositories=()
+  read_repository_argument
+  if [[ -n $destination ]]; then
+    return 0
+  fi
+  read_command_flags_with_value
+  add_repositories_after_expansions
+  read_arguments 2 "${command_flags_with_value:-" -R --repo "}"
+  add_guessed_repositories
+  if [[ -n $command_flags_with_value ]] && ((${#repository[@]} > 0)); then
+    destination=${repository[1]}
+    return 0
+  fi
   if [[ ${command_words[1]:-} == repo ]]; then
-    case ${command_words[2]:-} in
-      edit) read_arguments 3 "$repo_edit_flags_with_value" ;;
-      delete | archive | unarchive) read_arguments 3 " " ;;
-      *) return 0 ;;
-    esac
-    destination=$argument
     return 0
   fi
   # The URL can stand anywhere among the words after the subcommand.
@@ -740,21 +803,32 @@ find_named_repository() {
   done
 }
 
+# Blocks a post to a repository other than this one, unless the list of allowed repositories names it. It allows the
+# post when the hook can't tell the repository: block_if_other_repository <repository, or empty>
+block_if_other_repository() {
+  if [[ -z $1 || $1 == *[\$\`]* ]] || may_post_to "$1"; then
+    return 0
+  fi
+  read_name_with_owner "$1"
+  block "Blocked: this posts to $name_with_owner, which isn't this repository, and only the maintainer may post to another repository. $test_repositories"
+}
+
 # Blocks a gh command that posts to a repository other than this one, unless the list of allowed repositories names
-# it.
+# it. When a -R of the command can be part of the value of a flag before it, the command can post to the repository of
+# any -R, or to the one it names without -R, so all of them must be allowed.
 check_destination() {
+  local guessed
   if ! gh_posts; then
     return 0
   fi
   find_destination
-  if [[ -z $destination || $destination == *[\$\`]* ]] || may_post_to "$destination"; then
-    return 0
-  fi
-  read_name_with_owner "$destination"
-  block "Blocked: this posts to $name_with_owner, which isn't this repository, and only the maintainer may post to another repository. $test_repositories"
+  for guessed in ${guessed_repositories[@]+"${guessed_repositories[@]}"}; do
+    block_if_other_repository "$guessed"
+  done
+  block_if_other_repository "$destination"
 }
 
-# check_gh <the words before the command's name, such as GH_REPO=owner/name>...
+# check_gh <word that sets a variable for gh, such as GH_REPO=owner/name>...
 check_gh() {
   local word
   gh_repo=""
@@ -763,7 +837,7 @@ check_gh() {
       gh_repo=${word#GH_REPO=}
     fi
   done
-  move_gh_repository_flags
+  move_flags_after_gh_subcommand
   case "${command_words[1]:-} ${command_words[2]:-}" in
     "pr merge")
       read_arguments 3 "$merge_flags_with_value"
@@ -823,11 +897,11 @@ check_simple_command() {
     git)
       read_git_options
       case ${command_words[git_subcommand]:-} in
-        push) check_git_push "${@:1:prefix_count}" ;;
+        push) check_git_push ${assignment_words[@]+"${assignment_words[@]}"} ;;
         config) check_git_config ;;
       esac
       ;;
-    gh) check_gh "${@:1:prefix_count}" ;;
+    gh) check_gh ${assignment_words[@]+"${assignment_words[@]}"} ;;
   esac
   check_delete
   follow_cd
