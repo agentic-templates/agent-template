@@ -61,8 +61,9 @@ on.
   line of your state file, write `taken in: now` in its place, and read the issues and comments that the maintainer
   wrote on GitHub since the time you noted. Open or rewrite issues for each goal and idea, and for the cause of each
   correction, without stopping the builders that run. Treat each mistake of your own or of an agent that the loop could
-  make again, such as a time that you guessed, as a correction, even when you fixed the mistake itself. If a
-  correction changes the issue of a running builder, give the builder the change.
+  make again, such as a time that you guessed, as a correction, even when you fixed the mistake itself. Add the
+  `priority` label to each issue for the cause of a correction, and to each issue that the maintainer asks to have
+  built first. If a correction changes the issue of a running builder, give the builder the change.
 - **Answers.** For each issue with `needs-decision` that the maintainer answered in a comment, carry out the answer,
   as "Labels" in `docs/planning.md` describes.
 - **Other people's issues.** Triage them, as "Triage issues that others open" in `docs/planning.md` describes.

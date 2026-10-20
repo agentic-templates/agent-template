@@ -2,9 +2,10 @@
 # Takes the next ready issue that a builder can start: scripts/take-next-issue [<issue to skip>...]
 # It considers each ready issue that has exactly one type label, no status label, no assignee and no open sub-issues,
 # whose blocking issues are all closed, for which scripts/pull-request-state prints none or left behind, and none of
-# whose branches a worktree has checked out. It skips the issues it's given. It assigns the lowest-numbered of them to the current account, and then checks that the issue
-# still has ready, because someone may have removed the label since the script listed the ready issues. If it
-# doesn't, the script removes the assignment and takes the next one.
+# whose branches a worktree has checked out. It skips the issues it's given. It assigns the first of them to the current
+# account: the lowest-numbered of those with the priority label, or of all of them when none has it. It then checks
+# that the issue still has ready, because someone may have removed the label since the script listed the ready issues.
+# If it doesn't, the script removes the assignment and takes the next one.
 # It prints one line: the issue's number and the first of these kinds that fits it, or none when no issue fits.
 # - research: it has the research label.
 # - parent: it has sub-issues, which are all closed.
@@ -31,8 +32,8 @@ for skipped_issue in "$@"; do
   fi
 done
 
-# Prints, lowest first, the numbers of the issues that a builder can start, judged by everything but their pull
-# requests, leaving out the issues to skip: issues_to_consider [<issue to skip>...]
+# Prints the numbers of the issues that a builder can start, in the order of ready_issue_numbers, judged by everything
+# but their pull requests, leaving out the issues to skip: issues_to_consider [<issue to skip>...]
 issues_to_consider() {
   local issue
   while IFS= read -r issue; do
