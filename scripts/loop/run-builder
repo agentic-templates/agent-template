@@ -650,7 +650,8 @@ def write_brief(issue: dict[str, Any], kind: str, message: str, run_brief: str, 
 def run_claude(
     brief: str, account: Account, settings: agent_log.AgentSettings, folders: Folders, *, hand_off_type: str | None
 ) -> None:
-    """Runs claude with the type's settings until it ends, and writes its result to report.md in the run folder.
+    """Runs claude with the type's settings until it ends, and writes the text of its results to report.md in the run
+    folder.
     claude sends the tokens of its requests to the loop's receiver, which this starts if it isn't running. With
     hand_off_type, scripts/hooks/hand-off tells the agent to hand off its work once its context grows too long, with the
     steps of that agent type."""
@@ -675,7 +676,7 @@ def run_claude(
         *option("--disallowedTools", settings.disallowed_tools),
         *option("--max-turns", settings.max_turns),
     ]
-    result: dict[str, Any] | None = None
+    results: list[dict[str, Any]] = []
     with (
         (folders.run / "events.jsonl").open("w") as events,
         (folders.run / "stderr.log").open("w") as errors,
@@ -702,14 +703,16 @@ def run_claude(
                     "needs permission."
                 )
             if event.get("type") == "result":
-                result = event
+                results.append(event)
         exit_code = process.wait()
-    if result is None:
+    if not results:
         raise Stop(f"claude ended with code {exit_code} and gave no result. stderr.log in the run folder says why.")
-    problem = claude_problem(result, exit_code)
+    problem = claude_problem(results[-1], exit_code)
     if problem:
         raise Stop(problem)
-    (folders.run / "report.md").write_text(str(result.get("result", "")))
+    # claude gives a result each time the agent ends a turn, also when it replies to the notification of a background
+    # task that ends before or after its report, so the report can lie in any result.
+    (folders.run / "report.md").write_text("\n\n".join(str(result.get("result", "")) for result in results))
 
 
 def run_codex(brief: str, account: Account, folders: Folders) -> None:
