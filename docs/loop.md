@@ -112,7 +112,8 @@ Start an agent for each ready issue, as far as "Read the meter" allows:
    background agent of that type. Don't give it a model, so that it runs at its type's model and effort. After its
    prompt's first line, name the files to start from if you know them.
 
-After each issue, go back to step 1. Start an auditor too when "Start a retrospective" says so.
+After each issue, go back to step 1. Start an auditor too when "Start a retrospective" says so, and a focused audit
+when "Start a focused audit" says so.
 
 ### Land
 
@@ -158,6 +159,7 @@ Besides the `session:` and `pid:` lines, it holds:
 - each running agent, with its issue or pull request, and its agent id or `scripts/loop/run-builder` task
 - the drafts that a reviewer has read
 - the issues whose builder stopped once
+- the focused audits since the last retrospective, each with its finding, its issue and the time it started
 - the `BLOCKED` pull requests from your last pass
 - what you do next, and the open questions
 
@@ -169,11 +171,13 @@ heartbeat and schedule it again, because a recurring prompt ends 7 days after yo
 ## Read the meter
 
 For each account in `.loop/accounts.json`, `scripts/loop/meter` prints a line that ends with the account's advice.
-Its last line starts with `machine`, and gives your context size and whether a retrospective is due. The line before
-it starts with `agents`, and gives the context size of each agent that runs. Run the meter once in each pass, before
-you launch.
+The meter's last line starts with `machine`, and gives your context size and whether a retrospective is due. Of the
+parts that ` | ` separates on the line, each one that starts with `audit due:` names a finding for a focused audit.
+The line before it starts with `agents`, and gives the context size of each agent that runs. Run the meter once in
+each pass, before you launch.
 
-`scripts/loop/meter --wake` ends, and so wakes you, when an account's advice changes, and when a hook tells an agent
+`scripts/loop/meter --wake` ends, and so wakes you, when an account's advice changes, when a reading has a finding for
+a focused audit whose subject wasn't on the last `machine` line that the meter printed, and when a hook tells an agent
 to hand off its work, so that you can plan the agent that takes over. Start it again as a background task each time it
 ends.
 
@@ -237,3 +241,29 @@ request is still open.
 Each agent file in `.claude/agents` names the full ID of its model, such as `claude-opus-5-5`, and not an alias such
 as `opus`, so that its type keeps its model when Anthropic points the alias at a newer one. A retrospective that tests
 a newer model moves a type to it by changing the ID in the type's file.
+
+## Start a focused audit
+
+For each part of the meter's `machine` line that starts with `audit due:`, start a focused audit of its finding,
+without waiting for the next retrospective:
+
+1. Skip a finding when the state file's list of focused audits has an audit of its subject, whether the audit's issue
+   is open or closed. A finding's subject is one of these:
+   - an issue's build, which the finding names by the builder's type and issue, such as `builder #208 took 41 min`
+   - the waits of all heavy commands for room on the machine, in a finding that starts with `heavy commands waited`
+   - the time of `scripts/check`, in a finding that starts with `scripts/check's passing runs`
+
+   Skip a finding of the waits only when the audit of the waits started in the last 24 hours. That finding names only
+   the waits of the last hour, so on a later day it can come from a new cause.
+2. Open an issue with the label `research` that quotes the finding, and asks the researcher to find its cause and to
+   open an issue for each fix. Say in it that the logs are in the `.loop` folder of the main checkout. Add `ready` to
+   it, because agents take instructions only from issues with that label. Assign it to yourself, so that
+   `scripts/take-next-issue` doesn't give it to anyone.
+3. Start a `researcher` agent on it, as step 3 of "Launch" describes, with `<issue> research` as the line that names
+   its work. Choose its account only among the Claude accounts, because an agent on a Codex account runs in a
+   sandbox that can't reach GitHub, and so can't open an issue for each fix.
+4. Add the audit to the state file's list of focused audits, with the time it started.
+
+A focused audit doesn't count as a retrospective, so the meter goes on counting toward the next one. When an
+auditor's pull request merges, empty the state file's list of focused audits, because the retrospective looks back on
+the work that their findings came from.
