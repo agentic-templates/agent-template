@@ -46,9 +46,10 @@ describes:
 - On another account, write the message to a file in a folder of your own in `.loop/`. Then run the command that
   "Read the meter" gives for the account, and add `--message <file>`. For a builder that fixes a reviewer's errors,
   give the command `<issue> other` as its first arguments, where `<issue>` is the old builder's issue. For a builder
-  that takes over a hand-off, give the command the old builder's own `<issue> <kind>` line instead, such as
-  `12 left behind 34`, which the `issue` and `kind` of the old builder's start line in `.loop/agents.jsonl` give. If
-  that start line has no kind, because the old builder started on a pull request, give `<issue> other` there too.
+  or a researcher that takes over a hand-off, give the command the `issue` and the `kind` of the old agent's start
+  line in `.loop/agents.jsonl` in place of `<issue> other`, such as `12 left behind 34` for the issue 12 and the kind
+  `left behind 34`. If that start line has no kind, because the old builder started on a pull request, give
+  `<issue> other` there too.
 
 Start the prompt of each agent of the types `builder`, `builder-small`, `builder-deep`, `researcher` and `reviewer`
 with a line that names its work: for an issue, the line that `scripts/take-next-issue` printed, and for a pull
@@ -61,21 +62,24 @@ on.
   line of your state file, write `taken in: now` in its place, and read the issues and comments that the maintainer
   wrote on GitHub since the time you noted. Open or rewrite issues for each goal and idea, and for the cause of each
   correction, without stopping the builders that run. Treat each mistake of your own or of an agent that the loop could
-  make again, such as a time that you guessed, as a correction, even when you fixed the mistake itself. If a
-  correction changes the issue of a running builder, give the builder the change.
+  make again, such as a time that you guessed, as a correction, even when you fixed the mistake itself. Add the
+  `priority` label to each issue for the cause of a correction, and to each issue that the maintainer asks to have
+  built first. If a correction changes the issue of a running builder, give the builder the change.
 - **Answers.** For each issue with `needs-decision` that the maintainer answered in a comment, carry out the answer,
   as "Labels" in `docs/planning.md` describes.
 - **Other people's issues.** Triage them, as "Triage issues that others open" in `docs/planning.md` describes.
 - **Reports.** When an agent ends, read its report, and act on what it asks of you. Of the items that it lists for the
   maintainer, decide each one that "Decide or ask" in AGENTS.md lets you decide and that no hook leaves to the
   maintainer. Ask about the rest as "Ask the maintainer" below describes.
-- **Hand-offs.** When a builder or the auditor reports that it handed off its work, because its context grew too
-  long, run `scripts/clear-worktrees <issue>`, so that a new agent can check out the issue's branch. The auditor's
-  issue is the one that it opened for the retrospective. If the script exits with a code other than 0, it left the
-  worktree, and with it the issue's branch, in place. Then plan a builder's issue again, and for the auditor's issue,
-  ask the maintainer about the worktree in an issue with `needs-decision`. If the script exits with 0, start a new
-  agent of the same type, and give it the link to the hand-off comment as a message, as the start of "Work through
-  the cycle" describes.
+- **Hand-offs.** When an agent reports that it handed off its work, because its context grew too long, start a new
+  agent of the same type to take over, and give it a message, as the start of "Work through the cycle" describes:
+  - For a builder, the auditor or a researcher, give the new agent the link to the hand-off comment. For a builder or
+    the auditor, first run `scripts/clear-worktrees <issue>`, so that the new agent can check out the issue's branch.
+    The auditor's issue is the one that it opened for the retrospective. If the script exits with a code other than
+    0, it left the worktree, and with it the issue's branch, in place. In that case, start no new agent. Plan a
+    builder's issue again instead, and for the auditor's issue, open an issue with `needs-decision` that asks the
+    maintainer about the worktree.
+  - For a reviewer, give the new reviewer the old reviewer's report.
 - **Builders that stopped.** A builder that ends without a pull request, and without a report that says why, stopped
   before it finished, such as at a usage limit. If its issue is still open and assigned to you, run
   `scripts/clear-worktrees <issue>`, which saves its unfinished work on the issue's branch and removes its worktree.
@@ -182,11 +186,12 @@ to hand off its work, so that you can plan the agent that takes over. Start it a
 ends.
 
 Your own account is the Claude account in `.loop/accounts.json` whose `env` values match this session's
-environment, such as `CLAUDE_CONFIG_DIR`. For each builder and researcher, choose the account whose line has the
-lowest `week` percentage, among the accounts whose advice lets you start the agent. A Codex account builds only the
-kinds `research` and `other`. Start a builder of the type `builder-deep`, and each builder that takes over a hand-off,
-only on a Claude account. Start reviewers and the auditor on your own account, in your session. Each account's advice
-says what you can start on that account:
+environment, such as `CLAUDE_CONFIG_DIR`. For each builder and researcher, and for each reviewer of a pull request,
+choose the account whose line has the lowest `week` percentage, among the accounts whose advice lets you start the
+agent. A Codex account builds only the kinds `research` and `other`. Each reviewer of a pull request, each builder of
+the type `builder-deep`, and each builder or researcher that takes over a hand-off can run only on a Claude account.
+Start the auditor, and each reviewer that reviews no pull request, such as the reviewer of a release, on your own
+account, in your session. Each account's advice says what you can start on that account:
 
 - **go:** start any agent.
 - **watch:** keep the number of agents that run on the account from growing, and start no auditor.
@@ -197,13 +202,14 @@ says what you can start on that account:
 - **no reading:** start nothing on the account, and fix what the account's line names, or ask the maintainer if the
   fix needs them.
 
-To start an agent for an issue on another account, run one of these commands as a background task, with the line
-that `scripts/take-next-issue` printed as `<issue> <kind>`. Its last line says how the run ended, and where the
-agent's report is.
+To start an agent on another account, run one of these commands as a background task. For an issue, give the line
+that `scripts/take-next-issue` printed in place of `<issue> <kind>`. The command's last line says how the run ended,
+and where the agent's report is.
 
-- `scripts/loop/run-builder <issue> <kind> --tool codex --account <name>` for a Codex account
-- `scripts/loop/run-builder <issue> <kind> --tool claude --account <name> --type <type>` for a Claude account, with
-  the type that fits the issue, as step 3 of "Launch" chooses it
+- `scripts/loop/run-builder <issue> <kind> --tool codex --account <name>` for an issue on a Codex account
+- `scripts/loop/run-builder <issue> <kind> --tool claude --account <name> --type <type>` for an issue on a Claude
+  account, with the type that fits the issue, as step 3 of "Launch" chooses it
+- `scripts/loop/run-builder --review <pull request> --account <name>` for a reviewer of a pull request
 
 If no account can take the issue that `scripts/take-next-issue` gave you, remove your assignment from it. Then run
 the script again, followed by the number of each issue that no account can take, such as
@@ -236,7 +242,13 @@ issue where it wrote one, send the maintainer a push notification with the issue
 ## Start a retrospective
 
 When the meter's `machine` line says `retrospective due`, start an `auditor` agent, unless one runs or its pull
-request is still open.
+request is still open. When the part names a new model behind an alias, as `retrospective due: fable names
+claude-fable-5-2, which no retrospective tested` does for the alias `fable`, give the auditor the model's full ID in
+its prompt.
+
+A retrospective for a new model tests it on the orchestrator, `builder-deep` and the auditor, and on each other type
+that runs at `max` effort. Its pull request adds the model to `.claude/tested-models.json` with the pull request's
+number, even when every type keeps its model. The maintainer can also add a model to the list, to skip its test.
 
 Each agent file in `.claude/agents` names the full ID of its model, such as `claude-opus-5-5`, and not an alias such
 as `opus`, so that its type keeps its model when Anthropic points the alias at a newer one. A retrospective that tests

@@ -71,6 +71,7 @@ needs-triage|fbca04|Someone outside the project opened it, and nobody has accept
 needs-breakdown|f9d0c4|Accepted, but too big for one pull request. Split it before building
 needs-decision|d876e3|Waiting for a maintainer to answer a question or make a decision
 ready|0e8a16|It meets the definition of ready, so the loop builds it
+priority|b60205|The loop builds it before the ready issues without this label
 dependencies|0366d6|Dependabot's version updates
 retrospective|5319e7|A retrospective's pull request. scripts/loop/meter adds up the agents' hours since the newest one
 LABELS

@@ -145,6 +145,8 @@ class MeterTest(unittest.TestCase):
             self.addCleanup(patcher.stop)
         self.answer("claude", [usage_output(8)])
         self.answer("gh", github_answer())
+        # A reading of the models from now, so that the meter sends no requests for them
+        (self.loop / "models.json").write_text(json.dumps({"at": NOW.isoformat(), "models": {}, "problems": {}}))
 
     def answer(self, tool: str, answers: Any) -> None:
         (self.standins / f"{tool}.json").write_text(json.dumps(answers))

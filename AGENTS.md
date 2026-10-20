@@ -46,7 +46,7 @@ When a request doesn't fit this direction, say so, and ask the maintainer whethe
 - `scripts/check`: runs the checks that CI runs on the code.
 - `scripts/loop/meter`: prints the usage of each Claude and Codex account that `.loop/accounts.json` lists, and advises whether to start more work. `scripts/loop/meter --help` says how to read it.
 - `scripts/loop/claude-with-events`: the command that the maintainer starts the orchestrator with. It runs `claude` with the arguments it's given, and has it send the tokens of each request to `.loop/requests.jsonl`, so that `scripts/loop/report` counts the agents' exact output tokens.
-- `scripts/loop/run-builder <issue> <kind> --tool claude --type <agent type>`, or `--tool codex`: starts a builder for the issue on an account that `.loop/accounts.json` lists, in a worktree of its own, and says where the builder's report is. `<issue> <kind>` is the line that `scripts/take-next-issue` printed. A Claude builder runs at the model and effort of its type. `scripts/loop/run-builder --help` says which account it picks and what a Codex builder can do.
+- `scripts/loop/run-builder <issue> <kind> --tool claude --type <agent type>`, or `--tool codex`: starts a builder for the issue on an account that `.loop/accounts.json` lists, in a worktree of its own, and says where the builder's report is. `<issue> <kind>` is the line that `scripts/take-next-issue` printed. A Claude builder runs at the model and effort of its type. With `--review <pull request>` in place of `<issue> <kind>`, `--tool` and `--type`, it starts a reviewer for the pull request instead. `scripts/loop/run-builder --help` says which account it picks and what a Codex builder can do.
 - `scripts/loop/consequential`: lists the files of the branch's change that a reviewer reads before the change merges: the rules, the scripts and the files that keep agents safe.
 - `scripts/loop/run-heavy <command> [<argument>...]`: runs a heavy command, such as a build or tests, once the machine has room for it, so that parallel builders don't crowd the machine. `scripts/check`, `scripts/test-scripts` and `scripts/test-check` run through it by themselves. `scripts/loop/run-heavy --help` says how it decides.
 - `scripts/loop/run-heavy scripts/loop/run-tests`: runs the tests of the Python scripts, which `scripts/check` runs too.
@@ -71,6 +71,8 @@ A status label says what an issue is waiting for. The status labels are:
 - `needs-decision`: waiting for a maintainer to answer a question or make a decision.
 
 The loop builds the issues that have the `ready` label, which isn't a status label. An issue gets the label once it meets "Definition of ready" in `docs/planning.md`.
+
+`scripts/take-next-issue` takes the ready issues that have the `priority` label before the others, the lowest-numbered first in each group.
 
 The `retrospective` label marks the pull request of a retrospective. `scripts/loop/meter` says that the next retrospective is due once the agents have used a set number of output tokens since the newest such pull request merged. Until a retrospective sets that number, the meter counts the hours that the agents worked instead.
 
