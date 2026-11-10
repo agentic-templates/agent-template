@@ -256,14 +256,27 @@ expect_record "When the answer can't be saved" "$page_hash"
 new_case 0
 run_fresh_reader
 expect_result "When it gets no argument" fails \
-  "error: scripts/fresh-reader takes two arguments, the page's reader and the page's path, as in scripts/fresh-reader \"a developer who wants to use this project\" README.md, and it got 0."
+  "error: scripts/fresh-reader takes two arguments, the page's reader and the page's path, as in scripts/fresh-reader \"a developer who wants to use this project\" README.md, and a third one, the path of the posted version, when the page replaces one. It got 0."
 expect_calls "When it gets no argument" ""
 
 new_case 0
 run_fresh_reader docs/expenses.md
 expect_result "When it gets only the page" fails \
-  "error: scripts/fresh-reader takes two arguments, the page's reader and the page's path, as in scripts/fresh-reader \"a developer who wants to use this project\" README.md, and it got 1."
+  "error: scripts/fresh-reader takes two arguments, the page's reader and the page's path, as in scripts/fresh-reader \"a developer who wants to use this project\" README.md, and a third one, the path of the posted version, when the page replaces one. It got 1."
 expect_calls "When it gets only the page" ""
+
+new_case 0
+run_fresh_reader "$reader" docs/expenses.md docs/expenses.md "a fourth argument"
+expect_result "When it gets four arguments" fails \
+  "error: scripts/fresh-reader takes two arguments, the page's reader and the page's path, as in scripts/fresh-reader \"a developer who wants to use this project\" README.md, and a third one, the path of the posted version, when the page replaces one. It got 4."
+expect_calls "When it gets four arguments" ""
+
+new_case 0
+run_fresh_reader "$reader" docs/expenses.md posted.md
+expect_result "When the posted version doesn't exist" fails \
+  "error: posted.md isn't a file. Give the path of a file with the posted version, such as one that gh pr view <number> --json body --jq .body >file writes."
+expect_calls "When the posted version doesn't exist" ""
+expect_record "When the posted version doesn't exist"
 
 new_case 0
 run_fresh_reader "$reader" docs/missing.md
@@ -377,6 +390,33 @@ expect_input "When the folder isn't in a git repository" "$prompt"$'\n\n'"# Note
 run_fresh_reader "$reader" notes.md
 expect_result "When the same reader reads the page again outside a git repository" succeeds \
   "The reader's answer from run 2"
+
+# A new description of a pull request rewrites the first line of the posted one, keeps the second and adds a third. The
+# reader gets the lines that it adds or rewrites compared with the posted one, outside a repository and in one whose
+# branch doesn't change the description.
+posted_description=$(printf '%s\n' "Skips the expenses that an import already added." "It compares the date and the amount.")
+description=$(printf '%s\n' "Skips the expenses that an earlier import added." "It compares the date and the amount." \
+  "It leaves an expense in a foreign currency out of the total.")
+description_input="$prompt_with_new_lines"$'\n\n'"$description"$'\n\n'"The lines that the change added or rewrote:"$'\n\n'"Skips the expenses that an earlier import added."$'\n'"It leaves an expense in a foreign currency out of the total."
+printf '%s\n' "$posted_description" >"$base/posted.md"
+printf '%s\n' "$description" >"$base/description.md"
+new_case 0
+run_folder=$base
+run_fresh_reader "$reader" description.md posted.md
+expect_result "When a new description outside a repository replaces a posted one" succeeds "The reader's answer from run 1"
+expect_input "When a new description outside a repository replaces a posted one" "$description_input"
+new_case 0
+run_fresh_reader "$reader" "$base/description.md" "$base/posted.md"
+expect_input "When a new description in a repository replaces a posted one" "$description_input"
+expect_record "When a new description in a repository replaces a posted one" "$(git hash-object "$base/description.md")"
+new_case 0
+run_fresh_reader "$reader" "$base/posted.md" "$base/posted.md"
+expect_input "When the new description is the posted one" "$prompt"$'\n\n'"$posted_description"
+# A page that the branch changed gets the lines that it adds compared with the posted version, not with main.
+new_case 0
+run_fresh_reader "$reader" docs/spending.md "$base/description.md"
+expect_input "When the branch changed the page and a posted version is given" \
+  "$prompt_with_new_lines"$'\n\n'"$renamed_text"$'\n\n'"The lines that the change added or rewrote:"$'\n\n'"$renamed_text"
 
 new_case 0
 git -C "$base/project" update-ref -d refs/remotes/origin/main

@@ -35,6 +35,15 @@ gives_body() {
   [[ -n $body_source ]]
 }
 
+# For gh pr edit, prints how to give the reader the posted description, so that the reader gets the lines that the
+# edit adds or rewrites, as a round of fixes tends to add to a description.
+posted_version_step() {
+  if [[ ${command_words[1]} != pr || ${command_words[2]} != edit ]]; then
+    return 0
+  fi
+  echo "Save the posted description first with gh pr view <number> --json body --jq .body ><posted file>, and give the reader <posted file> as a third argument."
+}
+
 # Prints the message that blocks a command whose body no reader has read.
 unread_message() {
   local command="gh ${command_words[1]} ${command_words[2]}" reader="a developer who builds this issue"
@@ -45,11 +54,13 @@ unread_message() {
   if [[ $body_source == file && $body_file != - ]]; then
     echo "Blocked: no fresh reader has read this body as it is now. Give the body file to a reader, and $review_steps:"
     echo "scripts/fresh-reader \"$reader\" $body_file"
+    posted_version_step
     echo "If you change the body after the reader read it, run the reader again. Then run $command again."
     return 0
   fi
   echo "Blocked: no fresh reader has read this body as it is now. Write the body to a file, give the file to a reader, and $review_steps:"
   echo "scripts/fresh-reader \"$reader\" <file>"
+  posted_version_step
   echo "If you change the body after the reader read it, run the reader again. Then run $command again with --body-file <file>."
 }
 
